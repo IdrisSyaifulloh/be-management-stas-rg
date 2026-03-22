@@ -1,10 +1,19 @@
 const path = require("path");
 const dotenv = require("dotenv");
 
-dotenv.config({ path: path.join(__dirname, "..", ".env") });
+const envRoot = path.join(__dirname, "..");
+const runtimeEnv = process.env.NODE_ENV || "development";
+
+// 1) Load base .env (local/shared defaults)
+dotenv.config({ path: path.join(envRoot, ".env") });
+
+// 2) In production, allow dedicated override from .env.production
+if (runtimeEnv === "production") {
+  dotenv.config({ path: path.join(envRoot, ".env.production"), override: true });
+}
 
 const env = {
-  nodeEnv: process.env.NODE_ENV || "development",
+  nodeEnv: runtimeEnv,
   port: Number(process.env.PORT || 3000),
   corsOrigin: process.env.CORS_ORIGIN || "http://localhost:5173",
   databaseUrl: process.env.DATABASE_URL || null,
