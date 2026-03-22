@@ -87,7 +87,21 @@ Perintah bantu:
 - Stop DB: `docker compose down`
 - Stop + hapus data volume: `docker compose down -v`
 
-## 5) Konvensi update (untuk penerus)
+## 4.1) TAH SETUP ENV PRODUCTION
+1. Copy template:
+   - Linux/macOS: `cp .env.production.example .env.production`
+   - Windows PowerShell: `Copy-Item .env.production.example .env.production`
+2. Isi nilai production:
+   - `CORS_ORIGIN` => domain frontend production (contoh: `https://app.stasrg.ac.id`)
+   - `DATABASE_URL` => koneksi PostgreSQL production
+3. Jalankan backend dengan mode production:
+   - `NODE_ENV=production npm start`
+
+Catatan:
+- Saat `NODE_ENV=production`, backend akan membaca `.env` lalu override dengan `.env.production`.
+- Simpan rahasia production di environment server (secret manager) dan jangan commit `.env.production` berisi kredensial nyata.
+
+## 5) JENG PENERUS IEU
 - Jangan tulis query SQL langsung berulang di banyak route; gunakan helper di `utils/`.
 - Tambah endpoint baru dengan pola:
   1. buat file route domain di `routes/api/`
@@ -99,7 +113,7 @@ Perintah bantu:
   3. route yang terdampak
   4. dokumentasi endpoint di README ini
 
-## 6) Roadmap jangka panjang (disarankan)
+## 6) Roadmap jangka panjang 
 - Pindah semua konsumsi frontend ke `/api/v1` bertahap.
 - Rapikan role guard (soft -> strict) secara bertahap setelah semua client konsisten kirim `x-user-role` dan `x-user-id`.
 - Tambahkan validasi request schema (contoh: Zod/Joi).
