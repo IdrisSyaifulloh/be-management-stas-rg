@@ -1,0 +1,324 @@
+const express = require("express");
+const asyncHandler = require("../../utils/asyncHandler");
+const { query } = require("../../db/pool");
+const { buildWhereClause } = require("../../utils/queryFilters");
+const { getSettingsAsync } = require("../../config/systemSettingsStore");
+const { extractRole } = require("../../utils/roleGuard");
+
+const router = express.Router();
+
+function parseDateOnly(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function inclusiveDays(startDate, endDate) {
+  const diffMs = endDate.getTime() - startDate.getTime();
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24)) + 1;
+}
+
+async function resolveStudentId(studentIdOrUserId) {
+  const result = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentIdOrUserId]);
+  if (result.rowCount === 0) return null;
+  return result.rows[0].id;
+}
+
+let notificationsReady = false;
+async function ensureNotificationsTable() {
+  if (notificationsReady) return;
+  await query(
+    `
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      sender_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      type TEXT NOT NULL DEFAULT 'pengumuman',
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    `
+  );
+  notificationsReady = true;
+}
+
+async function sendNotification(recipientUserId, title, body, senderUserId = null, type = "pengumuman") {
+  await ensureNotificationsTable();
+  const notificationId = `NTF-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  await query(
+    `
+    INSERT INTO notifications (id, recipient_user_id, sender_user_id, type, title, body)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    `,
+    [notificationId, recipientUserId, senderUserId, type, title, body]
+  );
+}
+
+router.get(
+  "/",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    const requestedStudentId = req.query.studentId;
+    const studentIdInput = requestedStudentId;
+    const { status } = req.query;
+    const resolvedStudentId = studentIdInput ? await resolveStudentId(String(studentIdInput)) : null;
+    if (studentIdInput && !resolvedStudentId) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const { whereClause, params } = buildWhereClause([
+      { value: status, sql: (index) => `lr.status = $${index}` },
+      { value: resolvedStudentId, sql: (index) => `lr.student_id = $${index}` }
+    ]);
+
+    const result = await query(
+      `
+      SELECT lr.id, lr.student_id, su.name AS student_name, su.initials AS student_initials,
+             s.nim, lr.project_id, rp.short_title AS project_name,
+             lr.periode_start, lr.periode_end, lr.durasi,
+             lr.alasan, lr.catatan, lr.tanggal_pengajuan, lr.status,
+             lr.reviewed_by, ru.name AS reviewed_by_name,
+             lr.reviewed_at, lr.review_note
+      FROM leave_requests lr
+      JOIN students s ON s.id = lr.student_id
+      JOIN users su ON su.id = s.user_id
+      LEFT JOIN research_projects rp ON rp.id = lr.project_id
+      LEFT JOIN users ru ON ru.id = lr.reviewed_by
+      ${whereClause}
+      ORDER BY lr.tanggal_pengajuan DESC, lr.id DESC
+      `,
+      params
+    );
+
+    res.json(result.rows);
+  })
+);
+
+router.post(
+  "/",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "mahasiswa") {
+      return res.status(403).json({ message: "Hanya mahasiswa yang dapat membuat pengajuan cuti." });
+    }
+
+    const {
+      id,
+      studentId,
+      projectId,
+      periodeStart,
+      periodeEnd,
+      alasan,
+      catatan,
+      tanggalPengajuan
+    } = req.body;
+
+    if (!id || !studentId || !periodeStart || !periodeEnd || !alasan || !tanggalPengajuan) {
+      return res.status(400).json({ message: "id, studentId, periodeStart, periodeEnd, alasan, tanggalPengajuan wajib diisi." });
+    }
+
+    const resolvedStudentId = await resolveStudentId(String(studentId));
+    if (!resolvedStudentId) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const startDate = parseDateOnly(periodeStart);
+    const endDate = parseDateOnly(periodeEnd);
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: "Format tanggal cuti tidak valid." });
+    }
+    if (endDate < startDate) {
+      return res.status(400).json({ message: "Tanggal selesai tidak boleh sebelum tanggal mulai." });
+    }
+
+    const requestedDays = inclusiveDays(startDate, endDate);
+    const settings = await getSettingsAsync();
+    const maxSemesterDays = Number(settings?.cuti?.maxSemesterDays || 0);
+    const maxMonthDays = Number(settings?.cuti?.maxMonthDays || 0);
+    const minAttendancePct = Number(settings?.cuti?.minAttendancePct || 0);
+
+    if (maxSemesterDays > 0 && requestedDays > maxSemesterDays) {
+      return res.status(400).json({ message: `Durasi cuti melebihi batas semester (${maxSemesterDays} hari).` });
+    }
+
+    if (maxMonthDays > 0 && requestedDays > maxMonthDays) {
+      return res.status(400).json({ message: `Durasi cuti melebihi batas bulanan (${maxMonthDays} hari).` });
+    }
+
+    const monthStart = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1));
+    const monthEnd = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth() + 1, 0));
+
+    const monthUsageResult = await query(
+      `
+      SELECT COALESCE(SUM(durasi), 0)::int AS used_days
+      FROM leave_requests
+      WHERE student_id = $1
+        AND status IN ('Menunggu', 'Disetujui')
+        AND periode_start <= $3
+        AND periode_end >= $2
+      `,
+      [resolvedStudentId, monthStart.toISOString().slice(0, 10), monthEnd.toISOString().slice(0, 10)]
+    );
+
+    const usedMonthDays = Number(monthUsageResult.rows[0]?.used_days || 0);
+    if (maxMonthDays > 0 && usedMonthDays + requestedDays > maxMonthDays) {
+      return res.status(400).json({
+        message: `Kuota cuti bulanan terlampaui. Sisa kuota bulan ini ${Math.max(0, maxMonthDays - usedMonthDays)} hari.`
+      });
+    }
+
+    const semesterUsageResult = await query(
+      `
+      SELECT COALESCE(SUM(durasi), 0)::int AS used_days
+      FROM leave_requests
+      WHERE student_id = $1
+        AND status IN ('Menunggu', 'Disetujui')
+        AND periode_start >= (CURRENT_DATE - INTERVAL '6 months')
+      `,
+      [resolvedStudentId]
+    );
+    const usedSemesterDays = Number(semesterUsageResult.rows[0]?.used_days || 0);
+    if (maxSemesterDays > 0 && usedSemesterDays + requestedDays > maxSemesterDays) {
+      return res.status(400).json({
+        message: `Kuota cuti semester terlampaui. Sisa kuota semester ${Math.max(0, maxSemesterDays - usedSemesterDays)} hari.`
+      });
+    }
+
+    if (minAttendancePct > 0) {
+      const attendanceResult = await query(
+        `
+        SELECT kehadiran, total_hari
+        FROM students
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [resolvedStudentId]
+      );
+      const studentRow = attendanceResult.rows[0] || {};
+      const totalHari = Number(studentRow.total_hari || 0);
+      const kehadiran = Number(studentRow.kehadiran || 0);
+      const attendancePct = totalHari > 0 ? (kehadiran / totalHari) * 100 : 100;
+      if (attendancePct < minAttendancePct) {
+        return res.status(400).json({
+          message: `Pengajuan ditolak. Kehadiran ${attendancePct.toFixed(1)}% masih di bawah batas minimum ${minAttendancePct}%.`
+        });
+      }
+    }
+
+    await query(
+      `
+      INSERT INTO leave_requests (
+        id, student_id, project_id, periode_start, periode_end, durasi,
+        alasan, catatan, tanggal_pengajuan, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Menunggu')
+      `,
+      [id, resolvedStudentId, projectId || null, periodeStart, periodeEnd, requestedDays, alasan, catatan || null, tanggalPengajuan]
+    );
+
+    const studentNameResult = await query(
+      `
+      SELECT u.name
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.id = $1
+      LIMIT 1
+      `,
+      [resolvedStudentId]
+    );
+    const studentName = studentNameResult.rows[0]?.name || "Mahasiswa";
+    const operatorsResult = await query("SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE");
+    await Promise.all(
+      operatorsResult.rows.map((row) =>
+        sendNotification(
+          row.id,
+          "Pengajuan Cuti Baru",
+          `${studentName} mengajukan cuti ${requestedDays} hari (${periodeStart} s.d. ${periodeEnd}).`,
+          null,
+          "cuti"
+        )
+      )
+    );
+
+    res.status(201).json({ message: "Pengajuan cuti berhasil dibuat." });
+  })
+);
+
+router.patch(
+  "/:id/status",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat mengubah status cuti." });
+    }
+
+    const { status, reviewedBy, reviewNote } = req.body;
+
+    if (!status || !["Menunggu", "Disetujui", "Ditolak"].includes(status)) {
+      return res.status(400).json({ message: "status harus Menunggu/Disetujui/Ditolak." });
+    }
+
+    const result = await query(
+      `
+      UPDATE leave_requests
+      SET status = $2,
+          reviewed_by = COALESCE($3, reviewed_by),
+          reviewed_at = NOW(),
+          review_note = COALESCE($4, review_note),
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING id
+      `,
+      [req.params.id, status, reviewedBy || null, reviewNote || null]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Pengajuan cuti tidak ditemukan." });
+    }
+
+    const leaveRow = await query(
+      `
+      SELECT s.user_id, u.name AS student_name
+      FROM leave_requests lr
+      JOIN students s ON s.id = lr.student_id
+      JOIN users u ON u.id = s.user_id
+      WHERE lr.id = $1
+      LIMIT 1
+      `,
+      [req.params.id]
+    );
+    const recipientUserId = leaveRow.rows[0]?.user_id;
+    if (recipientUserId) {
+      await sendNotification(
+        recipientUserId,
+        "Status Cuti Diperbarui",
+        `Pengajuan cuti Anda untuk ID ${req.params.id} telah ${status.toLowerCase()}.`,
+        reviewedBy || null,
+        "cuti"
+      );
+    }
+
+    res.json({ message: "Status cuti berhasil diperbarui." });
+  })
+);
+
+router.delete(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat menghapus pengajuan cuti." });
+    }
+
+    const result = await query("DELETE FROM leave_requests WHERE id = $1 RETURNING id", [req.params.id]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Pengajuan cuti tidak ditemukan." });
+    }
+
+    res.json({ message: "Pengajuan cuti berhasil dihapus." });
+  })
+);
+
+module.exports = router;
