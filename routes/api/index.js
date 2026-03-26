@@ -24,8 +24,8 @@ const router = express.Router();
 router.use("/health", healthRouter);
 router.use("/auth", authRouter);
 
-router.use("/students", requireRoleStrict(["operator"]), studentsRouter);
-router.use("/lecturers", requireRoleStrict(["operator"]), lecturersRouter);
+router.use("/students", requireRoleStrict(["operator", "dosen"]), studentsRouter);
+router.use("/lecturers", requireRoleStrict(["operator", "dosen"]), lecturersRouter);
 router.use("/research", researchRouter);
 router.use("/logbooks", logbooksRouter);
 router.use("/leave-requests", leaveRequestsRouter);

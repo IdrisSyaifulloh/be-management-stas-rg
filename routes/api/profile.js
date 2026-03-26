@@ -10,7 +10,7 @@ router.get(
     const { userId } = req.params;
     const result = await query(
       `
-      SELECT u.id, u.name, u.email, u.prodi, u.role, s.nim, s.phone, s.angkatan, s.status, s.pembimbing, s.bergabung
+      SELECT u.id, u.name, u.email, u.prodi, u.role, s.id AS student_id, s.nim, s.phone, s.angkatan, s.status, s.pembimbing, s.bergabung
       FROM users u
       LEFT JOIN students s ON s.user_id = u.id
       WHERE u.id = $1
