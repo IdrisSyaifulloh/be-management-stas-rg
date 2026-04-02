@@ -17,6 +17,7 @@ const profileRouter = require("./profile");
 const systemSettingsRouter = require("./systemSettings");
 const exportsRouter = require("./exports");
 const notificationsRouter = require("./notifications");
+const cleanupRouter = require("./cleanup");
 const { requireRoleSoft, requireRoleStrict } = require("../../utils/roleGuard");
 
 const router = express.Router();
@@ -39,5 +40,6 @@ router.use("/profile", profileRouter);
 router.use("/notifications", notificationsRouter);
 router.use("/system-settings", requireRoleSoft(["operator"]), systemSettingsRouter);
 router.use("/exports", requireRoleStrict(["operator"]), exportsRouter);
+router.use("/cleanup", requireRoleStrict(["operator"]), cleanupRouter);
 
 module.exports = router;

@@ -18,10 +18,6 @@ if (!envValidationResult.isValid) {
 
 var app = express();
 
-// view engine setup
-app.set('views', path.join(__dirname, 'views'));
-app.set('view engine', 'jade');
-
 app.use(logger('dev'));
 app.use(cors({ origin: env.corsOrigin }));
 app.use(express.json({ limit: '6mb' }));
@@ -46,6 +42,13 @@ app.use((req, res, next) => {
 
   next();
 });
+
+// ======================================================
+// START CLEANUP JOB FOR WITHDRAWN STUDENTS
+// ======================================================
+// This automatically deletes student accounts 30 days after withdrawal
+const cleanupJob = require('./jobs/cleanupWithdrawnStudents');
+cleanupJob.startMonitoring();
 
 
 // ======================================================
