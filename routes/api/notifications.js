@@ -139,7 +139,7 @@ router.post(
 );
 
 router.patch(
-  "/:id/read",
+  "/:id/read/all",
   asyncHandler(async (req, res) => {
     await ensureNotificationsTable();
 
@@ -173,7 +173,7 @@ router.patch(
 );
 
 router.patch(
-  "/read-all",
+  "/read",
   asyncHandler(async (req, res) => {
     await ensureNotificationsTable();
 

@@ -1,6 +1,7 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
+const bcrypt = require("bcrypt");
 
 const router = express.Router();
 
@@ -67,14 +68,15 @@ router.put(
       return res.status(400).json({ message: "Password baru wajib diisi." });
     }
 
+    const passwordHash = await bcrypt.hash(newPassword, 10);
     await query(
       `
       UPDATE users
-      SET password_hash = md5($2),
+      SET password_hash = $2,
           updated_at = NOW()
       WHERE id = $1
       `,
-      [userId, newPassword]
+      [userId, passwordHash]
     );
 
     res.json({ message: "Password berhasil diperbarui." });

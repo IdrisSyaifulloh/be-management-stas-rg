@@ -1,6 +1,7 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
+const bcrypt = require("bcrypt");
 
 const router = express.Router();
 
@@ -70,12 +71,13 @@ router.post(
 
     await query("BEGIN");
     try {
+      const passwordHash = await bcrypt.hash(password, 10);
       await query(
         `
         INSERT INTO users (id, name, initials, role, email, password_hash)
-        VALUES ($1, $2, $3, 'dosen', $4, md5($5))
+        VALUES ($1, $2, $3, 'dosen', $4, $5)
         `,
-        [id, name, initials, email || null, password]
+        [id, name, initials, email || null, passwordHash]
       );
 
       await query(
@@ -108,18 +110,23 @@ router.put(
 
     await query("BEGIN");
     try {
+      let passwordHash = null;
+      if (password && String(password).trim() !== '') {
+        passwordHash = await bcrypt.hash(password, 10);
+      }
+
       const userResult = await query(
         `
         UPDATE users
         SET name = COALESCE($2, name),
             initials = COALESCE($3, initials),
             email = COALESCE($4, email),
-            password_hash = COALESCE(md5(NULLIF($5, '')), password_hash),
+            password_hash = COALESCE($5, password_hash),
             updated_at = NOW()
         WHERE id = $1 AND role = 'dosen'
         RETURNING id
         `,
-        [id, name, initials, email, password || null]
+        [id, name, initials, email, passwordHash]
       );
 
       if (userResult.rowCount === 0) {
