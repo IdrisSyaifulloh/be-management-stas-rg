@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS students (
   logbook_count INTEGER NOT NULL DEFAULT 0,
   jam_minggu_ini INTEGER,
   jam_minggu_target INTEGER,
+  withdrawal_at TIMESTAMPTZ,
+  scheduled_deletion_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

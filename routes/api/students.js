@@ -10,11 +10,20 @@ router.get(
   asyncHandler(async (req, res) => {
     const result = await query(
       `
-      SELECT s.id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
+      SELECT s.id, s.user_id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
              s.status, s.tipe, s.bergabung, s.pembimbing,
-             s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
+             s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target,
+             COALESCE(
+               array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
+               ARRAY[]::text[]
+             ) as research_projects
       FROM students s
       JOIN users u ON u.id = s.user_id
+      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+      LEFT JOIN research_projects rp ON rp.id = rm.project_id
+      GROUP BY s.id, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
+               s.status, s.tipe, s.bergabung, s.pembimbing,
+               s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
       ORDER BY u.name ASC
       `
     );
@@ -28,12 +37,21 @@ router.get(
   asyncHandler(async (req, res) => {
     const result = await query(
       `
-      SELECT s.id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
+      SELECT s.id, s.user_id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
              s.status, s.tipe, s.bergabung, s.pembimbing,
-             s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
+             s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target,
+             COALESCE(
+               array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
+               ARRAY[]::text[]
+             ) as research_projects
       FROM students s
       JOIN users u ON u.id = s.user_id
+      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+      LEFT JOIN research_projects rp ON rp.id = rm.project_id
       WHERE s.id = $1
+      GROUP BY s.id, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
+               s.status, s.tipe, s.bergabung, s.pembimbing,
+               s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
       `,
       [req.params.id]
     );

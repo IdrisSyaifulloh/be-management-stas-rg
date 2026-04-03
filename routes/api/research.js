@@ -179,6 +179,8 @@ router.get(
       [req.params.id]
     );
 
+    console.log('[GET /research/:id/members] Result:', result.rows);
+
     res.json(result.rows);
   })
 );
@@ -439,7 +441,35 @@ router.post(
       return res.status(400).json({ message: "userId dan memberType wajib diisi." });
     }
 
-    await query(
+    // Validate that only one "Ketua" is allowed per project AND must be Dosen
+    if (peran && peran.toLowerCase().includes("ketua")) {
+      const existingKetua = await query(
+        `SELECT user_id, peran, member_type FROM research_memberships WHERE project_id = $1 AND LOWER(peran) LIKE '%ketua%'`,
+        [req.params.id]
+      );
+      if (existingKetua.rowCount > 0) {
+        return res.status(400).json({
+          message: `Hanya boleh ada 1 Ketua per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
+        });
+      }
+      // Ketua must be Dosen, not Mahasiswa
+      if (memberType !== "Dosen") {
+        return res.status(400).json({
+          message: "Ketua tim wajib Dosen. Mahasiswa tidak bisa menjadi Ketua."
+        });
+      }
+    }
+
+    console.log('[POST /research/:id/members] Payload:', {
+      projectId: req.params.id,
+      userId,
+      memberType,
+      peran,
+      status,
+      bergabung
+    });
+
+    const insertResult = await query(
       `
       INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -448,9 +478,12 @@ router.post(
                     peran = EXCLUDED.peran,
                     status = EXCLUDED.status,
                     bergabung = EXCLUDED.bergabung
+      RETURNING project_id, user_id, member_type, peran, status
       `,
       [req.params.id, userId, memberType, peran || null, status, bergabung || null]
     );
+
+    console.log('[POST /research/:id/members] Insert Result:', insertResult.rows[0]);
 
     res.status(201).json({ message: "Anggota riset berhasil disimpan." });
   })
@@ -469,6 +502,25 @@ router.patch(
     }
 
     const { memberType, peran, status, bergabung } = req.body;
+
+    // Validate that only one "Ketua" is allowed per project AND must be Dosen
+    if (peran && peran.toLowerCase().includes("ketua")) {
+      const existingKetua = await query(
+        `SELECT user_id, peran, member_type FROM research_memberships WHERE project_id = $1 AND LOWER(peran) LIKE '%ketua%' AND user_id != $2`,
+        [req.params.id, req.params.userId]
+      );
+      if (existingKetua.rowCount > 0) {
+        return res.status(400).json({
+          message: `Hanya boleh ada 1 Ketua per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
+        });
+      }
+      // Ketua must be Dosen, not Mahasiswa
+      if (memberType !== "Dosen") {
+        return res.status(400).json({
+          message: "Ketua tim wajib Dosen. Mahasiswa tidak bisa menjadi Ketua."
+        });
+      }
+    }
 
     const result = await query(
       `

@@ -45,7 +45,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const result = await query(
       `
-      SELECT l.id, l.nip, u.name, u.initials, u.email,
+      SELECT l.id, l.user_id, l.nip, u.name, u.initials, u.email,
              l.departemen, l.jabatan, l.keahlian,
              l.riset_dipimpin, l.riset_diikuti,
              l.status, l.bergabung, l.mahasiswa_count
