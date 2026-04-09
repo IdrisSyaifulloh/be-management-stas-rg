@@ -10,8 +10,17 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
-    const studentId = role === "mahasiswa" ? req.authUser?.id : req.query.studentId;
+    let studentId = role === "mahasiswa" ? req.authUser?.id : req.query.studentId;
     const { projectId } = req.query;
+
+    // Resolve studentId if it's actually a user_id
+    if (studentId) {
+      const studentCheck = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentId]);
+      if (studentCheck.rowCount > 0) {
+        studentId = studentCheck.rows[0].id;
+      }
+    }
+
     const { whereClause, params } = buildWhereClause([
       { value: studentId, sql: (index) => `le.student_id = $${index}` },
       { value: projectId, sql: (index) => `le.project_id = $${index}` }
@@ -93,8 +102,18 @@ router.post(
       return res.status(400).json({ message: "id, studentId, date, title, description wajib diisi." });
     }
 
+    // Validate against logged-in user (frontend sends user_id as studentId)
     if (String(studentId) !== String(req.authUser?.id)) {
       return res.status(403).json({ message: "studentId tidak sesuai akun login." });
+    }
+
+    // Resolve student_id: check if studentId is actually a user_id and find the real student.id
+    let resolvedStudentId = studentId;
+    const studentCheck = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentId]);
+    if (studentCheck.rowCount > 0) {
+      resolvedStudentId = studentCheck.rows[0].id;
+    } else {
+      return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
     }
 
     await query(
@@ -103,7 +122,7 @@ router.post(
         id, student_id, project_id, date, title, description, output, kendala, has_attachment
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
       `,
-      [id, studentId, projectId || null, date, title, description, output || null, kendala || null, Boolean(hasAttachment)]
+      [id, resolvedStudentId, projectId || null, date, title, description, output || null, kendala || null, Boolean(hasAttachment)]
     );
 
     res.status(201).json({ message: "Entri logbook berhasil ditambahkan." });
