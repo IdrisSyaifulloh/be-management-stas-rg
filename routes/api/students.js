@@ -238,7 +238,25 @@ router.put(
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
-    const result = await query("DELETE FROM users WHERE id = $1 AND role = 'mahasiswa' RETURNING id", [req.params.id]);
+    // Coba hapus berdasarkan user_id terlebih dahulu
+    let result = await query(
+      "DELETE FROM users WHERE id = $1 AND role = 'mahasiswa' RETURNING id",
+      [req.params.id]
+    );
+
+    // Jika tidak ketemu, coba cari berdasarkan student_id
+    if (result.rowCount === 0) {
+      const studentCheck = await query(
+        "SELECT user_id FROM students WHERE id = $1",
+        [req.params.id]
+      );
+      if (studentCheck.rowCount > 0) {
+        result = await query(
+          "DELETE FROM users WHERE id = $1 AND role = 'mahasiswa' RETURNING id",
+          [studentCheck.rows[0].user_id]
+        );
+      }
+    }
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
