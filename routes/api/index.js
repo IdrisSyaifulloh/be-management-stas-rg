@@ -39,7 +39,7 @@ router.use("/attendance", attendanceRouter);
 router.use("/draft-reports", draftReportsRouter);
 router.use("/profile", profileRouter);
 router.use("/notifications", notificationsRouter);
-router.use("/system-settings", requireRoleSoft(["operator"]), systemSettingsRouter);
+router.use("/system-settings", systemSettingsRouter);
 router.use("/exports", requireRoleStrict(["operator"]), exportsRouter);
 router.use("/cleanup", requireRoleStrict(["operator"]), cleanupRouter);
 router.use("/monitoring", requireRoleStrict(["operator"]), monitoringRouter);

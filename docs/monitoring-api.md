@@ -57,14 +57,47 @@ Menampilkan daftar mahasiswa yang:
    - Target default: 4 entry per bulan.
    - Hasil diurutkan dari yang paling sedikit logbooknya.
 
+## Progress Board - Lampiran (Attachment Link)
+
+### Overview
+Fitur untuk menambahkan link lampiran (Google Drive, PDF, dll) ke progress board riset.
+
+### Database Changes
+**File:** `db/migrations/002_add_attachment_link.sql`
+- Added `attachment_link TEXT` column to `research_projects` table
+
+### API Changes
+
+#### GET `/api/research` & `/api/research/:id`
+- Response now includes `attachment_link` field
+
+#### PUT `/api/research/:id`
+- Accepts `attachmentLink` in request body
+- Example payload:
+```json
+{
+  "attachmentLink": "https://drive.google.com/file/d/xxx"
+}
+```
+
+### Frontend Changes
+**File:** `src/app/components/SharedBoardView.tsx`
+- Added attachment link section in progress board
+- Edit/Save functionality with inline input
+- Clickable link to open attachment in new tab
+
 ## Files Modified/Created
 
 | File | Status | Purpose |
 |------|--------|---------|
 | `routes/api/monitoring.js` | NEW | Endpoint monitoring aktivitas |
 | `routes/api/index.js` | MODIFIED | Register monitoring router |
+| `routes/api/research.js` | MODIFIED | Added attachment_link to CRUD |
+| `db/migrations/002_add_attachment_link.sql` | NEW | Add attachment_link column |
+| `src/app/components/SharedBoardView.tsx` | MODIFIED | UI for attachment link |
 
 ## Notes
-- Endpoint ini memerlukan role `operator` (strict guard).
+- Endpoint monitoring memerlukan role `operator` (strict guard).
 - Data `lowAttendance` bersifat realtime berdasarkan kolom yang diupdate oleh sistem attendance.
 - Data `lowLogbook` dihitung langsung dari database setiap kali endpoint dipanggil.
+- Attachment link bersifat opsional, bisa kosong (null).

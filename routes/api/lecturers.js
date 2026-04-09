@@ -104,12 +104,19 @@ router.post(
 router.put(
   "/:id",
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
+    let { id } = req.params;
     const { nip, name, initials, email, departemen, jabatan, keahlian, status, password } = req.body;
     const normalizedKeahlian = keahlian === undefined ? undefined : normalizeKeahlian(keahlian);
 
     await query("BEGIN");
     try {
+      // Cek apakah ID yang dikirim adalah lecturer_id, jika ya cari user_id-nya
+      const lecturerCheck = await query("SELECT user_id FROM lecturers WHERE id = $1", [id]);
+      let userId = id;
+      if (lecturerCheck.rowCount > 0) {
+        userId = lecturerCheck.rows[0].user_id;
+      }
+
       let passwordHash = null;
       if (password && String(password).trim() !== '') {
         passwordHash = await bcrypt.hash(password, 10);
@@ -126,7 +133,7 @@ router.put(
         WHERE id = $1 AND role = 'dosen'
         RETURNING id
         `,
-        [id, name, initials, email, passwordHash]
+        [userId, name, initials, email, passwordHash]
       );
 
       if (userResult.rowCount === 0) {
@@ -164,7 +171,25 @@ router.put(
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
-    const result = await query("DELETE FROM users WHERE id = $1 AND role = 'dosen' RETURNING id", [req.params.id]);
+    // Coba hapus berdasarkan user_id terlebih dahulu
+    let result = await query(
+      "DELETE FROM users WHERE id = $1 AND role = 'dosen' RETURNING id",
+      [req.params.id]
+    );
+
+    // Jika tidak ketemu, coba cari berdasarkan lecturer_id
+    if (result.rowCount === 0) {
+      const lecturerCheck = await query(
+        "SELECT user_id FROM lecturers WHERE id = $1",
+        [req.params.id]
+      );
+      if (lecturerCheck.rowCount > 0) {
+        result = await query(
+          "DELETE FROM users WHERE id = $1 AND role = 'dosen' RETURNING id",
+          [lecturerCheck.rows[0].user_id]
+        );
+      }
+    }
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Dosen tidak ditemukan." });

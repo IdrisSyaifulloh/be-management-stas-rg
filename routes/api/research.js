@@ -113,7 +113,7 @@ router.get(
       result = await query(
         `
         SELECT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
-               rp.progress, rp.category, rp.description, rp.funding, rp.repositori,
+               rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
@@ -125,7 +125,7 @@ router.get(
       result = await query(
         `
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
-               rp.progress, rp.category, rp.description, rp.funding, rp.repositori,
+               rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
@@ -141,7 +141,7 @@ router.get(
       result = await query(
         `
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
-               rp.progress, rp.category, rp.description, rp.funding, rp.repositori,
+               rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
@@ -308,7 +308,8 @@ router.post(
       category,
       description,
       funding,
-      repositori
+      repositori,
+      attachmentLink
     } = req.body;
 
     if (!id || !title || !status) {
@@ -319,8 +320,8 @@ router.post(
       `
       INSERT INTO research_projects (
         id, title, short_title, supervisor_lecturer_id, period_text,
-        mitra, status, progress, category, description, funding, repositori
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        mitra, status, progress, category, description, funding, repositori, attachment_link
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       `,
       [
         id,
@@ -334,7 +335,8 @@ router.post(
         category || null,
         description || null,
         funding || null,
-        repositori || null
+        repositori || null,
+        attachmentLink || null
       ]
     );
 
@@ -361,7 +363,8 @@ router.put(
       category,
       description,
       funding,
-      repositori
+      repositori,
+      attachmentLink
     } = req.body;
 
     const result = await query(
@@ -378,6 +381,7 @@ router.put(
           description = COALESCE($10, description),
           funding = COALESCE($11, funding),
           repositori = COALESCE($12, repositori),
+          attachment_link = COALESCE($13, attachment_link),
           updated_at = NOW()
       WHERE id = $1
       RETURNING id
@@ -394,7 +398,8 @@ router.put(
         category,
         description,
         funding,
-        repositori
+        repositori,
+        attachmentLink !== undefined ? attachmentLink : null
       ]
     );
 
