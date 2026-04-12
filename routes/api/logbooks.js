@@ -3,22 +3,126 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { buildWhereClause } = require("../../utils/queryFilters");
 const { extractRole } = require("../../utils/roleGuard");
+const { resolveStudentId } = require("../../utils/studentResolver");
+const fs = require("fs/promises");
+const path = require("path");
+const crypto = require("crypto");
 
 const router = express.Router();
+const LOGBOOK_UPLOAD_DIR = path.join(__dirname, "../../public/uploads/logbooks");
+const MAX_LOGBOOK_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const ALLOWED_LOGBOOK_FILE_TYPES = {
+  "application/pdf": ".pdf",
+  "application/msword": ".doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "application/zip": ".zip",
+  "application/x-zip-compressed": ".zip"
+};
+let ensureLogbookColumnsPromise = null;
+
+async function ensureLogbookAttachmentColumns() {
+  if (!ensureLogbookColumnsPromise) {
+    ensureLogbookColumnsPromise = query(`
+      ALTER TABLE logbook_entries
+      ADD COLUMN IF NOT EXISTS file_url TEXT,
+      ADD COLUMN IF NOT EXISTS file_name TEXT,
+      ADD COLUMN IF NOT EXISTS file_size BIGINT
+    `);
+  }
+  await ensureLogbookColumnsPromise;
+}
+
+function sanitizeFilenameBase(name) {
+  return String(name || "lampiran-logbook")
+    .replace(/\.[^/.]+$/, "")
+    .replace(/[^a-zA-Z0-9-_]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase() || "lampiran-logbook";
+}
+
+function resolveLogbookAttachmentPath(fileUrl) {
+  const normalizedUrl = String(fileUrl || "").trim();
+  if (!normalizedUrl.startsWith("/uploads/logbooks/")) return null;
+  return path.join(LOGBOOK_UPLOAD_DIR, normalizedUrl.replace("/uploads/logbooks/", ""));
+}
+
+async function removeLogbookAttachment(fileUrl) {
+  const targetPath = resolveLogbookAttachmentPath(fileUrl);
+  if (!targetPath) return;
+
+  try {
+    await fs.unlink(targetPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function saveLogbookAttachment(fileDataUrl, originalFileName) {
+  const match = String(fileDataUrl || "").match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) {
+    const error = new Error("Format lampiran tidak valid. Gunakan data URL base64.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const mimeType = match[1];
+  const base64Payload = match[2];
+  const extension = ALLOWED_LOGBOOK_FILE_TYPES[mimeType];
+  if (!extension) {
+    const error = new Error("Tipe lampiran harus PDF, DOC, DOCX, JPG, PNG, atau ZIP.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let buffer;
+  try {
+    buffer = Buffer.from(base64Payload, "base64");
+  } catch {
+    const error = new Error("Lampiran base64 tidak valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!buffer || buffer.length === 0) {
+    const error = new Error("Lampiran kosong tidak dapat diunggah.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (buffer.length > MAX_LOGBOOK_ATTACHMENT_SIZE) {
+    const error = new Error("Ukuran lampiran maksimal 10 MB.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  await fs.mkdir(LOGBOOK_UPLOAD_DIR, { recursive: true });
+  const baseName = sanitizeFilenameBase(originalFileName);
+  const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${baseName}${extension}`;
+  await fs.writeFile(path.join(LOGBOOK_UPLOAD_DIR, fileName), buffer);
+
+  return {
+    fileUrl: `/uploads/logbooks/${fileName}`,
+    fileName: originalFileName || `${baseName}${extension}`,
+    fileSize: buffer.length
+  };
+}
 
 router.get(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureLogbookAttachmentColumns();
     const role = extractRole(req);
     let studentId = role === "mahasiswa" ? req.authUser?.id : req.query.studentId;
     const { projectId } = req.query;
 
     // Resolve studentId if it's actually a user_id
     if (studentId) {
-      const studentCheck = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentId]);
-      if (studentCheck.rowCount > 0) {
-        studentId = studentCheck.rows[0].id;
-      }
+      studentId = await resolveStudentId(studentId) || studentId;
     }
 
     const { whereClause, params } = buildWhereClause([
@@ -31,6 +135,7 @@ router.get(
       SELECT le.id, le.student_id, su.name AS student_name, su.initials AS student_initials,
              le.project_id, rp.short_title AS project_name,
              le.date, le.title, le.description, le.output, le.kendala, le.has_attachment,
+             le.file_url, le.file_name, le.file_size,
              COALESCE(lc.comments, '[]'::json) AS comments,
              COALESCE(lc.comments_count, 0) AS comments_count,
              lv.detail->>'verificationStatus' AS verification_status,
@@ -81,6 +186,7 @@ router.get(
 router.post(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureLogbookAttachmentColumns();
     const role = extractRole(req);
     if (role !== "mahasiswa") {
       return res.status(403).json({ message: "Hanya mahasiswa yang dapat menambah logbook." });
@@ -95,7 +201,9 @@ router.post(
       description,
       output,
       kendala,
-      hasAttachment
+      hasAttachment,
+      fileDataUrl,
+      fileName
     } = req.body;
 
     if (!id || !studentId || !date || !title || !description) {
@@ -108,21 +216,43 @@ router.post(
     }
 
     // Resolve student_id: check if studentId is actually a user_id and find the real student.id
-    let resolvedStudentId = studentId;
-    const studentCheck = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentId]);
-    if (studentCheck.rowCount > 0) {
-      resolvedStudentId = studentCheck.rows[0].id;
-    } else {
+    const resolvedStudentId = await resolveStudentId(studentId);
+    if (!resolvedStudentId) {
       return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
     }
+
+    let uploadedAttachment = null;
+    if (typeof fileDataUrl === "string" && fileDataUrl.trim()) {
+      try {
+        uploadedAttachment = await saveLogbookAttachment(fileDataUrl.trim(), fileName);
+      } catch (error) {
+        const statusCode = error?.statusCode || 400;
+        return res.status(statusCode).json({ message: error?.message || "Gagal upload lampiran logbook." });
+      }
+    }
+
+    const hasStoredAttachment = uploadedAttachment ? true : Boolean(hasAttachment);
 
     await query(
       `
       INSERT INTO logbook_entries (
-        id, student_id, project_id, date, title, description, output, kendala, has_attachment
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        id, student_id, project_id, date, title, description, output, kendala, has_attachment, file_url, file_name, file_size
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       `,
-      [id, resolvedStudentId, projectId || null, date, title, description, output || null, kendala || null, Boolean(hasAttachment)]
+      [
+        id,
+        resolvedStudentId,
+        projectId || null,
+        date,
+        title,
+        description,
+        output || null,
+        kendala || null,
+        hasStoredAttachment,
+        uploadedAttachment?.fileUrl || null,
+        uploadedAttachment?.fileName || null,
+        uploadedAttachment?.fileSize || null
+      ]
     );
 
     res.status(201).json({ message: "Entri logbook berhasil ditambahkan." });
@@ -180,7 +310,41 @@ router.patch(
 router.put(
   "/:id",
   asyncHandler(async (req, res) => {
-    const { projectId, date, title, description, output, kendala, hasAttachment } = req.body;
+    await ensureLogbookAttachmentColumns();
+    const { projectId, date, title, description, output, kendala, hasAttachment, fileDataUrl, fileName, clearAttachment } = req.body;
+
+    const existingEntry = await query(
+      "SELECT id, file_url, file_name, file_size, has_attachment FROM logbook_entries WHERE id = $1 LIMIT 1",
+      [req.params.id]
+    );
+
+    if (existingEntry.rowCount === 0) {
+      return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
+    }
+
+    let uploadedAttachment = null;
+    if (typeof fileDataUrl === "string" && fileDataUrl.trim()) {
+      try {
+        uploadedAttachment = await saveLogbookAttachment(fileDataUrl.trim(), fileName);
+      } catch (error) {
+        const statusCode = error?.statusCode || 400;
+        return res.status(statusCode).json({ message: error?.message || "Gagal upload lampiran logbook." });
+      }
+    }
+
+    const shouldClearAttachment = Boolean(clearAttachment);
+    const nextFileUrl = uploadedAttachment
+      ? uploadedAttachment.fileUrl
+      : (shouldClearAttachment ? null : existingEntry.rows[0].file_url);
+    const nextFileName = uploadedAttachment
+      ? uploadedAttachment.fileName
+      : (shouldClearAttachment ? null : existingEntry.rows[0].file_name);
+    const nextFileSize = uploadedAttachment
+      ? uploadedAttachment.fileSize
+      : (shouldClearAttachment ? null : existingEntry.rows[0].file_size);
+    const nextHasAttachment = uploadedAttachment
+      ? true
+      : (shouldClearAttachment ? false : Boolean(nextFileUrl || hasAttachment || existingEntry.rows[0].has_attachment));
 
     const result = await query(
       `
@@ -191,16 +355,25 @@ router.put(
           description = COALESCE($5, description),
           output = COALESCE($6, output),
           kendala = COALESCE($7, kendala),
-          has_attachment = COALESCE($8, has_attachment),
+          has_attachment = $8,
+          file_url = $9,
+          file_name = $10,
+          file_size = $11,
           updated_at = NOW()
       WHERE id = $1
       RETURNING id
       `,
-      [req.params.id, projectId, date, title, description, output, kendala, hasAttachment]
+      [req.params.id, projectId, date, title, description, output, kendala, nextHasAttachment, nextFileUrl, nextFileName, nextFileSize]
     );
 
-    if (result.rowCount === 0) {
-      return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
+    try {
+      if (uploadedAttachment && existingEntry.rows[0].file_url) {
+        await removeLogbookAttachment(existingEntry.rows[0].file_url);
+      } else if (shouldClearAttachment && existingEntry.rows[0].file_url) {
+        await removeLogbookAttachment(existingEntry.rows[0].file_url);
+      }
+    } catch {
+      // Metadata update is already persisted; ignore cleanup failure for now.
     }
 
     res.json({ message: "Entri logbook berhasil diperbarui." });
@@ -210,10 +383,20 @@ router.put(
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
-    const result = await query("DELETE FROM logbook_entries WHERE id = $1 RETURNING id", [req.params.id]);
+    await ensureLogbookAttachmentColumns();
+    const result = await query(
+      "DELETE FROM logbook_entries WHERE id = $1 RETURNING id, file_url",
+      [req.params.id]
+    );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
+    }
+
+    try {
+      await removeLogbookAttachment(result.rows[0].file_url);
+    } catch {
+      // Deletion of DB record succeeded; ignore orphan cleanup failure.
     }
 
     res.json({ message: "Entri logbook berhasil dihapus." });

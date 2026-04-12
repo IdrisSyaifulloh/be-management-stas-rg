@@ -3,6 +3,12 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { getSettingsAsync } = require("../../config/systemSettingsStore");
 const { extractRole } = require("../../utils/roleGuard");
+const { resolveStudentId } = require("../../utils/studentResolver");
+const {
+  buildAttendanceHistory,
+  getJakartaDateIso,
+  getMonthBounds
+} = require("../../utils/attendanceHistory");
 
 const router = express.Router();
 
@@ -19,28 +25,6 @@ function haversineDistanceMeters(lat1, lng1, lat2, lng2) {
     Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
   const partC = 2 * Math.atan2(Math.sqrt(partA), Math.sqrt(1 - partA));
   return earthRadius * partC;
-}
-
-function formatLocalDate(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function getJakartaDateIso() {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Jakarta",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(new Date());
-}
-
-async function resolveStudentId(studentIdOrUserId) {
-  const studentResult = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentIdOrUserId]);
-  if (studentResult.rowCount === 0) return null;
-  return studentResult.rows[0].id;
 }
 
 router.post(
@@ -265,8 +249,7 @@ router.get(
     }
 
     const monthValue = String(month || getJakartaDateIso().slice(0, 7));
-    const [year, monthNum] = monthValue.split("-").map(Number);
-    const daysInMonth = new Date(year, monthNum, 0).getDate();
+    const { startDate, endDate } = getMonthBounds(`${monthValue}-01`);
 
     const attendanceRows = await query(
       `
@@ -293,76 +276,12 @@ router.get(
       [resolvedStudentId, monthValue]
     );
 
-    const leaveSet = new Set();
-    for (const row of leaves.rows) {
-      const start = new Date(row.periode_start);
-      const end = new Date(row.periode_end);
-      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, "0");
-        const day = String(d.getDate()).padStart(2, "0");
-        leaveSet.add(`${y}-${m}-${day}`);
-      }
-    }
-
-    const attendanceMap = new Map(
-      attendanceRows.rows.map((item) => [item.attendance_date_text, item])
-    );
-    const history = [];
-    let hadir = 0;
-    let cuti = 0;
-    let tidakHadir = 0;
-    let libur = 0;
-
-    for (let day = 1; day <= daysInMonth; day += 1) {
-      const date = new Date(year, monthNum - 1, day);
-      const iso = formatLocalDate(date);
-      const dayName = date.toLocaleDateString("id-ID", { weekday: "short" });
-      const dateLabel = `${dayName}, ${String(day).padStart(2, "0")} ${date.toLocaleDateString("id-ID", { month: "short", year: "numeric" })}`;
-      const isWeekend = date.getDay() === 0;
-
-      let status = "Tidak Hadir";
-      let statusColor = "red";
-
-      if (isWeekend) {
-        status = "Libur";
-        statusColor = "gray";
-        libur += 1;
-      } else if (leaveSet.has(iso)) {
-        status = "Cuti";
-        statusColor = "amber";
-        cuti += 1;
-      } else if (attendanceMap.has(iso)) {
-        status = "Hadir";
-        statusColor = "green";
-        hadir += 1;
-      } else {
-        tidakHadir += 1;
-      }
-
-      const attendanceItem = attendanceMap.get(iso);
-      history.push({
-        date: dateLabel,
-        in: attendanceItem?.check_in_at
-          ? new Date(attendanceItem.check_in_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", hour12: false })
-          : "-",
-        out: attendanceItem?.check_out_at
-          ? new Date(attendanceItem.check_out_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", hour12: false })
-          : "-",
-        duration:
-          attendanceItem?.check_in_at && attendanceItem?.check_out_at
-            ? (() => {
-                const diffMs = new Date(attendanceItem.check_out_at).getTime() - new Date(attendanceItem.check_in_at).getTime();
-                const minutes = Math.max(0, Math.round(diffMs / 60000));
-                const hours = Math.floor(minutes / 60);
-                const remainingMinutes = minutes % 60;
-                return `${hours}j ${remainingMinutes}m`;
-              })()
-            : "-",
-        status,
-        statusColor
-      });
-    }
+    const { attendanceMap, leaveSet, history, summary } = buildAttendanceHistory({
+      startDate,
+      endDate,
+      attendanceRows: attendanceRows.rows,
+      leaveRows: leaves.rows
+    });
 
     const todayIso = getJakartaDateIso();
     const todayAttendance = attendanceMap.get(todayIso);
@@ -380,10 +299,10 @@ router.get(
     res.json({
       month: monthValue,
       chartData: [
-        { name: "Hadir", value: hadir, color: "#0AB600" },
-        { name: "Tidak Hadir", value: tidakHadir, color: "#EF4444" },
-        { name: "Cuti", value: cuti, color: "#F59E0B" },
-        { name: "Libur", value: libur, color: "#94A3B8" }
+        { name: "Hadir", value: summary.hadir, color: "#0AB600" },
+        { name: "Tidak Hadir", value: summary.tidakHadir, color: "#EF4444" },
+        { name: "Cuti", value: summary.cuti, color: "#F59E0B" },
+        { name: "Libur", value: summary.libur, color: "#94A3B8" }
       ],
       today: {
         checkIn: todayAttendance?.check_in_at
@@ -399,7 +318,17 @@ router.get(
         longitude: Number(gps.longitude),
         radius: Number(gps.radius)
       },
-      history: history.reverse().slice(0, 31)
+      history: history
+        .map((item) => ({
+          date: item.dateLabel,
+          in: item.in,
+          out: item.out,
+          duration: item.duration,
+          status: item.status,
+          statusColor: item.statusColor
+        }))
+        .reverse()
+        .slice(0, 31)
     });
   })
 );

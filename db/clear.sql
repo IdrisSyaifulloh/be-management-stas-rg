@@ -1,9 +1,16 @@
 -- Clear all data from database (in order to avoid FK conflicts)
 -- Run this before re-seeding if you want clean database
 
+DELETE FROM dashboard_reminder_logs;
+DELETE FROM notification_dispatch_logs;
 DELETE FROM notifications;
 DELETE FROM audit_logs;
 DELETE FROM attendance_records;
+DELETE FROM research_board_task_comments;
+DELETE FROM research_board_task_attachments;
+DELETE FROM research_board_task_subtasks;
+DELETE FROM research_board_task_assignees;
+DELETE FROM research_board_tasks;
 DELETE FROM logbook_comments;
 DELETE FROM logbook_entries;
 DELETE FROM certificate_requests;

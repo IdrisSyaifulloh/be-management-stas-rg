@@ -3,6 +3,7 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { getSettingsAsync } = require("../../config/systemSettingsStore");
 const { extractRole } = require("../../utils/roleGuard");
+const { ensureDashboardReminderTable } = require("../../utils/dashboardReminders");
 
 const router = express.Router();
 
@@ -40,6 +41,157 @@ router.get(
       cutiMenunggu: leavePending.rows[0].total,
       suratMenunggu: lettersPending.rows[0].total,
       logbookTerbaru: latestLogbooks.rows
+    });
+  })
+);
+
+router.get(
+  "/operator-warnings",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Akses ditolak. Warning dashboard operator hanya untuk operator." });
+    }
+
+    await ensureDashboardReminderTable();
+
+    const calendarResult = await query(
+      `
+      SELECT CURRENT_DATE::text AS today,
+             to_char(CURRENT_DATE, 'IYYY-"W"IW') AS week_key
+      `
+    );
+    const today = calendarResult.rows[0]?.today;
+    const weekKey = calendarResult.rows[0]?.week_key;
+
+    const [logbookMissingRows, attendanceAbsentRows, lowHoursRows] = await Promise.all([
+      query(
+        `
+        SELECT
+          s.id AS student_id,
+          s.user_id AS recipient_user_id,
+          u.name AS student_name,
+          u.initials AS student_initials,
+          s.nim,
+          $1::date AS reference_date
+        FROM students s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.status = 'Aktif'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM logbook_entries le
+            WHERE le.student_id = s.id
+              AND le.date = $1::date
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM dashboard_reminder_logs dr
+            WHERE dr.student_id = s.id
+              AND dr.type = 'logbook_missing'
+              AND dr.reference_date = $1::date
+          )
+        ORDER BY u.name ASC
+        `,
+        [today]
+      ),
+      query(
+        `
+        SELECT
+          s.id AS student_id,
+          s.user_id AS recipient_user_id,
+          u.name AS student_name,
+          u.initials AS student_initials,
+          s.nim,
+          COALESCE(ar.status, 'Belum Absen') AS attendance_status,
+          $1::date AS reference_date
+        FROM students s
+        JOIN users u ON u.id = s.user_id
+        LEFT JOIN attendance_records ar
+          ON ar.student_id = s.id
+         AND ar.attendance_date = $1::date
+        WHERE s.status = 'Aktif'
+          AND COALESCE(ar.status, 'Belum Absen') NOT IN ('Hadir', 'Cuti')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM dashboard_reminder_logs dr
+            WHERE dr.student_id = s.id
+              AND dr.type = 'attendance_absent'
+              AND dr.reference_date = $1::date
+          )
+        ORDER BY u.name ASC
+        `,
+        [today]
+      ),
+      query(
+        `
+        SELECT
+          s.id AS student_id,
+          s.user_id AS recipient_user_id,
+          u.name AS student_name,
+          u.initials AS student_initials,
+          s.nim,
+          COALESCE(s.jam_minggu_ini, 0) AS current_hours,
+          COALESCE(s.jam_minggu_target, 0) AS target_hours,
+          $1::text AS reference_period
+        FROM students s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.status = 'Aktif'
+          AND COALESCE(s.jam_minggu_target, 0) > 0
+          AND COALESCE(s.jam_minggu_ini, 0) < COALESCE(s.jam_minggu_target, 0)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM dashboard_reminder_logs dr
+            WHERE dr.student_id = s.id
+              AND dr.type = 'low_hours'
+              AND dr.reference_period = $1::text
+          )
+        ORDER BY COALESCE(s.jam_minggu_ini, 0) ASC, u.name ASC
+        `,
+        [weekKey]
+      )
+    ]);
+
+    const mapWarningItem = (row, type) => ({
+      id: `${type}:${row.student_id}:${row.reference_date || row.reference_period}`,
+      type,
+      student_id: row.student_id,
+      studentId: row.student_id,
+      recipient_user_id: row.recipient_user_id,
+      recipientUserId: row.recipient_user_id,
+      student_name: row.student_name,
+      studentName: row.student_name,
+      student_initials: row.student_initials,
+      studentInitials: row.student_initials,
+      nim: row.nim,
+      reference_date: row.reference_date || null,
+      referenceDate: row.reference_date || null,
+      reference_period: row.reference_period || null,
+      referencePeriod: row.reference_period || null,
+      attendance_status: row.attendance_status || null,
+      attendanceStatus: row.attendance_status || null,
+      current_hours: row.current_hours != null ? Number(row.current_hours) : null,
+      currentHours: row.current_hours != null ? Number(row.current_hours) : null,
+      target_hours: row.target_hours != null ? Number(row.target_hours) : null,
+      targetHours: row.target_hours != null ? Number(row.target_hours) : null
+    });
+
+    const warnings = {
+      logbookMissing: logbookMissingRows.rows.map((row) => mapWarningItem(row, "logbook_missing")),
+      attendanceAbsent: attendanceAbsentRows.rows.map((row) => mapWarningItem(row, "attendance_absent")),
+      lowHours: lowHoursRows.rows.map((row) => mapWarningItem(row, "low_hours"))
+    };
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      referenceDate: today,
+      referencePeriod: weekKey,
+      warnings,
+      counts: {
+        logbookMissing: warnings.logbookMissing.length,
+        attendanceAbsent: warnings.attendanceAbsent.length,
+        lowHours: warnings.lowHours.length,
+        total: warnings.logbookMissing.length + warnings.attendanceAbsent.length + warnings.lowHours.length
+      }
     });
   })
 );

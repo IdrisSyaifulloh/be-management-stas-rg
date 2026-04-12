@@ -4,6 +4,8 @@ const { query } = require("../../db/pool");
 const { buildWhereClause } = require("../../utils/queryFilters");
 const { getSettingsAsync } = require("../../config/systemSettingsStore");
 const { extractRole } = require("../../utils/roleGuard");
+const { resolveStudentId } = require("../../utils/studentResolver");
+const { createNotification } = require("../../utils/notificationService");
 
 const router = express.Router();
 
@@ -16,44 +18,6 @@ function parseDateOnly(value) {
 function inclusiveDays(startDate, endDate) {
   const diffMs = endDate.getTime() - startDate.getTime();
   return Math.floor(diffMs / (1000 * 60 * 60 * 24)) + 1;
-}
-
-async function resolveStudentId(studentIdOrUserId) {
-  const result = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentIdOrUserId]);
-  if (result.rowCount === 0) return null;
-  return result.rows[0].id;
-}
-
-let notificationsReady = false;
-async function ensureNotificationsTable() {
-  if (notificationsReady) return;
-  await query(
-    `
-    CREATE TABLE IF NOT EXISTS notifications (
-      id TEXT PRIMARY KEY,
-      recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      sender_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-      type TEXT NOT NULL DEFAULT 'pengumuman',
-      title TEXT NOT NULL,
-      body TEXT NOT NULL,
-      read_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    `
-  );
-  notificationsReady = true;
-}
-
-async function sendNotification(recipientUserId, title, body, senderUserId = null, type = "pengumuman") {
-  await ensureNotificationsTable();
-  const notificationId = `NTF-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
-  await query(
-    `
-    INSERT INTO notifications (id, recipient_user_id, sender_user_id, type, title, body)
-    VALUES ($1, $2, $3, $4, $5, $6)
-    `,
-    [notificationId, recipientUserId, senderUserId, type, title, body]
-  );
 }
 
 router.get(
@@ -231,13 +195,14 @@ router.post(
     const operatorsResult = await query("SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE");
     await Promise.all(
       operatorsResult.rows.map((row) =>
-        sendNotification(
-          row.id,
-          "Pengajuan Cuti Baru",
-          `${studentName} mengajukan cuti ${requestedDays} hari (${periodeStart} s.d. ${periodeEnd}).`,
-          null,
-          "cuti"
-        )
+        createNotification({
+          recipientUserId: row.id,
+          title: "Pengajuan Cuti Baru",
+          body: `${studentName} mengajukan cuti ${requestedDays} hari (${periodeStart} s.d. ${periodeEnd}).`,
+          senderUserId: null,
+          type: "cuti",
+          eventId: "cuti_request"
+        })
       )
     );
 
@@ -290,13 +255,14 @@ router.patch(
     );
     const recipientUserId = leaveRow.rows[0]?.user_id;
     if (recipientUserId) {
-      await sendNotification(
+      await createNotification({
         recipientUserId,
-        "Status Cuti Diperbarui",
-        `Pengajuan cuti Anda untuk ID ${req.params.id} telah ${status.toLowerCase()}.`,
-        reviewedBy || null,
-        "cuti"
-      );
+        title: "Status Cuti Diperbarui",
+        body: `Pengajuan cuti Anda untuk ID ${req.params.id} telah ${status.toLowerCase()}.`,
+        senderUserId: reviewedBy || null,
+        type: "cuti",
+        eventId: "cuti_request"
+      });
     }
 
     res.json({ message: "Status cuti berhasil diperbarui." });

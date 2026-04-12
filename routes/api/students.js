@@ -145,85 +145,90 @@ router.put(
 
     await query("BEGIN");
     try {
+      // BUG FIX 1: Resolve student ID → user_id sebelum update tabel users.
+      // GET mengembalikan s.id (student ID), tapi users.id berbeda (user ID).
+      // Dukung keduanya agar endpoint tidak rapuh.
+      const studentRecord = await query(
+        `SELECT s.id AS student_id, s.user_id, s.status AS current_status
+         FROM students s
+         WHERE s.id = $1 OR s.user_id = $1
+         LIMIT 1`,
+        [id]
+      );
+
+      if (studentRecord.rowCount === 0) {
+        await query("ROLLBACK");
+        return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+      }
+
+      const { student_id: studentId, user_id: userId, current_status: previousStatus } = studentRecord.rows[0];
+
       let passwordHash = null;
       if (password && String(password).trim() !== '') {
         passwordHash = await bcrypt.hash(password, 10);
       }
 
-      const userResult = await query(
-        `
-        UPDATE users
-        SET name = COALESCE($2, name),
-            initials = COALESCE($3, initials),
-            prodi = COALESCE($4, prodi),
-            email = COALESCE($5, email),
-            password_hash = COALESCE($6, password_hash),
-            updated_at = NOW()
-        WHERE id = $1 AND role = 'mahasiswa'
-        RETURNING id, role
-        `,
-        [id, name, initials, prodi, email, passwordHash]
+      // Update tabel users menggunakan user_id yang benar
+      await query(
+        `UPDATE users
+         SET name          = COALESCE($2, name),
+             initials      = COALESCE($3, initials),
+             prodi         = COALESCE($4, prodi),
+             email         = COALESCE($5, email),
+             password_hash = COALESCE($6, password_hash),
+             updated_at    = NOW()
+         WHERE id = $1 AND role = 'mahasiswa'`,
+        [userId, name, initials, prodi, email, passwordHash]
       );
 
-      if (userResult.rowCount === 0) {
-        await query("ROLLBACK");
-        return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
-      }
-
-      // Get current student status to check for withdrawal transition
-      const currentStudent = await query(
-        `SELECT status FROM students WHERE id = $1`,
-        [id]
-      );
-
-      const previousStatus = currentStudent.rowCount > 0 ? currentStudent.rows[0].status : null;
+      // BUG FIX 2: Hanya set withdrawal timestamps saat benar-benar transisi status,
+      // bukan setiap kali status 'Mengundurkan Diri' di-save ulang (yang akan reset withdrawal_at).
       const isWithdrawing = previousStatus !== 'Mengundurkan Diri' && status === 'Mengundurkan Diri';
 
-      // Set withdrawal timestamps if status changes to Mengundurkan Diri
-      const withdrawalAt = isWithdrawing ? 'NOW()' : 'withdrawal_at';
-      const scheduledDeletionAt = isWithdrawing ? 'NOW() + INTERVAL \'30 days\'' : 'scheduled_deletion_at';
-
       await query(
-        `
-        UPDATE students
-        SET nim = COALESCE($2, nim),
-            angkatan = COALESCE($3, angkatan),
-            phone = COALESCE($4, phone),
-            status = COALESCE($5, status),
-            tipe = COALESCE($6, tipe),
-            pembimbing = COALESCE($7, pembimbing),
-            withdrawal_at = CASE WHEN $5 = 'Mengundurkan Diri' THEN NOW() ELSE withdrawal_at END,
-            scheduled_deletion_at = CASE WHEN $5 = 'Mengundurkan Diri' THEN NOW() + INTERVAL '30 days' ELSE scheduled_deletion_at END,
-            updated_at = NOW()
-        WHERE id = $1
-        `,
-        [id, nim, angkatan, phone, status, tipe, pembimbing]
+        `UPDATE students
+         SET nim                   = COALESCE($2, nim),
+             angkatan              = COALESCE($3, angkatan),
+             phone                 = COALESCE($4, phone),
+             status                = COALESCE($5, status),
+             tipe                  = COALESCE($6, tipe),
+             pembimbing            = COALESCE($7, pembimbing),
+             withdrawal_at         = CASE WHEN $8 THEN NOW() ELSE withdrawal_at END,
+             scheduled_deletion_at = CASE WHEN $8 THEN NOW() + INTERVAL '30 days' ELSE scheduled_deletion_at END,
+             updated_at            = NOW()
+         WHERE id = $1`,
+        [studentId, nim, angkatan, phone, status, tipe, pembimbing, isWithdrawing]
       );
 
-      // Log the withdrawal action for audit
+      // BUG FIX 3: Role mapping yang benar; hindari null pada kolom NOT NULL.
       if (isWithdrawing) {
         const auditId = `aud_withdrawal_${Date.now()}`;
         const authUser = req.authUser;
+        const roleMap = { mahasiswa: 'Mahasiswa', dosen: 'Dosen', operator: 'Operator' };
+        const auditRole = roleMap[authUser?.role] || 'Operator';
         await query(
-          `
-          INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
-          VALUES ($1, $2, $3, 'Update', 'student_withdrawal', $4)
-          `,
-          [auditId, authUser?.id || null, authUser?.role ? 'Operator' : null, JSON.stringify({
-            student_id: id,
-            previous_status: previousStatus,
-            new_status: 'Mengundurkan Diri',
-            withdrawal_at: new Date().toISOString(),
-            scheduled_deletion_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-            message: 'Student withdrawn - account set to Temporary HOLD for 30 days'
-          })]
+          `INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+           VALUES ($1, $2, $3, 'Update', 'student_withdrawal', $4)`,
+          [
+            auditId,
+            authUser?.id || null,
+            auditRole,
+            JSON.stringify({
+              student_id: studentId,
+              previous_status: previousStatus,
+              new_status: 'Mengundurkan Diri',
+              withdrawal_at: new Date().toISOString(),
+              scheduled_deletion_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              message: 'Student withdrawn - account set to Temporary HOLD for 30 days'
+            })
+          ]
         );
       }
 
       await query("COMMIT");
-      return res.json({ 
+      return res.json({
         message: "Data mahasiswa berhasil diperbarui.",
-        ...(isWithdrawing && { 
+        ...(isWithdrawing && {
           warning: "Mahasiswa telah mengundurkan diri. Akun dalam status Temporary HOLD dan akan dihapus dalam 30 hari.",
           scheduled_deletion_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
         })
