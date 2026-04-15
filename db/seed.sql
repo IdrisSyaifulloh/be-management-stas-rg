@@ -10,8 +10,9 @@ BEGIN;
 -- ======================================================
 INSERT INTO users (id, name, initials, role, email, password_hash, prodi, is_active)
 VALUES
-  ('SEED-USR-OP-001', 'Operator Sistem', 'OS', 'operator', 'operator.sistem@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Umum', TRUE),
-  ('SEED-USR-OP-002', 'Operator Akademik', 'OA', 'operator', 'operator.akademik@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Umum', TRUE),
+  ('OP001', 'idrssyfllh', 'IDR', 'operator', 'idrssyfllh@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Umum', TRUE),
+  ('OP002', 'irham', 'IRH', 'operator', 'irham@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Umum', TRUE),
+  ('OP003', 'rey', 'REY', 'operator', 'rey@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Umum', TRUE),
   ('SEED-USR-DOS-001', 'Dr. Ahmad Fauzi', 'AF', 'dosen', 'ahmad.fauzi@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Teknik Informatika', TRUE),
   ('SEED-USR-DOS-002', 'Siti Nurhaliza, M.Kom', 'SN', 'dosen', 'siti.nurhaliza@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Sistem Informasi', TRUE),
   ('SEED-USR-DOS-003', 'Bima Prakoso, Ph.D', 'BP', 'dosen', 'bima.prakoso@seed.stasrg.local', '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6', 'Data Science', TRUE),
