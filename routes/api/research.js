@@ -289,6 +289,126 @@ router.get(
   })
 );
 
+// ─── Board Cards (Logbook Entries) CRUD ──────────────────────────────────────
+
+router.post(
+  "/:id/board/cards",
+  asyncHandler(async (req, res) => {
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak untuk menambah card di board ini." });
+    }
+
+    const { title, date, description, output, kendala, studentId } = req.body;
+
+    if (!title || !date) {
+      return res.status(400).json({ message: "title dan date wajib diisi." });
+    }
+
+    // Generate a unique ID for the logbook entry
+    const entryId = `LE-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    // Resolve student_id if provided, otherwise use a default
+    let resolvedStudentId = null;
+    if (studentId) {
+      const studentCheck = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentId]);
+      if (studentCheck.rowCount > 0) {
+        resolvedStudentId = studentCheck.rows[0].id;
+      }
+    }
+
+    // If no studentId provided, find any student from the project
+    if (!resolvedStudentId) {
+      const anyStudent = await query(
+        `SELECT rm.user_id, s.id FROM research_memberships rm
+         JOIN students s ON s.user_id = rm.user_id
+         WHERE rm.project_id = $1 LIMIT 1`,
+        [req.params.id]
+      );
+      if (anyStudent.rowCount > 0) {
+        resolvedStudentId = anyStudent.rows[0].id;
+      }
+    }
+
+    // If still no student, we need to handle this — use a placeholder
+    if (!resolvedStudentId) {
+      return res.status(400).json({ message: "Tidak ada mahasiswa di proyek ini. Tambahkan anggota mahasiswa terlebih dahulu." });
+    }
+
+    await query(
+      `
+      INSERT INTO logbook_entries (id, student_id, project_id, date, title, description, output, kendala, has_attachment)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [entryId, resolvedStudentId, req.params.id, date, title, description || null, output || null, kendala || null, false]
+    );
+
+    const newEntry = await query(
+      `SELECT id, title, date, description, output FROM logbook_entries WHERE id = $1`,
+      [entryId]
+    );
+
+    res.status(201).json({ message: "Card berhasil ditambahkan.", card: newEntry.rows[0] });
+  })
+);
+
+router.put(
+  "/:id/board/cards/:cardId",
+  asyncHandler(async (req, res) => {
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak untuk mengedit card di board ini." });
+    }
+
+    const { title, date, description, output, kendala } = req.body;
+
+    const result = await query(
+      `
+      UPDATE logbook_entries
+      SET title = COALESCE($3, title),
+          date = COALESCE($4, date),
+          description = COALESCE($5, description),
+          output = COALESCE($6, output),
+          kendala = COALESCE($7, kendala),
+          updated_at = NOW()
+      WHERE id = $2 AND project_id = $1
+      RETURNING id, title, date, description, output
+      `,
+      [req.params.id, req.params.cardId, title, date, description, output, kendala]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Card tidak ditemukan." });
+    }
+
+    res.json({ message: "Card berhasil diperbarui.", card: result.rows[0] });
+  })
+);
+
+router.delete(
+  "/:id/board/cards/:cardId",
+  asyncHandler(async (req, res) => {
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak untuk menghapus card di board ini." });
+    }
+
+    // Delete associated comments first
+    await query("DELETE FROM logbook_comments WHERE logbook_entry_id = $1", [req.params.cardId]);
+
+    const result = await query(
+      "DELETE FROM logbook_entries WHERE id = $1 AND project_id = $2 RETURNING id",
+      [req.params.cardId, req.params.id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Card tidak ditemukan." });
+    }
+
+    res.json({ message: "Card berhasil dihapus." });
+  })
+);
+
 router.post(
   "/",
   asyncHandler(async (req, res) => {
