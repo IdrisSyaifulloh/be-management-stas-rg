@@ -3,37 +3,16 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { clampLimit } = require("../../utils/queryFilters");
 const { extractRole } = require("../../utils/roleGuard");
+const { createNotification, ensureNotificationsTable, inferNotificationEventId } = require("../../utils/notificationService");
+const {
+  buildReminderIdentity,
+  findExistingDashboardReminder,
+  inferDashboardReminderType,
+  recordDashboardReminder,
+  resolveDashboardReminderStudentId
+} = require("../../utils/dashboardReminders");
 
 const router = express.Router();
-
-let notificationsTableReady = false;
-async function ensureNotificationsTable() {
-  if (notificationsTableReady) return;
-
-  await query(
-    `
-    CREATE TABLE IF NOT EXISTS notifications (
-      id TEXT PRIMARY KEY,
-      recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      sender_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-      type TEXT NOT NULL DEFAULT 'pengumuman',
-      title TEXT NOT NULL,
-      body TEXT NOT NULL,
-      read_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    `
-  );
-
-  await query(
-    `
-    CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created
-    ON notifications(recipient_user_id, created_at DESC)
-    `
-  );
-
-  notificationsTableReady = true;
-}
 
 let appSettingsTableReady = false;
 async function ensureAppSettingsTable() {
@@ -109,7 +88,19 @@ router.post(
   asyncHandler(async (req, res) => {
     await ensureNotificationsTable();
 
-    const { id, recipientUserId, type = "pengumuman", title, body } = req.body || {};
+    const {
+      id,
+      recipientUserId,
+      type = "pengumuman",
+      title,
+      body,
+      eventId,
+      reminderType,
+      studentId,
+      referenceDate,
+      referencePeriod,
+      forceResend = false
+    } = req.body || {};
     const requesterRole = extractRole(req);
     if (!["operator", "dosen"].includes(requesterRole)) {
       return res.status(403).json({ message: "Hanya operator/dosen yang dapat mengirim notifikasi manual." });
@@ -124,17 +115,86 @@ router.post(
       return res.status(404).json({ message: "Penerima notifikasi tidak ditemukan." });
     }
 
-    const notificationId = id || `NTF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const detectedReminderType = inferDashboardReminderType({ reminderType, type, title, body });
+    const inferredEventId = inferNotificationEventId({ eventId, reminderType: detectedReminderType || reminderType, type, title, body });
+    const resolvedStudentId = detectedReminderType
+      ? await resolveDashboardReminderStudentId({ studentId, recipientUserId: resolvedRecipient })
+      : null;
+    const reminderIdentity = detectedReminderType
+      ? buildReminderIdentity({
+          type: detectedReminderType,
+          referenceDate,
+          referencePeriod
+        })
+      : null;
 
-    await query(
-      `
-      INSERT INTO notifications (id, recipient_user_id, sender_user_id, type, title, body)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      `,
-      [notificationId, resolvedRecipient, resolveRequesterUserId(req) || null, type, title, body]
-    );
+    if (detectedReminderType && resolvedStudentId && !Boolean(forceResend)) {
+      const existingReminder = await findExistingDashboardReminder({
+        studentId: resolvedStudentId,
+        type: detectedReminderType,
+        referenceDate: reminderIdentity.referenceDate,
+        referencePeriod: reminderIdentity.referencePeriod
+      });
 
-    res.status(201).json({ message: "Notifikasi berhasil dikirim.", id: notificationId });
+      if (existingReminder) {
+        return res.status(200).json({
+          message: "Reminder dashboard untuk rule dan periode ini sudah pernah dikirim.",
+          id: existingReminder.notification_id || existingReminder.id,
+          duplicate: true,
+          reminder: {
+            type: detectedReminderType,
+            referenceDate: reminderIdentity.referenceDate,
+            referencePeriod: reminderIdentity.referencePeriod,
+            sentAt: existingReminder.sent_at
+          }
+        });
+      }
+    }
+
+    const senderUserId = resolveRequesterUserId(req) || null;
+    const notificationResult = await createNotification({
+      id,
+      recipientUserId: resolvedRecipient,
+      senderUserId,
+      type,
+      title,
+      body,
+      eventId: inferredEventId,
+      reminderType: detectedReminderType || reminderType
+    });
+
+    if (notificationResult.skipped) {
+      return res.status(200).json({
+        message: notificationResult.message,
+        skipped: true,
+        reason: notificationResult.reason,
+        eventId: notificationResult.eventId
+      });
+    }
+
+    if (detectedReminderType && resolvedStudentId && notificationResult.id) {
+      await recordDashboardReminder({
+        recipientUserId: resolvedRecipient,
+        studentId: resolvedStudentId,
+        type: detectedReminderType,
+        referenceDate: reminderIdentity.referenceDate,
+        referencePeriod: reminderIdentity.referencePeriod,
+        notificationId: notificationResult.id,
+        sentBy: senderUserId
+      });
+    }
+
+    res.status(201).json({
+      message: "Notifikasi berhasil dikirim.",
+      id: notificationResult.id,
+      reminder: detectedReminderType && resolvedStudentId
+        ? {
+            type: detectedReminderType,
+            referenceDate: reminderIdentity.referenceDate,
+            referencePeriod: reminderIdentity.referencePeriod
+          }
+        : null
+    });
   })
 );
 

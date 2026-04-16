@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r \"const.*Id = \\\\`\" /d/project/be-management-stas-rg/routes/api/*.js)"
+    ]
+  }
+}

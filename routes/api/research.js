@@ -1,7 +1,19 @@
 const express = require("express");
+const crypto = require("crypto");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { extractRole } = require("../../utils/roleGuard");
+const {
+  ensureResearchBoardTables,
+  fetchBoardSnapshot,
+  fetchTaskDetail,
+  getNextTaskSortOrder,
+  normalizeBoardTaskStatus,
+  removeBoardAttachmentFile,
+  saveBoardAttachmentFile,
+  setTaskAssignees
+} = require("../../utils/researchBoardStore");
+const { createNotification } = require("../../utils/notificationService");
 
 const router = express.Router();
 
@@ -42,6 +54,112 @@ async function hasProjectAccess({ userId, role, projectId }) {
     [userId, projectId]
   );
   return result.rowCount > 0;
+}
+
+function buildEntityId(prefix) {
+  return `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function toNullableText(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
+}
+
+function normalizeAssigneeIds(assigneeIds) {
+  return Array.from(
+    new Set(
+      (Array.isArray(assigneeIds) ? assigneeIds : [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function normalizeProgress(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+async function ensureTaskExists(projectId, taskId) {
+  await ensureResearchBoardTables();
+  const result = await query(
+    `
+    SELECT id, project_id, status
+    FROM research_board_tasks
+    WHERE project_id = $1 AND id = $2
+    LIMIT 1
+    `,
+    [projectId, taskId]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function validateAssigneeIds(assigneeIds) {
+  const normalizedIds = normalizeAssigneeIds(assigneeIds);
+  if (normalizedIds.length === 0) return [];
+
+  const result = await query("SELECT id FROM users WHERE id = ANY($1::text[])", [normalizedIds]);
+  const existingIds = new Set(result.rows.map((row) => row.id));
+  const missingIds = normalizedIds.filter((id) => !existingIds.has(id));
+
+  if (missingIds.length > 0) {
+    const error = new Error(`Assignee tidak ditemukan: ${missingIds.join(", ")}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalizedIds;
+}
+
+async function notifyMilestoneUpdate(projectId, actorUserId, actionLabel, milestoneLabel) {
+  const projectResult = await query(
+    `
+    SELECT id, COALESCE(short_title, title) AS project_name, supervisor_lecturer_id
+    FROM research_projects
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [projectId]
+  );
+
+  if (projectResult.rowCount === 0) return;
+
+  const project = projectResult.rows[0];
+  const recipientsResult = await query(
+    `
+    SELECT DISTINCT user_id
+    FROM (
+      SELECT rm.user_id
+      FROM research_memberships rm
+      WHERE rm.project_id = $1
+      UNION
+      SELECT l.user_id
+      FROM lecturers l
+      WHERE l.id = $2
+    ) recipients
+    WHERE user_id IS NOT NULL
+      AND ($3::text IS NULL OR user_id <> $3)
+    `,
+    [projectId, project.supervisor_lecturer_id, actorUserId || null]
+  );
+
+  if (recipientsResult.rowCount === 0) return;
+
+  await Promise.all(
+    recipientsResult.rows.map((row) =>
+      createNotification({
+        recipientUserId: row.user_id,
+        senderUserId: actorUserId || null,
+        type: "milestone",
+        eventId: "milestone_update",
+        title: "Update Milestone Riset",
+        body: `${actionLabel} milestone "${milestoneLabel}" pada riset ${project.project_name}.`
+      })
+    )
+  );
 }
 
 router.get(
@@ -211,59 +329,14 @@ router.get(
 router.get(
   "/:id/board",
   asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
     const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
     if (!allowed) {
       return res.status(403).json({ message: "Akses ditolak untuk melihat board riset ini." });
     }
 
-    const result = await query(
-      `
-      SELECT le.id, le.title, le.date, le.output, COALESCE(lc.comment_count, 0) AS comments_count
-      FROM logbook_entries le
-      LEFT JOIN (
-        SELECT logbook_entry_id, COUNT(*)::int AS comment_count
-        FROM logbook_comments
-        GROUP BY logbook_entry_id
-      ) lc ON lc.logbook_entry_id = le.id
-      WHERE le.project_id = $1
-      ORDER BY date DESC
-      LIMIT 16
-      `,
-      [req.params.id]
-    );
-
-    const columns = {
-      todo: [],
-      doing: [],
-      review: [],
-      done: []
-    };
-
-    result.rows.forEach((item, index) => {
-      const row = {
-        id: item.id,
-        title: item.title,
-        deadline: new Date(item.date).toLocaleDateString("id-ID"),
-        statusText: item.output || "",
-        commentsCount: Number(item.comments_count) || 0
-      };
-
-      if (index % 4 === 0) columns.todo.push(row);
-      else if (index % 4 === 1) columns.doing.push({ ...row, progress: 45 });
-      else if (index % 4 === 2) columns.review.push(row);
-      else columns.done.push(row);
-    });
-
-    res.json({
-      projectId: req.params.id,
-      columns,
-      counts: {
-        todo: columns.todo.length,
-        doing: columns.doing.length,
-        review: columns.review.length,
-        done: columns.done.length
-      }
-    });
+    const snapshot = await fetchBoardSnapshot(req.params.id);
+    res.json(snapshot);
   })
 );
 
@@ -289,6 +362,7 @@ router.get(
   })
 );
 
+<<<<<<< HEAD
 // ─── Board Cards (Logbook Entries) CRUD ──────────────────────────────────────
 
 router.post(
@@ -382,10 +456,275 @@ router.put(
     }
 
     res.json({ message: "Card berhasil diperbarui.", card: result.rows[0] });
+=======
+router.patch(
+  "/:id/board/header",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (!["operator", "dosen"].includes(role)) {
+      return res.status(403).json({ message: "Role tidak diizinkan mengubah header board riset." });
+    }
+
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak mengubah header board riset ini." });
+    }
+
+    const {
+      title,
+      shortTitle,
+      periodText,
+      mitra,
+      status,
+      progress,
+      category,
+      description,
+      funding,
+      repositori,
+      attachmentLink
+    } = req.body || {};
+
+    const result = await query(
+      `
+      UPDATE research_projects
+      SET title = COALESCE($2, title),
+          short_title = COALESCE($3, short_title),
+          period_text = COALESCE($4, period_text),
+          mitra = COALESCE($5, mitra),
+          status = COALESCE($6, status),
+          progress = COALESCE($7, progress),
+          category = COALESCE($8, category),
+          description = COALESCE($9, description),
+          funding = COALESCE($10, funding),
+          repositori = COALESCE($11, repositori),
+          attachment_link = CASE
+            WHEN $12::text = '' THEN NULL
+            ELSE COALESCE($12, attachment_link)
+          END,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING id
+      `,
+      [
+        req.params.id,
+        title,
+        shortTitle,
+        periodText,
+        mitra,
+        status,
+        progress,
+        category,
+        description,
+        funding,
+        repositori,
+        attachmentLink
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Riset tidak ditemukan." });
+    }
+
+    const snapshot = await fetchBoardSnapshot(req.params.id);
+    res.json({ message: "Header board riset berhasil diperbarui.", project: snapshot.project });
+  })
+);
+
+router.post(
+  "/:id/board/tasks",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak menambah task di board riset ini." });
+    }
+
+    const {
+      id,
+      title,
+      description,
+      status,
+      deadline,
+      priority,
+      tag,
+      assignee_ids,
+      assigneeIds,
+      progress,
+      sortOrder
+    } = req.body || {};
+
+    if (!String(title || "").trim()) {
+      return res.status(400).json({ message: "title task wajib diisi." });
+    }
+
+    const nextStatus = normalizeBoardTaskStatus(status);
+    const nextSortOrder = Number.isFinite(Number(sortOrder))
+      ? Number(sortOrder)
+      : await getNextTaskSortOrder(req.params.id, nextStatus);
+    const taskId = String(id || buildEntityId("TASK")).trim();
+    const nextAssigneeIds = await validateAssigneeIds(assignee_ids ?? assigneeIds);
+
+    await query(
+      `
+      INSERT INTO research_board_tasks (
+        id, project_id, title, description, status, deadline, priority, tag, progress, sort_order, created_by
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `,
+      [
+        taskId,
+        req.params.id,
+        String(title).trim(),
+        toNullableText(description),
+        nextStatus,
+        deadline || null,
+        toNullableText(priority),
+        toNullableText(tag),
+        normalizeProgress(progress, 0),
+        nextSortOrder,
+        resolveRequesterUserId(req) || null
+      ]
+    );
+
+    await setTaskAssignees(taskId, nextAssigneeIds);
+
+    const task = await fetchTaskDetail(req.params.id, taskId);
+    res.status(201).json({ message: "Task board berhasil ditambahkan.", task });
+  })
+);
+
+router.get(
+  "/:id/board/tasks/:taskId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak melihat detail task board." });
+    }
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    if (!task) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    res.json(task);
+  })
+);
+
+router.patch(
+  "/:id/board/tasks/:taskId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak mengubah task board." });
+    }
+
+    const existingTask = await ensureTaskExists(req.params.id, req.params.taskId);
+    if (!existingTask) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    const detail = await fetchTaskDetail(req.params.id, req.params.taskId);
+    const {
+      title,
+      description,
+      status,
+      deadline,
+      priority,
+      tag,
+      assignee_ids,
+      assigneeIds,
+      progress,
+      sortOrder
+    } = req.body || {};
+
+    const nextStatus = status !== undefined
+      ? normalizeBoardTaskStatus(status, detail.status)
+      : detail.status;
+    const nextSortOrder = sortOrder !== undefined
+      ? Number(sortOrder)
+      : (nextStatus !== detail.status ? await getNextTaskSortOrder(req.params.id, nextStatus) : detail.sortOrder);
+    const nextAssigneeIds = (assignee_ids !== undefined || assigneeIds !== undefined)
+      ? await validateAssigneeIds(assignee_ids ?? assigneeIds)
+      : detail.assignee_ids;
+
+    await query(
+      `
+      UPDATE research_board_tasks
+      SET title = $3,
+          description = $4,
+          status = $5,
+          deadline = $6,
+          priority = $7,
+          tag = $8,
+          progress = $9,
+          sort_order = $10,
+          updated_at = NOW()
+      WHERE project_id = $1 AND id = $2
+      `,
+      [
+        req.params.id,
+        req.params.taskId,
+        title !== undefined ? String(title).trim() || detail.title : detail.title,
+        description !== undefined ? toNullableText(description) : (detail.description || null),
+        nextStatus,
+        deadline !== undefined ? (deadline || null) : detail.deadline,
+        priority !== undefined ? toNullableText(priority) : detail.priority,
+        tag !== undefined ? toNullableText(tag) : detail.tag,
+        progress !== undefined ? normalizeProgress(progress, detail.progress) : detail.progress,
+        Number.isFinite(nextSortOrder) ? nextSortOrder : detail.sortOrder
+      ]
+    );
+
+    await setTaskAssignees(req.params.taskId, nextAssigneeIds);
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.json({ message: "Task board berhasil diperbarui.", task });
+  })
+);
+
+router.patch(
+  "/:id/board/tasks/:taskId/status",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak memindahkan status task board." });
+    }
+
+    const existingTask = await ensureTaskExists(req.params.id, req.params.taskId);
+    if (!existingTask) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    const nextStatus = normalizeBoardTaskStatus(req.body?.status, existingTask.status);
+    const nextSortOrder = Number.isFinite(Number(req.body?.sortOrder))
+      ? Number(req.body.sortOrder)
+      : await getNextTaskSortOrder(req.params.id, nextStatus);
+
+    await query(
+      `
+      UPDATE research_board_tasks
+      SET status = $3,
+          sort_order = $4,
+          updated_at = NOW()
+      WHERE project_id = $1 AND id = $2
+      `,
+      [req.params.id, req.params.taskId, nextStatus, nextSortOrder]
+    );
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.json({ message: "Status task board berhasil diperbarui.", task });
+>>>>>>> 60e32de7843a28d786efca51894c4d25deae0a05
   })
 );
 
 router.delete(
+<<<<<<< HEAD
   "/:id/board/cards/:cardId",
   asyncHandler(async (req, res) => {
     const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
@@ -406,6 +745,317 @@ router.delete(
     }
 
     res.json({ message: "Card berhasil dihapus." });
+=======
+  "/:id/board/tasks/:taskId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak menghapus task board." });
+    }
+
+    const attachmentRows = await query(
+      `
+      SELECT file_url
+      FROM research_board_task_attachments
+      WHERE task_id = $1
+      `,
+      [req.params.taskId]
+    );
+
+    const result = await query(
+      `
+      DELETE FROM research_board_tasks
+      WHERE project_id = $1 AND id = $2
+      RETURNING id
+      `,
+      [req.params.id, req.params.taskId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    for (const row of attachmentRows.rows) {
+      try {
+        await removeBoardAttachmentFile(row.file_url);
+      } catch {
+        // Ignore orphaned file cleanup failures after DB delete succeeds.
+      }
+    }
+
+    res.json({ message: "Task board berhasil dihapus." });
+  })
+);
+
+router.post(
+  "/:id/board/tasks/:taskId/subtasks",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak menambah subtask." });
+    }
+
+    const task = await ensureTaskExists(req.params.id, req.params.taskId);
+    if (!task) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    const { id, title, done = false, sortOrder } = req.body || {};
+    if (!String(title || "").trim()) {
+      return res.status(400).json({ message: "title subtask wajib diisi." });
+    }
+
+    const subtaskId = String(id || buildEntityId("SUBTASK")).trim();
+    const nextSortOrder = Number.isFinite(Number(sortOrder))
+      ? Number(sortOrder)
+      : (
+          await query(
+            `
+            SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+            FROM research_board_task_subtasks
+            WHERE task_id = $1
+            `,
+            [req.params.taskId]
+          )
+        ).rows[0]?.next_sort_order || 0;
+
+    await query(
+      `
+      INSERT INTO research_board_task_subtasks (id, task_id, title, done, sort_order)
+      VALUES ($1, $2, $3, $4, $5)
+      `,
+      [subtaskId, req.params.taskId, String(title).trim(), Boolean(done), Number(nextSortOrder)]
+    );
+
+    const updatedTask = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.status(201).json({
+      message: "Subtask berhasil ditambahkan.",
+      subtask: updatedTask?.subtasks.find((item) => item.id === subtaskId) || null,
+      task: updatedTask
+    });
+  })
+);
+
+router.patch(
+  "/:id/board/tasks/:taskId/subtasks/:subtaskId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak mengubah subtask." });
+    }
+
+    const result = await query(
+      `
+      UPDATE research_board_task_subtasks
+      SET title = COALESCE($3, title),
+          done = COALESCE($4, done),
+          sort_order = COALESCE($5, sort_order),
+          updated_at = NOW()
+      WHERE task_id = $1 AND id = $2
+      RETURNING id
+      `,
+      [
+        req.params.taskId,
+        req.params.subtaskId,
+        req.body?.title !== undefined ? String(req.body.title).trim() : null,
+        req.body?.done !== undefined ? Boolean(req.body.done) : null,
+        req.body?.sortOrder !== undefined ? Number(req.body.sortOrder) : null
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Subtask tidak ditemukan." });
+    }
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.json({
+      message: "Subtask berhasil diperbarui.",
+      subtask: task?.subtasks.find((item) => item.id === req.params.subtaskId) || null,
+      task
+    });
+  })
+);
+
+router.delete(
+  "/:id/board/tasks/:taskId/subtasks/:subtaskId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak menghapus subtask." });
+    }
+
+    const result = await query(
+      `
+      DELETE FROM research_board_task_subtasks
+      WHERE task_id = $1 AND id = $2
+      RETURNING id
+      `,
+      [req.params.taskId, req.params.subtaskId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Subtask tidak ditemukan." });
+    }
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.json({ message: "Subtask berhasil dihapus.", task });
+  })
+);
+
+router.post(
+  "/:id/board/tasks/:taskId/attachments",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak menambah lampiran task." });
+    }
+
+    const task = await ensureTaskExists(req.params.id, req.params.taskId);
+    if (!task) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    const { id, fileDataUrl, fileName } = req.body || {};
+    if (!String(fileDataUrl || "").trim() || !String(fileName || "").trim()) {
+      return res.status(400).json({ message: "fileDataUrl dan fileName wajib diisi." });
+    }
+
+    let uploadedAttachment;
+    try {
+      uploadedAttachment = await saveBoardAttachmentFile(String(fileDataUrl).trim(), String(fileName).trim());
+    } catch (error) {
+      return res.status(error?.statusCode || 400).json({
+        message: error?.message || "Gagal upload lampiran task."
+      });
+    }
+
+    const attachmentId = String(id || buildEntityId("TASKFILE")).trim();
+    await query(
+      `
+      INSERT INTO research_board_task_attachments (
+        id, task_id, file_url, file_name, file_size, mime_type, uploaded_by
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [
+        attachmentId,
+        req.params.taskId,
+        uploadedAttachment.fileUrl,
+        uploadedAttachment.fileName,
+        uploadedAttachment.fileSize,
+        uploadedAttachment.mimeType,
+        resolveRequesterUserId(req) || null
+      ]
+    );
+
+    const updatedTask = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.status(201).json({
+      message: "Lampiran task berhasil ditambahkan.",
+      attachment: updatedTask?.attachments.find((item) => item.id === attachmentId) || null,
+      task: updatedTask
+    });
+  })
+);
+
+router.delete(
+  "/:id/board/tasks/:taskId/attachments/:attachmentId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak menghapus lampiran task." });
+    }
+
+    const result = await query(
+      `
+      DELETE FROM research_board_task_attachments
+      WHERE task_id = $1 AND id = $2
+      RETURNING id, file_url
+      `,
+      [req.params.taskId, req.params.attachmentId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Lampiran task tidak ditemukan." });
+    }
+
+    try {
+      await removeBoardAttachmentFile(result.rows[0].file_url);
+    } catch {
+      // Metadata delete succeeded; ignore cleanup failure for now.
+    }
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.json({ message: "Lampiran task berhasil dihapus.", task });
+  })
+);
+
+router.get(
+  "/:id/board/tasks/:taskId/comments",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak melihat komentar task." });
+    }
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    if (!task) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    res.json(task.comments || []);
+  })
+);
+
+router.post(
+  "/:id/board/tasks/:taskId/comments",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak menambah komentar task." });
+    }
+
+    const task = await ensureTaskExists(req.params.id, req.params.taskId);
+    if (!task) {
+      return res.status(404).json({ message: "Task board tidak ditemukan." });
+    }
+
+    const authorId = String(req.body?.authorId || resolveRequesterUserId(req) || "").trim();
+    const text = String(req.body?.text || "").trim();
+    if (!authorId || !text) {
+      return res.status(400).json({ message: "authorId dan text wajib diisi." });
+    }
+
+    const commentId = String(req.body?.id || buildEntityId("TASKCMT")).trim();
+    await query(
+      `
+      INSERT INTO research_board_task_comments (id, task_id, author_id, author_name, text)
+      VALUES ($1, $2, $3, $4, $5)
+      `,
+      [commentId, req.params.taskId, authorId, toNullableText(req.body?.authorName), text]
+    );
+
+    const updatedTask = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.status(201).json({
+      message: "Komentar task berhasil ditambahkan.",
+      comment: updatedTask?.comments.find((item) => item.id === commentId) || null,
+      task: updatedTask
+    });
+>>>>>>> 60e32de7843a28d786efca51894c4d25deae0a05
   })
 );
 
@@ -753,6 +1403,7 @@ router.post(
   "/:id/milestones",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+    const actorUserId = resolveRequesterUserId(req) || null;
     const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
     if (!allowed) {
       return res.status(403).json({ message: "Akses ditolak menambah milestone di riset ini." });
@@ -773,6 +1424,8 @@ router.post(
       [req.params.id, label, done, targetDate || null, sortOrder]
     );
 
+    await notifyMilestoneUpdate(req.params.id, actorUserId, "Menambahkan", label);
+
     res.status(201).json({ message: "Milestone berhasil ditambahkan.", id: result.rows[0].id });
   })
 );
@@ -781,12 +1434,23 @@ router.patch(
   "/:id/milestones/:milestoneId",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+    const actorUserId = resolveRequesterUserId(req) || null;
     const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
     if (!allowed) {
       return res.status(403).json({ message: "Akses ditolak memperbarui milestone di riset ini." });
     }
 
     const { label, done, targetDate, sortOrder } = req.body;
+    const existingMilestone = await query(
+      `
+      SELECT label
+      FROM research_milestones
+      WHERE project_id = $1 AND id = $2
+      LIMIT 1
+      `,
+      [req.params.id, req.params.milestoneId]
+    );
+
     const result = await query(
       `
       UPDATE research_milestones
@@ -804,6 +1468,13 @@ router.patch(
       return res.status(404).json({ message: "Milestone tidak ditemukan." });
     }
 
+    await notifyMilestoneUpdate(
+      req.params.id,
+      actorUserId,
+      "Memperbarui",
+      String(label || existingMilestone.rows[0]?.label || "milestone").trim()
+    );
+
     res.json({ message: "Milestone berhasil diperbarui." });
   })
 );
@@ -812,10 +1483,21 @@ router.delete(
   "/:id/milestones/:milestoneId",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+    const actorUserId = resolveRequesterUserId(req) || null;
     const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
     if (!allowed) {
       return res.status(403).json({ message: "Akses ditolak menghapus milestone di riset ini." });
     }
+
+    const existingMilestone = await query(
+      `
+      SELECT label
+      FROM research_milestones
+      WHERE project_id = $1 AND id = $2
+      LIMIT 1
+      `,
+      [req.params.id, req.params.milestoneId]
+    );
 
     const result = await query(
       "DELETE FROM research_milestones WHERE project_id = $1 AND id = $2 RETURNING id",
@@ -825,6 +1507,13 @@ router.delete(
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Milestone tidak ditemukan." });
     }
+
+    await notifyMilestoneUpdate(
+      req.params.id,
+      actorUserId,
+      "Menghapus",
+      String(existingMilestone.rows[0]?.label || "milestone").trim()
+    );
 
     res.json({ message: "Milestone berhasil dihapus." });
   })

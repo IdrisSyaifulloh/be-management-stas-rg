@@ -2,6 +2,7 @@ const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { extractRole } = require("../../utils/roleGuard");
+const { resolveStudentId } = require("../../utils/studentResolver");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
@@ -16,12 +17,6 @@ const ALLOWED_CERT_FILE_TYPES = {
 
 function resolveRequesterUserId(req) {
   return String(req.headers["x-user-id"] || req.query.userId || req.body?.userId || "").trim();
-}
-
-async function resolveStudentId(studentIdOrUserId) {
-  const result = await query("SELECT id FROM students WHERE id = $1 OR user_id = $1 LIMIT 1", [studentIdOrUserId]);
-  if (result.rowCount === 0) return null;
-  return result.rows[0].id;
 }
 
 async function canDosenAccessProject(userId, projectId) {

@@ -121,7 +121,92 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 - Deskripsi: list user yang punya akses board riset.
 
 ### GET `/research/:id/board`
-- Deskripsi: ringkasan board kolom `todo/doing/review/done` berbasis entri logbook.
+- Deskripsi: payload board riset persisten.
+- Response utama:
+  - `project`
+  - `tasks`
+  - `columns.todo|doing|review|done`
+  - `counts`
+- Task kini memuat field lengkap:
+  - `id`, `project_id`, `title`, `description`, `status`, `deadline`, `priority`, `tag`
+  - `assignee_ids`, `assignees`, `progress`, `comments_count`
+  - `subtasks`, `attachments`, `created_by`, `created_at`, `updated_at`
+
+### PATCH `/research/:id/board/header`
+- Deskripsi: update header/detail board/proyek.
+- Role:
+  - `operator`, `dosen` yang punya akses proyek
+- Body opsional:
+  - `title`, `shortTitle`, `periodText`, `mitra`, `status`, `progress`
+  - `category`, `description`, `funding`, `repositori`, `attachmentLink`
+
+### POST `/research/:id/board/tasks`
+- Deskripsi: tambah task board persisten.
+- Body wajib:
+  - `title`
+- Body opsional:
+  - `id`, `description`, `status`, `deadline`, `priority`, `tag`
+  - `assignee_ids` / `assigneeIds`
+  - `progress`, `sortOrder`
+
+### GET `/research/:id/board/tasks/:taskId`
+- Deskripsi: detail 1 task beserta assignee, subtasks, attachments, comments.
+
+### PATCH `/research/:id/board/tasks/:taskId`
+- Deskripsi: edit task board.
+- Body opsional:
+  - `title`, `description`, `status`, `deadline`, `priority`, `tag`
+  - `assignee_ids` / `assigneeIds`
+  - `progress`, `sortOrder`
+
+### PATCH `/research/:id/board/tasks/:taskId/status`
+- Deskripsi: pindah status task antar kolom.
+- Body wajib:
+  - `status` (`TO DO` / `DOING` / `REVIEW` / `DONE`)
+- Body opsional:
+  - `sortOrder`
+
+### DELETE `/research/:id/board/tasks/:taskId`
+- Deskripsi: hapus task board persisten.
+
+### POST `/research/:id/board/tasks/:taskId/subtasks`
+- Deskripsi: tambah checklist/subtask.
+- Body wajib:
+  - `title`
+- Body opsional:
+  - `id`, `done`, `sortOrder`
+
+### PATCH `/research/:id/board/tasks/:taskId/subtasks/:subtaskId`
+- Deskripsi: edit/toggle subtask.
+- Body opsional:
+  - `title`, `done`, `sortOrder`
+
+### DELETE `/research/:id/board/tasks/:taskId/subtasks/:subtaskId`
+- Deskripsi: hapus subtask.
+
+### POST `/research/:id/board/tasks/:taskId/attachments`
+- Deskripsi: upload lampiran task persisten.
+- Body wajib:
+  - `fileDataUrl`, `fileName`
+- Body opsional:
+  - `id`
+- Catatan:
+  - `fileDataUrl` menerima format data URL base64.
+  - File valid: PDF/DOC/DOCX/XLS/XLSX/PPT/PPTX/JPG/PNG/TXT/ZIP, maksimal 15 MB.
+  - File disimpan ke `/uploads/board-tasks/...`.
+
+### DELETE `/research/:id/board/tasks/:taskId/attachments/:attachmentId`
+- Deskripsi: hapus lampiran task.
+
+### GET `/research/:id/board/tasks/:taskId/comments`
+- Deskripsi: list komentar task board.
+
+### POST `/research/:id/board/tasks/:taskId/comments`
+- Deskripsi: tambah komentar task board.
+- Body wajib:
+  - `authorId`, `text`
+- Body opsional:
+  - `id`, `authorName`
 
 ### GET `/research/:id/milestones`
 - Deskripsi: list milestone riset.
@@ -176,12 +261,18 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
   - `studentId`
   - `projectId`
 - Deskripsi: list logbook + comments + data verifikasi terbaru.
+- Response tambahan:
+  - `file_url`, `file_name`, `file_size`, `has_attachment`
 
 ### POST `/logbooks`
 - Body wajib:
   - `id`, `studentId`, `date`, `title`, `description`
 - Body opsional:
-  - `projectId`, `output`, `kendala`, `hasAttachment`
+  - `projectId`, `output`, `kendala`, `hasAttachment`, `fileName`, `fileDataUrl`
+- Catatan:
+  - `fileDataUrl` menerima format data URL base64.
+  - File valid: PDF/DOC/DOCX/JPG/PNG/ZIP, maksimal 10 MB.
+  - Lampiran disimpan ke `/uploads/logbooks/...`.
 
 ### PATCH `/logbooks/:id/verify`
 - Body wajib:
@@ -193,6 +284,8 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 
 ### PUT `/logbooks/:id`
 - Deskripsi: update entri logbook.
+- Body opsional tambahan:
+  - `fileName`, `fileDataUrl`, `clearAttachment`
 
 ### DELETE `/logbooks/:id`
 - Deskripsi: hapus entri logbook.
@@ -229,10 +322,37 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 ### GET `/letter-requests?status=...`
 - Query opsional:
   - `status` (`Menunggu`/`Diproses`/`Siap Unduh`)
+  - `studentId`
+  - `lecturerId`
+  - `requesterType` (`student`/`lecturer`)
+  - `requesterId`
+  - `projectId`
+- Deskripsi:
+  - `mahasiswa` melihat surat berdasarkan `student_id` miliknya.
+  - `dosen` melihat surat berdasarkan requester dosen miliknya.
+  - `operator` dapat memfilter surat mahasiswa maupun dosen.
+- Response tambahan:
+  - `requesterType`, `requesterId`, `requesterName`
+  - `projectId`, `projectName`
+  - `catatan`
 
 ### POST `/letter-requests`
+- Deskripsi:
+  - Endpoint generik untuk pengajuan surat mahasiswa maupun dosen.
+  - Alias route juga tersedia di: `POST /lecturer-letter-requests`
 - Body wajib:
-  - `id`, `studentId`, `jenis`, `tanggal`, `tujuan`
+  - `jenis`, `tanggal`, `tujuan`
+- Body opsional:
+  - `id`
+  - `requesterType` (`student`/`lecturer`)
+  - `studentId` (untuk requester mahasiswa)
+  - `lecturerId` atau `requesterId` (untuk requester dosen)
+  - `projectId`
+  - `catatan`
+- Catatan:
+  - Jika `requesterType=student`, backend akan memvalidasi mahasiswa aktif dari `studentId`.
+  - Jika `requesterType=lecturer`, backend akan memvalidasi dosen dari `lecturerId`/`requesterId`.
+  - Jika `id` tidak dikirim, backend akan generate otomatis sesuai requester.
 
 ### PATCH `/letter-requests/:id/status`
 - Body wajib:
@@ -287,6 +407,17 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 ### GET `/dashboard/summary`
 - Deskripsi: ringkasan dashboard operator.
 
+### GET `/dashboard/operator-warnings`
+- Deskripsi: daftar warning dashboard operator yang BELUM pernah dikirim reminder untuk rule/periode yang sama.
+- Warning yang didukung:
+  - `logbook_missing` (unik per mahasiswa + tanggal acuan)
+  - `attendance_absent` (unik per mahasiswa + tanggal hari itu)
+  - `low_hours` (unik per mahasiswa + periode minggu berjalan)
+- Response utama:
+  - `referenceDate`, `referencePeriod`
+  - `warnings.logbookMissing|attendanceAbsent|lowHours`
+  - `counts`
+
 ### GET `/dashboard/student?userId=...`
 - Query wajib:
   - `userId`
@@ -334,6 +465,12 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
   - `recipientUserId`, `title`, `body`
 - Body opsional:
   - `id`, `type`
+  - `reminderType`, `studentId`, `referenceDate`, `referencePeriod`
+  - `forceResend`
+- Catatan:
+  - Contract lama tetap didukung.
+  - Jika notifikasi dikenali sebagai reminder dashboard, backend otomatis mencatat log reminder.
+  - Reminder yang sama tidak akan dikirim ulang untuk periode yang sama kecuali `forceResend=true`.
 
 ### PATCH `/notifications/:id/read`
 - Body opsional:
@@ -350,24 +487,90 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 - Body wajib:
   - `items` array objek `{ id: string, enabled: boolean }`
 
+### Perilaku aktif notifikasi sistem
+- Backend sekarang membaca toggle `system-settings.notif.events` sebagai rule aktif pengiriman.
+- Event yang sudah digate:
+  - `logbook_reminder`
+  - `logbook_missing`
+  - `low_attendance`
+  - `cuti_request`
+  - `surat_request`
+  - `milestone_update`
+- Jika event `enabled=false`:
+  - row `notifications` tidak dibuat
+  - row `dashboard_reminder_logs` tidak dibuat
+  - endpoint pengiriman akan return info `skipped=true` untuk flow yang relevan
+- Reminder otomatis backend berjalan via scheduler dan memakai `notif.reminder`:
+  - `firstTime`
+  - `secondTime`
+  - `deadlineTime`
+  - `toleranceDays`
+
 ## 13) Draft Reports
 
 ### GET `/draft-reports?studentId=...&type=...`
 - Query wajib:
   - `studentId`
 - Query opsional:
-  - `type` (`Semua` / `Laporan TA` / `Jurnal` / `Laporan Kemajuan`)
+  - `type` (`Semua` / label aktif dari config backend)
+  - `projectId`
 - Deskripsi:
-  - Saat ini data draft diturunkan dari logbook + audit log review.
-  - Beberapa field (`type`, `fileSize`, `version`) masih dibentuk secara sintetis.
+  - Data draft sekarang dibaca dari tabel persisten `draft_reports`.
+  - Selama masa transisi, data legacy sintetis dari logbook + audit log masih bisa ikut muncul.
+- Response tambahan:
+  - `file_url`, `file_name`, `file_size`, `mime_type`
+  - `version`, `projectId`, `reviewedBy`, `reviewedAt`
+
+### POST `/draft-reports`
+- Body wajib:
+  - `studentId`, `projectId`, `title`, `type`, `fileName`, `fileDataUrl`
+- Body opsional:
+  - `id`
+- Catatan:
+  - Jika `id` tidak dikirim, backend akan generate ID otomatis format `DRF-YYYYMMDD-XXX`.
+  - Status default draft baru: `Menunggu Review`.
+  - Versi default draft baru: `v1.0`.
+  - File valid: PDF/DOC/DOCX, maksimal 10 MB.
+  - File disimpan ke `/uploads/drafts/...`.
+
+### PUT `/draft-reports/:id`
+- Deskripsi: update draft/revisi mahasiswa.
+- Body opsional:
+  - `title`, `type`, `projectId`, `fileName`, `fileDataUrl`, `clearAttachment`
+- Catatan:
+  - Jika upload revisi baru, backend mengganti file lama dengan file baru.
+  - Versi akan otomatis naik konsisten, misalnya `v1.0 -> v1.1`.
+  - Status otomatis di-reset ke `Menunggu Review`.
 
 ### PATCH `/draft-reports/:id/review`
 - Body wajib:
   - `status` (`Menunggu Review`/`Dalam Review`/`Disetujui`)
   - `reviewedBy`
-  - `studentId`
 - Body opsional:
+  - `studentId`
   - `note`, `reviewedByName`
+- Catatan:
+  - Review dosen tetap disimpan ke audit log.
+  - Jika draft sudah persisten, status/comment/reviewer juga ikut diupdate ke tabel `draft_reports`.
+
+## 13.1) Draft Report Types
+
+### GET `/draft-report-types`
+- Query opsional:
+  - `includeInactive=true|false`
+- Deskripsi: ambil daftar jenis draft/laporan dari backend.
+
+### POST `/draft-report-types`
+- Role: `operator`
+- Body wajib:
+  - `label`
+- Body opsional:
+  - `id`, `is_active`, `sort_order`
+- Deskripsi: tambah jenis draft/laporan baru.
+
+### DELETE `/draft-report-types/:id`
+- Role: `operator`
+- Deskripsi: hapus jenis draft/laporan dari backend config.
 
 ## 14) Profile
 

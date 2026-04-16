@@ -49,6 +49,8 @@ app.use((req, res, next) => {
 // This automatically deletes student accounts 30 days after withdrawal
 const cleanupJob = require('./jobs/cleanupWithdrawnStudents');
 cleanupJob.startMonitoring();
+const notificationReminderJob = require('./jobs/notificationReminderScheduler');
+notificationReminderJob.startMonitoring();
 
 
 // ======================================================
