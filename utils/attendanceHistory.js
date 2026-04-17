@@ -115,7 +115,7 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows 
   for (let current = new Date(start); current <= end; current.setUTCDate(current.getUTCDate() + 1)) {
     const isoDate = formatIsoDate(current);
     const attendanceItem = attendanceMap.get(isoDate);
-    const isWeekend = current.getUTCDay() === 0;
+    const isWeekend = current.getUTCDay() === 0 || current.getUTCDay() === 6;
 
     let status = "Tidak Hadir";
     let statusColor = "red";

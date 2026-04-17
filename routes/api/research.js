@@ -362,7 +362,6 @@ router.get(
   })
 );
 
-<<<<<<< HEAD
 // ─── Board Cards (Logbook Entries) CRUD ──────────────────────────────────────
 
 router.post(
@@ -456,7 +455,9 @@ router.put(
     }
 
     res.json({ message: "Card berhasil diperbarui.", card: result.rows[0] });
-=======
+  })
+);
+
 router.patch(
   "/:id/board/header",
   asyncHandler(async (req, res) => {
@@ -719,12 +720,12 @@ router.patch(
 
     const task = await fetchTaskDetail(req.params.id, req.params.taskId);
     res.json({ message: "Status task board berhasil diperbarui.", task });
->>>>>>> 60e32de7843a28d786efca51894c4d25deae0a05
+
   })
 );
 
 router.delete(
-<<<<<<< HEAD
+
   "/:id/board/cards/:cardId",
   asyncHandler(async (req, res) => {
     const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
@@ -745,7 +746,10 @@ router.delete(
     }
 
     res.json({ message: "Card berhasil dihapus." });
-=======
+  })
+);
+
+router.delete(
   "/:id/board/tasks/:taskId",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
@@ -1055,7 +1059,7 @@ router.post(
       comment: updatedTask?.comments.find((item) => item.id === commentId) || null,
       task: updatedTask
     });
->>>>>>> 60e32de7843a28d786efca51894c4d25deae0a05
+
   })
 );
 
