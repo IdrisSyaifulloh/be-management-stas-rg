@@ -48,13 +48,21 @@ router.post(
 
     const settings = await getSettingsAsync();
     const gps = settings.gps || {};
-    const distanceMeters = haversineDistanceMeters(Number(latitude), Number(longitude), Number(gps.latitude), Number(gps.longitude));
+    const refLat = Number(gps.latitude);
+    const refLng = Number(gps.longitude);
+    const refRadius = Number(gps.radius || 0);
 
-    if (distanceMeters > Number(gps.radius || 0)) {
+    if (!refLat || !refLng) {
+      return res.status(500).json({ message: "Koordinat titik absensi belum dikonfigurasi. Hubungi operator." });
+    }
+
+    const distanceMeters = haversineDistanceMeters(Number(latitude), Number(longitude), refLat, refLng);
+
+    if (distanceMeters > refRadius) {
       return res.status(400).json({
         message: "Lokasi di luar radius absensi.",
         distanceMeters: Math.round(distanceMeters),
-        allowedRadiusMeters: Number(gps.radius || 0)
+        allowedRadiusMeters: refRadius
       });
     }
 

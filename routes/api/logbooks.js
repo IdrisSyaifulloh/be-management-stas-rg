@@ -424,4 +424,25 @@ router.post(
   })
 );
 
+router.delete(
+  "/:logbookId/comments/:commentId",
+  asyncHandler(async (req, res) => {
+    const { logbookId, commentId } = req.params;
+
+    // Verify the comment belongs to the specified logbook entry
+    const commentCheck = await query(
+      "SELECT id FROM logbook_comments WHERE id = $1 AND logbook_entry_id = $2",
+      [commentId, logbookId]
+    );
+
+    if (commentCheck.rowCount === 0) {
+      return res.status(404).json({ message: "Komentar tidak ditemukan." });
+    }
+
+    await query("DELETE FROM logbook_comments WHERE id = $1", [commentId]);
+
+    res.json({ message: "Komentar berhasil dihapus." });
+  })
+);
+
 module.exports = router;

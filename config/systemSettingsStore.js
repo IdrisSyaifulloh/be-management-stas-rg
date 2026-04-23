@@ -9,8 +9,8 @@ const DEFAULT_SETTINGS = {
     logoDataUrl: null
   },
   gps: {
-    latitude: -7.5571,
-    longitude: 110.8316,
+    latitude: -6.973185,
+    longitude: 107.632543,
     radius: 15
   },
   cuti: {
