@@ -408,15 +408,33 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 - Deskripsi: ringkasan dashboard operator.
 
 ### GET `/dashboard/operator-warnings`
-- Deskripsi: daftar warning dashboard operator yang BELUM pernah dikirim reminder untuk rule/periode yang sama.
+- Deskripsi: daftar warning dashboard operator yang masih aktif untuk periode berjalan.
 - Warning yang didukung:
   - `logbook_missing` (unik per mahasiswa + tanggal acuan)
   - `attendance_absent` (unik per mahasiswa + tanggal hari itu)
   - `low_hours` (unik per mahasiswa + periode minggu berjalan)
+- Catatan perilaku:
+  - `attendance_absent` hanya muncul setelah jam `10:00` WIB.
+  - `attendance_absent` tidak lagi memakai flow kirim notifikasi.
+  - Warning akan hilang jika sudah pernah dikirim reminder atau sudah ditandai `reviewed` untuk periode yang sama.
 - Response utama:
   - `referenceDate`, `referencePeriod`
+  - `meta.attendanceAbsent.visibleAfter|active|notificationEnabled`
   - `warnings.logbookMissing|attendanceAbsent|lowHours`
   - `counts`
+
+### POST `/dashboard/operator-warnings/review`
+- Deskripsi: tandai warning dashboard sebagai sudah ditinjau agar tidak muncul lagi pada periode yang sama.
+- Role:
+  - `operator`
+- Body wajib:
+  - `type`
+  - `studentId` atau `recipientUserId`
+- Body opsional:
+  - `referenceDate`, `referencePeriod`, `reviewNote`
+- Catatan:
+  - Untuk `attendance_absent`, jika `referenceDate` tidak dikirim backend memakai tanggal hari ini.
+  - Jika warning periode yang sama sudah pernah ditandai, response akan return `duplicate=true`.
 
 ### GET `/dashboard/student?userId=...`
 - Query wajib:

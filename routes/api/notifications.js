@@ -128,6 +128,15 @@ router.post(
         })
       : null;
 
+    if (detectedReminderType === "attendance_absent") {
+      return res.status(200).json({
+        message: "Notifikasi untuk section Tidak Hadir Hari Ini sudah dinonaktifkan.",
+        skipped: true,
+        reason: "attendance_absent_notification_removed",
+        eventId: inferredEventId || "low_attendance"
+      });
+    }
+
     if (detectedReminderType && resolvedStudentId && !Boolean(forceResend)) {
       const existingReminder = await findExistingDashboardReminder({
         studentId: resolvedStudentId,

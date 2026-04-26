@@ -20,7 +20,7 @@ router.post(
     const result = await query(
       `
       SELECT u.id, u.name, u.initials, u.role, u.prodi, u.password_hash, u.is_active,
-             s.nim, s.status AS student_status, s.withdrawal_at, s.scheduled_deletion_at,
+             s.nim, s.tipe, s.status AS student_status, s.withdrawal_at, s.scheduled_deletion_at,
              l.nip
       FROM users u
       LEFT JOIN students s ON s.user_id = u.id
@@ -87,6 +87,7 @@ router.post(
         initials: user.initials,
         role: user.role,
         prodi: user.prodi,
+        tipe: user.role === "mahasiswa" ? user.tipe : undefined,
       },
     });
   }),

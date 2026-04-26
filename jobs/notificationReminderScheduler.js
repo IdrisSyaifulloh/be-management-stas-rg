@@ -18,7 +18,8 @@ function getJakartaNowParts(date = new Date()) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false
+    hour12: false,
+    hourCycle: "h23"
   });
 
   const parts = formatter.formatToParts(date).reduce((acc, item) => {
@@ -200,7 +201,7 @@ async function dispatchOperatorLogbookMissing({ slot, referenceDate, toleranceDa
   return { sent, skipped };
 }
 
-async function dispatchOperatorLowAttendance({ slot, referenceDate, referencePeriod }) {
+async function dispatchOperatorLowAttendance({ slot, referencePeriod }) {
   if (slot !== "deadline") {
     return { sent: 0, skipped: 0 };
   }
@@ -208,87 +209,21 @@ async function dispatchOperatorLowAttendance({ slot, referenceDate, referencePer
   const operatorsResult = await query("SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE");
   if (operatorsResult.rowCount === 0) return { sent: 0, skipped: 0 };
 
-  const [absentResult, lowHoursResult] = await Promise.all([
-    query(
-      `
-      SELECT s.id AS student_id, s.user_id AS recipient_user_id, u.name AS student_name
-      FROM students s
-      JOIN users u ON u.id = s.user_id
-      LEFT JOIN attendance_records ar
-        ON ar.student_id = s.id
-       AND ar.attendance_date = $1::date
-      WHERE s.status = 'Aktif'
-        AND COALESCE(ar.status, 'Belum Absen') NOT IN ('Hadir', 'Cuti')
-      `,
-      [referenceDate]
-    ),
-    query(
-      `
-      SELECT s.id AS student_id, s.user_id AS recipient_user_id, u.name AS student_name,
-             COALESCE(s.jam_minggu_ini, 0) AS current_hours,
-             COALESCE(s.jam_minggu_target, 0) AS target_hours
-      FROM students s
-      JOIN users u ON u.id = s.user_id
-      WHERE s.status = 'Aktif'
-        AND COALESCE(s.jam_minggu_target, 0) > 0
-        AND COALESCE(s.jam_minggu_ini, 0) < COALESCE(s.jam_minggu_target, 0)
-      `
-    )
-  ]);
+  const lowHoursResult = await query(
+    `
+    SELECT s.id AS student_id, s.user_id AS recipient_user_id, u.name AS student_name,
+           COALESCE(s.jam_minggu_ini, 0) AS current_hours,
+           COALESCE(s.jam_minggu_target, 0) AS target_hours
+    FROM students s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.status = 'Aktif'
+      AND COALESCE(s.jam_minggu_target, 0) > 0
+      AND COALESCE(s.jam_minggu_ini, 0) < COALESCE(s.jam_minggu_target, 0)
+    `
+  );
 
   let sent = 0;
   let skipped = 0;
-
-  for (const student of absentResult.rows) {
-    for (const operator of operatorsResult.rows) {
-      const referenceKey = `${student.student_id}:${referenceDate}:attendance_absent`;
-      const alreadyDispatched = await hasNotificationDispatch({
-        eventId: "low_attendance",
-        recipientUserId: operator.id,
-        referenceKey,
-        scheduleSlot: slot
-      });
-
-      if (alreadyDispatched) {
-        skipped += 1;
-        continue;
-      }
-
-      const result = await createNotification({
-        recipientUserId: operator.id,
-        senderUserId: null,
-        type: "pengumuman",
-        eventId: "low_attendance",
-        reminderType: "attendance_absent",
-        title: "Reminder Kehadiran Rendah",
-        body: `${student.student_name} belum tercatat hadir pada tanggal ${referenceDate}.`
-      });
-
-      if (result.sent) {
-        await recordNotificationDispatch({
-          eventId: "low_attendance",
-          recipientUserId: operator.id,
-          referenceKey,
-          scheduleSlot: slot,
-          notificationId: result.id,
-          payload: { studentId: student.student_id, referenceDate, warningType: "attendance_absent" }
-        });
-
-        await recordDashboardReminder({
-          recipientUserId: operator.id,
-          studentId: student.student_id,
-          type: "attendance_absent",
-          referenceDate,
-          notificationId: result.id,
-          sentBy: null
-        });
-
-        sent += 1;
-      } else {
-        skipped += 1;
-      }
-    }
-  }
 
   for (const student of lowHoursResult.rows) {
     for (const operator of operatorsResult.rows) {
@@ -368,9 +303,8 @@ async function runReminderCycle(now = new Date()) {
       referenceDate: nowParts.date,
       toleranceDays: reminderSettings?.toleranceDays
     });
-    const operatorAttendance = await dispatchOperatorLowAttendance({
+    const operatorLowAttendance = await dispatchOperatorLowAttendance({
       slot,
-      referenceDate: nowParts.date,
       referencePeriod: getIsoWeekKey(now)
     });
 
@@ -378,7 +312,7 @@ async function runReminderCycle(now = new Date()) {
       slot,
       logbookReminder,
       operatorMissing,
-      operatorAttendance
+      operatorLowAttendance
     });
   }
 

@@ -3,9 +3,46 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { getSettingsAsync } = require("../../config/systemSettingsStore");
 const { extractRole } = require("../../utils/roleGuard");
-const { ensureDashboardReminderTable } = require("../../utils/dashboardReminders");
+const {
+  buildReminderIdentity,
+  ensureDashboardReminderTable,
+  ensureDashboardWarningReviewTable,
+  findExistingDashboardWarningReview,
+  normalizeDashboardReminderType,
+  recordDashboardWarningReview,
+  resolveDashboardReminderStudentId
+} = require("../../utils/dashboardReminders");
 
 const router = express.Router();
+const DASHBOARD_TIMEZONE = "Asia/Jakarta";
+const ATTENDANCE_ABSENT_VISIBLE_AFTER = "10:00";
+
+function getJakartaNowParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: DASHBOARD_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23"
+  });
+
+  const parts = formatter.formatToParts(date).reduce((acc, item) => {
+    acc[item.type] = item.value;
+    return acc;
+  }, {});
+
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`
+  };
+}
+
+function isAfterAttendanceCutoff(time) {
+  return String(time || "") >= ATTENDANCE_ABSENT_VISIBLE_AFTER;
+}
 
 router.get(
   "/summary",
@@ -54,14 +91,17 @@ router.get(
     }
 
     await ensureDashboardReminderTable();
+    await ensureDashboardWarningReviewTable();
 
+    const nowParts = getJakartaNowParts();
+    const attendanceSectionActive = isAfterAttendanceCutoff(nowParts.time);
     const calendarResult = await query(
       `
-      SELECT CURRENT_DATE::text AS today,
-             to_char(CURRENT_DATE, 'IYYY-"W"IW') AS week_key
-      `
+      SELECT to_char($1::date, 'IYYY-"W"IW') AS week_key
+      `,
+      [nowParts.date]
     );
-    const today = calendarResult.rows[0]?.today;
+    const today = nowParts.date;
     const weekKey = calendarResult.rows[0]?.week_key;
 
     const [logbookMissingRows, attendanceAbsentRows, lowHoursRows] = await Promise.all([
@@ -90,38 +130,47 @@ router.get(
               AND dr.type = 'logbook_missing'
               AND dr.reference_date = $1::date
           )
-        ORDER BY u.name ASC
-        `,
-        [today]
-      ),
-      query(
-        `
-        SELECT
-          s.id AS student_id,
-          s.user_id AS recipient_user_id,
-          u.name AS student_name,
-          u.initials AS student_initials,
-          s.nim,
-          COALESCE(ar.status, 'Belum Absen') AS attendance_status,
-          $1::date AS reference_date
-        FROM students s
-        JOIN users u ON u.id = s.user_id
-        LEFT JOIN attendance_records ar
-          ON ar.student_id = s.id
-         AND ar.attendance_date = $1::date
-        WHERE s.status = 'Aktif'
-          AND COALESCE(ar.status, 'Belum Absen') NOT IN ('Hadir', 'Cuti')
           AND NOT EXISTS (
             SELECT 1
-            FROM dashboard_reminder_logs dr
-            WHERE dr.student_id = s.id
-              AND dr.type = 'attendance_absent'
-              AND dr.reference_date = $1::date
+            FROM dashboard_warning_reviews dwr
+            WHERE dwr.student_id = s.id
+              AND dwr.type = 'logbook_missing'
+              AND dwr.reference_date = $1::date
           )
         ORDER BY u.name ASC
         `,
         [today]
       ),
+      attendanceSectionActive
+        ? query(
+            `
+            SELECT
+              s.id AS student_id,
+              s.user_id AS recipient_user_id,
+              u.name AS student_name,
+              u.initials AS student_initials,
+              s.nim,
+              COALESCE(ar.status, 'Belum Absen') AS attendance_status,
+              $1::date AS reference_date
+            FROM students s
+            JOIN users u ON u.id = s.user_id
+            LEFT JOIN attendance_records ar
+              ON ar.student_id = s.id
+             AND ar.attendance_date = $1::date
+            WHERE s.status = 'Aktif'
+              AND COALESCE(ar.status, 'Belum Absen') NOT IN ('Hadir', 'Cuti')
+              AND NOT EXISTS (
+                SELECT 1
+                FROM dashboard_warning_reviews dwr
+                WHERE dwr.student_id = s.id
+                  AND dwr.type = 'attendance_absent'
+                  AND dwr.reference_date = $1::date
+              )
+            ORDER BY u.name ASC
+            `,
+            [today]
+          )
+        : Promise.resolve({ rows: [] }),
       query(
         `
         SELECT
@@ -144,6 +193,13 @@ router.get(
             WHERE dr.student_id = s.id
               AND dr.type = 'low_hours'
               AND dr.reference_period = $1::text
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM dashboard_warning_reviews dwr
+            WHERE dwr.student_id = s.id
+              AND dwr.type = 'low_hours'
+              AND dwr.reference_period = $1::text
           )
         ORDER BY COALESCE(s.jam_minggu_ini, 0) ASC, u.name ASC
         `,
@@ -169,6 +225,10 @@ router.get(
       referencePeriod: row.reference_period || null,
       attendance_status: row.attendance_status || null,
       attendanceStatus: row.attendance_status || null,
+      can_send_notification: type !== "attendance_absent",
+      canSendNotification: type !== "attendance_absent",
+      can_review: type === "attendance_absent",
+      canReview: type === "attendance_absent",
       current_hours: row.current_hours != null ? Number(row.current_hours) : null,
       currentHours: row.current_hours != null ? Number(row.current_hours) : null,
       target_hours: row.target_hours != null ? Number(row.target_hours) : null,
@@ -177,7 +237,9 @@ router.get(
 
     const warnings = {
       logbookMissing: logbookMissingRows.rows.map((row) => mapWarningItem(row, "logbook_missing")),
-      attendanceAbsent: attendanceAbsentRows.rows.map((row) => mapWarningItem(row, "attendance_absent")),
+      attendanceAbsent: attendanceSectionActive
+        ? attendanceAbsentRows.rows.map((row) => mapWarningItem(row, "attendance_absent"))
+        : [],
       lowHours: lowHoursRows.rows.map((row) => mapWarningItem(row, "low_hours"))
     };
 
@@ -185,12 +247,98 @@ router.get(
       generatedAt: new Date().toISOString(),
       referenceDate: today,
       referencePeriod: weekKey,
+      meta: {
+        timezone: DASHBOARD_TIMEZONE,
+        attendanceAbsent: {
+          visibleAfter: ATTENDANCE_ABSENT_VISIBLE_AFTER,
+          active: attendanceSectionActive,
+          notificationEnabled: false
+        }
+      },
       warnings,
       counts: {
         logbookMissing: warnings.logbookMissing.length,
         attendanceAbsent: warnings.attendanceAbsent.length,
         lowHours: warnings.lowHours.length,
         total: warnings.logbookMissing.length + warnings.attendanceAbsent.length + warnings.lowHours.length
+      }
+    });
+  })
+);
+
+router.post(
+  "/operator-warnings/review",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Akses ditolak. Review warning dashboard hanya untuk operator." });
+    }
+
+    await ensureDashboardWarningReviewTable();
+
+    const {
+      studentId,
+      recipientUserId,
+      type,
+      referenceDate,
+      referencePeriod,
+      reviewNote
+    } = req.body || {};
+
+    const normalizedType = normalizeDashboardReminderType(type);
+    if (!normalizedType) {
+      return res.status(400).json({ message: "type warning tidak valid." });
+    }
+
+    const resolvedStudentId = await resolveDashboardReminderStudentId({ studentId, recipientUserId });
+    if (!resolvedStudentId) {
+      return res.status(404).json({ message: "Mahasiswa warning tidak ditemukan." });
+    }
+
+    const identity = buildReminderIdentity({
+      type: normalizedType,
+      referenceDate,
+      referencePeriod
+    });
+
+    const existingReview = await findExistingDashboardWarningReview({
+      studentId: resolvedStudentId,
+      type: normalizedType,
+      referenceDate: identity.referenceDate,
+      referencePeriod: identity.referencePeriod
+    });
+
+    if (existingReview) {
+      return res.status(200).json({
+        message: "Warning dashboard untuk periode ini sudah pernah ditandai ditinjau.",
+        duplicate: true,
+        review: {
+          type: normalizedType,
+          referenceDate: identity.referenceDate,
+          referencePeriod: identity.referencePeriod,
+          reviewedAt: existingReview.reviewed_at
+        }
+      });
+    }
+
+    const reviewerUserId = req.authUser?.id || String(req.headers["x-user-id"] || "").trim() || null;
+    const reviewResult = await recordDashboardWarningReview({
+      studentId: resolvedStudentId,
+      type: normalizedType,
+      referenceDate: identity.referenceDate,
+      referencePeriod: identity.referencePeriod,
+      reviewedBy: reviewerUserId,
+      reviewNote
+    });
+
+    res.status(201).json({
+      message: "Warning dashboard berhasil ditandai sudah ditinjau.",
+      review: {
+        id: reviewResult.id,
+        studentId: resolvedStudentId,
+        type: normalizedType,
+        referenceDate: reviewResult.referenceDate,
+        referencePeriod: reviewResult.referencePeriod
       }
     });
   })
@@ -209,7 +357,10 @@ router.get(
       return res.status(400).json({ message: "userId wajib diisi." });
     }
 
-    const studentResult = await query("SELECT id, nim FROM students WHERE user_id = $1", [userId]);
+    const studentResult = await query(
+      "SELECT id, nim, TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date FROM students WHERE user_id = $1",
+      [userId]
+    );
     if (studentResult.rowCount === 0) {
       return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
     }
@@ -245,8 +396,9 @@ router.get(
         FROM attendance_records
         WHERE student_id = $1
           AND date_trunc('month', attendance_date) = date_trunc('month', CURRENT_DATE)
+          AND attendance_date >= $2::date
         `,
-        [studentId]
+        [studentId, studentResult.rows[0].active_start_date]
       ),
       query(
         `
