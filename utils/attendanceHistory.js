@@ -146,7 +146,13 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows,
     let status = "Tidak Hadir";
     let statusColor = "red";
 
-    if (isWeekend) {
+    if (attendanceItem) {
+      status = attendanceItem.status || "Hadir";
+      statusColor = status === "Hadir" ? "green" : status === "Cuti" ? "amber" : "red";
+      if (status === "Hadir") summary.hadir += 1;
+      else if (status === "Cuti") summary.cuti += 1;
+      else summary.tidakHadir += 1;
+    } else if (isWeekend) {
       status = "Libur";
       statusColor = "gray";
       summary.libur += 1;
@@ -154,15 +160,12 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows,
       status = "Cuti";
       statusColor = "amber";
       summary.cuti += 1;
-    } else if (attendanceItem) {
-      status = "Hadir";
-      statusColor = "green";
-      summary.hadir += 1;
     } else {
       summary.tidakHadir += 1;
     }
 
     history.push({
+      id: attendanceItem?.id || null,
       isoDate,
       dateLabel: formatAttendanceDateLabel(isoDate),
       in: formatAttendanceTime(attendanceItem?.check_in_at),
@@ -170,6 +173,10 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows,
       duration: formatAttendanceDuration(attendanceItem?.check_in_at, attendanceItem?.check_out_at),
       status,
       statusColor,
+      autoCheckout: Boolean(attendanceItem?.auto_checkout),
+      checkoutSource: attendanceItem?.checkout_source || null,
+      autoCheckoutReason: attendanceItem?.auto_checkout_reason || null,
+      note: attendanceItem?.note || null,
       attendanceItem
     });
   }

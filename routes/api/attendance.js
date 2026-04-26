@@ -11,6 +11,8 @@ const { extractRole } = require("../../utils/roleGuard");
 const { resolveStudentId } = require("../../utils/studentResolver");
 const {
   buildAttendanceHistory,
+  formatAttendanceDuration,
+  formatAttendanceTime,
   getJakartaDateIso,
   getMonthBounds,
   maxIsoDate,
@@ -47,7 +49,9 @@ function roundHours(value) {
 function getAttendanceRules(settings) {
   return {
     magangMinCheckoutHours: Number(settings.attendanceRules?.magangMinCheckoutHours || 8),
-    earlyCheckoutWarning: Boolean(settings.attendanceRules?.earlyCheckoutWarning ?? true)
+    earlyCheckoutWarning: Boolean(settings.attendanceRules?.earlyCheckoutWarning ?? true),
+    autoCheckoutEnabled: Boolean(settings.attendanceRules?.autoCheckoutEnabled ?? true),
+    autoCheckoutTime: String(settings.attendanceRules?.autoCheckoutTime || "22:00")
   };
 }
 
@@ -55,10 +59,131 @@ async function ensureAttendanceColumns() {
   if (!ensureAttendanceColumnsPromise) {
     ensureAttendanceColumnsPromise = query(`
       ALTER TABLE attendance_records
-      ADD COLUMN IF NOT EXISTS check_out_accuracy_meters DOUBLE PRECISION
+      ADD COLUMN IF NOT EXISTS check_out_accuracy_meters DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS checkout_source TEXT,
+      ADD COLUMN IF NOT EXISTS auto_checkout BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS auto_checkout_reason TEXT,
+      ADD COLUMN IF NOT EXISTS note TEXT
     `);
   }
   await ensureAttendanceColumnsPromise;
+}
+
+function isValidIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function isValidTimeValue(value) {
+  return /^\d{2}:\d{2}$/.test(String(value || ""));
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function getStatusColor(status) {
+  if (status === "Hadir") return "green";
+  if (status === "Cuti") return "amber";
+  if (status === "Libur") return "gray";
+  return "red";
+}
+
+function resolveManualStatus({ status, checkIn, checkOut }) {
+  if (status) return status;
+  if (checkIn || checkOut) return "Hadir";
+  return null;
+}
+
+function validateAttendanceStatus(status) {
+  return ["Hadir", "Cuti", "Tidak Hadir"].includes(status);
+}
+
+function compareTimes(checkIn, checkOut) {
+  if (!checkIn || !checkOut) return 0;
+  return String(checkOut).localeCompare(String(checkIn));
+}
+
+function formatDbTime(value) {
+  return value ? String(value).slice(0, 5) : null;
+}
+
+function mapAttendanceRecord(row) {
+  return {
+    id: row.id,
+    studentId: row.student_id,
+    date: row.attendance_date_text || row.attendance_date,
+    checkIn: formatAttendanceTime(row.check_in_at),
+    checkOut: formatAttendanceTime(row.check_out_at),
+    in: formatAttendanceTime(row.check_in_at),
+    out: formatAttendanceTime(row.check_out_at),
+    duration: formatAttendanceDuration(row.check_in_at, row.check_out_at),
+    status: row.status,
+    statusColor: getStatusColor(row.status),
+    checkInLatitude: row.check_in_lat == null ? null : Number(row.check_in_lat),
+    checkInLongitude: row.check_in_lng == null ? null : Number(row.check_in_lng),
+    checkInAccuracy: row.accuracy_meters == null ? null : Number(row.accuracy_meters),
+    checkOutLatitude: row.check_out_lat == null ? null : Number(row.check_out_lat),
+    checkOutLongitude: row.check_out_lng == null ? null : Number(row.check_out_lng),
+    checkOutAccuracy: row.check_out_accuracy_meters == null ? null : Number(row.check_out_accuracy_meters),
+    autoCheckout: Boolean(row.auto_checkout),
+    checkoutSource: row.checkout_source || null,
+    autoCheckoutReason: row.auto_checkout_reason || null,
+    note: row.note || null
+  };
+}
+
+async function fetchAttendanceRecordById(id) {
+  await ensureAttendanceColumns();
+  const result = await query(
+    `
+    SELECT id, student_id, TO_CHAR(attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
+           check_in_at, check_out_at, check_in_lat, check_in_lng,
+           check_out_lat, check_out_lng, accuracy_meters, check_out_accuracy_meters,
+           checkout_source, auto_checkout, auto_checkout_reason, note, status
+    FROM attendance_records
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [id]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function recordAttendanceAudit({ req, action, actionType, attendanceRecordId, studentId, before = null, after = null }) {
+  const auditId = `AUD-ATT-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+  const actedByUserId = req.authUser?.id || String(req.headers["x-user-id"] || "").trim() || null;
+  await query(
+    `
+    INSERT INTO audit_logs (id, user_id, user_role, action, target, ip, detail)
+    VALUES ($1, $2, 'Operator', $3, $4, $5, $6::jsonb)
+    `,
+    [
+      auditId,
+      actedByUserId,
+      action,
+      `attendance:${attendanceRecordId}`,
+      req.ip || null,
+      JSON.stringify({
+        actionType,
+        attendanceRecordId,
+        studentId,
+        actedByUserId,
+        actedByRole: "operator",
+        actedAt: new Date().toISOString(),
+        before,
+        after
+      })
+    ]
+  );
+}
+
+async function ensureStudentExists(studentId) {
+  const resolvedStudentId = await resolveStudentId(studentId);
+  if (!resolvedStudentId) return null;
+
+  const result = await query("SELECT id FROM students WHERE id = $1 LIMIT 1", [resolvedStudentId]);
+  return result.rows[0]?.id || null;
 }
 
 function parseGpsNumber(value) {
@@ -232,6 +357,7 @@ router.post(
       }));
     }
 
+    await ensureAttendanceColumns();
     const todayRecord = await query(
       `
       SELECT id, check_in_at, check_out_at
@@ -263,6 +389,10 @@ router.post(
             check_in_lng = $3,
           check_out_lat = NULL,
           check_out_lng = NULL,
+            check_out_accuracy_meters = NULL,
+            checkout_source = NULL,
+            auto_checkout = FALSE,
+            auto_checkout_reason = NULL,
             accuracy_meters = $4,
             distance_meters = $5,
             within_radius = TRUE,
@@ -389,6 +519,9 @@ router.post(
           check_out_lat = $2,
           check_out_lng = $3,
           check_out_accuracy_meters = $4,
+          checkout_source = 'USER_GPS',
+          auto_checkout = FALSE,
+          auto_checkout_reason = NULL,
           updated_at = NOW()
       WHERE id = $1
       `,
@@ -417,6 +550,281 @@ router.post(
           }
         : {})
     });
+  })
+);
+
+router.get(
+  "/records/:id",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Akses detail absensi hanya untuk operator." });
+    }
+
+    const record = await fetchAttendanceRecordById(req.params.id);
+    if (!record) {
+      return res.status(404).json({ message: "Data absensi tidak ditemukan." });
+    }
+
+    res.json(mapAttendanceRecord(record));
+  })
+);
+
+router.post(
+  "/records",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat menambah data absensi." });
+    }
+
+    await ensureAttendanceColumns();
+
+    const { studentId, date, checkIn, checkOut, status, note } = req.body || {};
+    const resolvedStudentId = await ensureStudentExists(studentId);
+    if (!resolvedStudentId) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const normalizedDate = String(date || "").trim();
+    const normalizedCheckIn = checkIn == null || checkIn === "" ? null : String(checkIn).trim();
+    const normalizedCheckOut = checkOut == null || checkOut === "" ? null : String(checkOut).trim();
+    const normalizedStatus = status == null || status === "" ? null : String(status).trim();
+
+    if (!isValidIsoDate(normalizedDate)) {
+      return res.status(400).json({ message: "date wajib format YYYY-MM-DD." });
+    }
+    if (normalizedCheckIn && !isValidTimeValue(normalizedCheckIn)) {
+      return res.status(400).json({ message: "checkIn wajib format HH:mm." });
+    }
+    if (normalizedCheckOut && !isValidTimeValue(normalizedCheckOut)) {
+      return res.status(400).json({ message: "checkOut wajib format HH:mm." });
+    }
+    if (normalizedCheckIn && normalizedCheckOut && compareTimes(normalizedCheckIn, normalizedCheckOut) < 0) {
+      return res.status(400).json({ message: "checkOut tidak boleh lebih kecil dari checkIn pada tanggal yang sama." });
+    }
+
+    const finalStatus = resolveManualStatus({
+      status: normalizedStatus,
+      checkIn: normalizedCheckIn,
+      checkOut: normalizedCheckOut
+    });
+    if (!finalStatus) {
+      return res.status(400).json({ message: "Isi minimal status atau checkIn/checkOut." });
+    }
+    if (!validateAttendanceStatus(finalStatus)) {
+      return res.status(400).json({ message: "status harus Hadir, Cuti, atau Tidak Hadir." });
+    }
+
+    const duplicate = await query(
+      `
+      SELECT id
+      FROM attendance_records
+      WHERE student_id = $1 AND attendance_date = $2::date
+      LIMIT 1
+      `,
+      [resolvedStudentId, normalizedDate]
+    );
+
+    if (duplicate.rowCount > 0) {
+      return res.status(409).json({
+        message: "Data absensi untuk mahasiswa dan tanggal ini sudah ada.",
+        existingRecordId: duplicate.rows[0].id
+      });
+    }
+
+    const recordId = `ATD-MAN-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    await query(
+      `
+      INSERT INTO attendance_records (
+        id, student_id, attendance_date, status, check_in_at, check_out_at,
+        check_in_lat, check_in_lng, check_out_lat, check_out_lng,
+        accuracy_meters, check_out_accuracy_meters, distance_meters, within_radius,
+        checkout_source, auto_checkout, auto_checkout_reason, note
+      )
+      VALUES (
+        $1, $2, $3::date, $4,
+        CASE WHEN $5::text IS NULL THEN NULL ELSE (($3::date + $5::time) AT TIME ZONE 'Asia/Jakarta') END,
+        CASE WHEN $6::text IS NULL THEN NULL ELSE (($3::date + $6::time) AT TIME ZONE 'Asia/Jakarta') END,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, FALSE,
+        'OPERATOR_MANUAL', FALSE, NULL, $7
+      )
+      `,
+      [
+        recordId,
+        resolvedStudentId,
+        normalizedDate,
+        finalStatus,
+        normalizedCheckIn,
+        normalizedCheckOut,
+        note == null ? null : String(note)
+      ]
+    );
+
+    const created = await fetchAttendanceRecordById(recordId);
+    await recordAttendanceAudit({
+      req,
+      action: "Create",
+      actionType: "CREATE_ATTENDANCE",
+      attendanceRecordId: recordId,
+      studentId: resolvedStudentId,
+      after: mapAttendanceRecord(created)
+    });
+
+    res.status(201).json(mapAttendanceRecord(created));
+  })
+);
+
+router.patch(
+  "/records/:id",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat mengubah data absensi." });
+    }
+
+    await ensureAttendanceColumns();
+
+    const existing = await query(
+      `
+      SELECT id, student_id, TO_CHAR(attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
+             TO_CHAR(check_in_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI') AS check_in_time,
+             TO_CHAR(check_out_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI') AS check_out_time,
+             status, note
+      FROM attendance_records
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [req.params.id]
+    );
+
+    if (existing.rowCount === 0) {
+      return res.status(404).json({ message: "Data absensi tidak ditemukan." });
+    }
+
+    const before = await fetchAttendanceRecordById(req.params.id);
+    const body = req.body || {};
+    const current = existing.rows[0];
+    const finalDate = hasOwn(body, "date") ? String(body.date || "").trim() : current.attendance_date_text;
+    const finalCheckIn = hasOwn(body, "checkIn")
+      ? (body.checkIn == null || body.checkIn === "" ? null : String(body.checkIn).trim())
+      : formatDbTime(current.check_in_time);
+    const finalCheckOut = hasOwn(body, "checkOut")
+      ? (body.checkOut == null || body.checkOut === "" ? null : String(body.checkOut).trim())
+      : formatDbTime(current.check_out_time);
+    const explicitStatus = hasOwn(body, "status")
+      ? (body.status == null || body.status === "" ? null : String(body.status).trim())
+      : current.status;
+    const finalStatus = resolveManualStatus({
+      status: explicitStatus,
+      checkIn: finalCheckIn,
+      checkOut: finalCheckOut
+    });
+    const finalNote = hasOwn(body, "note") ? (body.note == null ? null : String(body.note)) : current.note;
+
+    if (!isValidIsoDate(finalDate)) {
+      return res.status(400).json({ message: "date wajib format YYYY-MM-DD." });
+    }
+    if (finalCheckIn && !isValidTimeValue(finalCheckIn)) {
+      return res.status(400).json({ message: "checkIn wajib format HH:mm." });
+    }
+    if (finalCheckOut && !isValidTimeValue(finalCheckOut)) {
+      return res.status(400).json({ message: "checkOut wajib format HH:mm." });
+    }
+    if (finalCheckIn && finalCheckOut && compareTimes(finalCheckIn, finalCheckOut) < 0) {
+      return res.status(400).json({ message: "checkOut tidak boleh lebih kecil dari checkIn pada tanggal yang sama." });
+    }
+    if (!finalStatus) {
+      return res.status(400).json({ message: "Isi minimal status atau checkIn/checkOut." });
+    }
+    if (!validateAttendanceStatus(finalStatus)) {
+      return res.status(400).json({ message: "status harus Hadir, Cuti, atau Tidak Hadir." });
+    }
+
+    const duplicate = await query(
+      `
+      SELECT id
+      FROM attendance_records
+      WHERE student_id = $1
+        AND attendance_date = $2::date
+        AND id <> $3
+      LIMIT 1
+      `,
+      [current.student_id, finalDate, req.params.id]
+    );
+
+    if (duplicate.rowCount > 0) {
+      return res.status(409).json({
+        message: "Data absensi untuk mahasiswa dan tanggal ini sudah ada.",
+        existingRecordId: duplicate.rows[0].id
+      });
+    }
+
+    await query(
+      `
+      UPDATE attendance_records
+      SET attendance_date = $2::date,
+          status = $3,
+          check_in_at = CASE WHEN $4::text IS NULL THEN NULL ELSE (($2::date + $4::time) AT TIME ZONE 'Asia/Jakarta') END,
+          check_out_at = CASE WHEN $5::text IS NULL THEN NULL ELSE (($2::date + $5::time) AT TIME ZONE 'Asia/Jakarta') END,
+          check_in_lat = NULL,
+          check_in_lng = NULL,
+          check_out_lat = NULL,
+          check_out_lng = NULL,
+          accuracy_meters = NULL,
+          check_out_accuracy_meters = NULL,
+          distance_meters = NULL,
+          within_radius = FALSE,
+          checkout_source = 'OPERATOR_EDIT',
+          auto_checkout = FALSE,
+          auto_checkout_reason = NULL,
+          note = $6,
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [req.params.id, finalDate, finalStatus, finalCheckIn, finalCheckOut, finalNote]
+    );
+
+    const updated = await fetchAttendanceRecordById(req.params.id);
+    await recordAttendanceAudit({
+      req,
+      action: "Update",
+      actionType: "UPDATE_ATTENDANCE",
+      attendanceRecordId: req.params.id,
+      studentId: current.student_id,
+      before: mapAttendanceRecord(before),
+      after: mapAttendanceRecord(updated)
+    });
+
+    res.json(mapAttendanceRecord(updated));
+  })
+);
+
+router.delete(
+  "/records/:id",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat menghapus data absensi." });
+    }
+
+    await ensureAttendanceColumns();
+    const before = await fetchAttendanceRecordById(req.params.id);
+    if (!before) {
+      return res.status(404).json({ message: "Data absensi tidak ditemukan." });
+    }
+
+    await query("DELETE FROM attendance_records WHERE id = $1", [req.params.id]);
+    await recordAttendanceAudit({
+      req,
+      action: "Delete",
+      actionType: "DELETE_ATTENDANCE",
+      attendanceRecordId: req.params.id,
+      studentId: before.student_id,
+      before: mapAttendanceRecord(before)
+    });
+
+    res.json({ message: "Data absensi berhasil dihapus." });
   })
 );
 
@@ -524,11 +932,18 @@ router.get(
     const effectiveStartDate = maxIsoDate(startDate, activeStartDate);
     const effectiveEndDate = minIsoDate(endDate, todayIso);
 
+    await ensureAttendanceColumns();
     const attendanceRows = await query(
       `
-      SELECT TO_CHAR(attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
+      SELECT id,
+             TO_CHAR(attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
              check_in_at,
-             check_out_at
+             check_out_at,
+             checkout_source,
+             auto_checkout,
+             auto_checkout_reason,
+             note,
+             status
       FROM attendance_records
       WHERE student_id = $1
         AND TO_CHAR(attendance_date, 'YYYY-MM') = $2
@@ -598,7 +1013,10 @@ router.get(
         checkOut: todayAttendance?.check_out_at
           ? new Date(todayAttendance.check_out_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", hour12: false })
           : "--:--",
-        status: todayStatus
+        status: todayStatus,
+        autoCheckout: Boolean(todayAttendance?.auto_checkout),
+        checkoutSource: todayAttendance?.checkout_source || null,
+        autoCheckoutReason: todayAttendance?.auto_checkout_reason || null
       },
       gps: {
         latitude: Number(gps.latitude),
@@ -608,12 +1026,17 @@ router.get(
       gpsPolicy,
       history: history
         .map((item) => ({
+          id: item.id,
           date: item.dateLabel,
           in: item.in,
           out: item.out,
           duration: item.duration,
           status: item.status,
-          statusColor: item.statusColor
+          statusColor: item.statusColor,
+          autoCheckout: item.autoCheckout,
+          checkoutSource: item.checkoutSource,
+          autoCheckoutReason: item.autoCheckoutReason,
+          note: item.note
         }))
         .reverse()
         .slice(0, 31)

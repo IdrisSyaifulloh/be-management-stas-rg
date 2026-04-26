@@ -391,8 +391,11 @@ VALUES
         "risetMinWeeklyHours": 4,
         "risetTargetWeeklyHours": 6,
         "magangDailyHours": 9,
+        "magangMinCheckoutHours": 8,
         "magangWorkDays": "5",
-        "earlyCheckoutWarning": true
+        "earlyCheckoutWarning": true,
+        "autoCheckoutEnabled": true,
+        "autoCheckoutTime": "22:00"
       }
     }'::jsonb,
     NOW()

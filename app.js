@@ -51,6 +51,8 @@ const cleanupJob = require('./jobs/cleanupWithdrawnStudents');
 cleanupJob.startMonitoring();
 const notificationReminderJob = require('./jobs/notificationReminderScheduler');
 notificationReminderJob.startMonitoring();
+const autoCheckoutJob = require('./jobs/autoCheckoutScheduler');
+autoCheckoutJob.startMonitoring();
 
 
 // ======================================================

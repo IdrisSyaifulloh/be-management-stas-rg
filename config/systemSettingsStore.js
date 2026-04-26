@@ -44,7 +44,9 @@ const DEFAULT_SETTINGS = {
     magangDailyHours: 9,
     magangMinCheckoutHours: 8,
     magangWorkDays: "5",
-    earlyCheckoutWarning: true
+    earlyCheckoutWarning: true,
+    autoCheckoutEnabled: true,
+    autoCheckoutTime: "22:00"
   }
 };
 
