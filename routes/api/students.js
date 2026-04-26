@@ -4,14 +4,42 @@ const { query } = require("../../db/pool");
 const bcrypt = require("bcrypt");
 
 const router = express.Router();
+let ensureStudentColumnsPromise = null;
+
+async function ensureStudentColumns() {
+  if (!ensureStudentColumnsPromise) {
+    ensureStudentColumnsPromise = query(`
+      ALTER TABLE students
+      ADD COLUMN IF NOT EXISTS fakultas TEXT,
+      ADD COLUMN IF NOT EXISTS bergabung DATE
+    `);
+  }
+  await ensureStudentColumnsPromise;
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function normalizeOptionalDate(value) {
+  if (value == null || value === "") return null;
+  const normalized = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const error = new Error("bergabung wajib format YYYY-MM-DD.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return normalized;
+}
 
 router.get(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureStudentColumns();
     const result = await query(
       `
       SELECT s.id, s.user_id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
-             s.status, s.tipe, s.bergabung, s.pembimbing,
+             s.fakultas, s.status, s.tipe, TO_CHAR(s.bergabung, 'YYYY-MM-DD') AS bergabung, s.pembimbing,
              s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target,
              COALESCE(
                array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
@@ -22,7 +50,7 @@ router.get(
       LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       GROUP BY s.id, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
-               s.status, s.tipe, s.bergabung, s.pembimbing,
+               s.fakultas, s.status, s.tipe, s.bergabung, s.pembimbing,
                s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
       ORDER BY u.name ASC
       `
@@ -35,10 +63,11 @@ router.get(
 router.get(
   "/:id",
   asyncHandler(async (req, res) => {
+    await ensureStudentColumns();
     const result = await query(
       `
       SELECT s.id, s.user_id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
-             s.status, s.tipe, s.bergabung, s.pembimbing,
+             s.fakultas, s.status, s.tipe, TO_CHAR(s.bergabung, 'YYYY-MM-DD') AS bergabung, s.pembimbing,
              s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target,
              COALESCE(
                array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
@@ -50,7 +79,7 @@ router.get(
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       WHERE s.id = $1
       GROUP BY s.id, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
-               s.status, s.tipe, s.bergabung, s.pembimbing,
+               s.fakultas, s.status, s.tipe, s.bergabung, s.pembimbing,
                s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
       `,
       [req.params.id]
@@ -73,10 +102,12 @@ router.post(
       initials,
       prodi,
       angkatan,
+      fakultas,
       email,
       phone,
       status,
       tipe,
+      bergabung,
       pembimbing,
       password
     } = req.body;
@@ -84,6 +115,9 @@ router.post(
     if (!nim || !name || !initials || !status || !tipe || !password) {
       return res.status(400).json({ message: "nim, name, initials, status, tipe, password wajib diisi." });
     }
+
+    await ensureStudentColumns();
+    const normalizedBergabung = normalizeOptionalDate(bergabung);
 
     await query("BEGIN");
     try {
@@ -107,10 +141,10 @@ router.post(
       // Insert student with user_id referencing the user
       await query(
         `
-        INSERT INTO students (id, user_id, nim, angkatan, phone, status, tipe, pembimbing)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO students (id, user_id, nim, angkatan, fakultas, phone, status, tipe, bergabung, pembimbing)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::date, CURRENT_DATE), $10)
         `,
-        [studentId, userId, nim, angkatan || null, phone || null, status, tipe, pembimbing || null]
+        [studentId, userId, nim, angkatan || null, fakultas || null, phone || null, status, tipe, normalizedBergabung, pembimbing || null]
       );
 
       await query("COMMIT");
@@ -135,13 +169,18 @@ router.put(
       initials,
       prodi,
       angkatan,
+      fakultas,
       email,
       phone,
       status,
       tipe,
+      bergabung,
       pembimbing,
       password
     } = req.body;
+
+    await ensureStudentColumns();
+    const normalizedBergabung = hasOwn(req.body || {}, "bergabung") ? normalizeOptionalDate(bergabung) : null;
 
     await query("BEGIN");
     try {
@@ -189,15 +228,30 @@ router.put(
         `UPDATE students
          SET nim                   = COALESCE($2, nim),
              angkatan              = COALESCE($3, angkatan),
-             phone                 = COALESCE($4, phone),
-             status                = COALESCE($5, status),
-             tipe                  = COALESCE($6, tipe),
-             pembimbing            = COALESCE($7, pembimbing),
-             withdrawal_at         = CASE WHEN $8 THEN NOW() ELSE withdrawal_at END,
-             scheduled_deletion_at = CASE WHEN $8 THEN NOW() + INTERVAL '30 days' ELSE scheduled_deletion_at END,
+             fakultas              = CASE WHEN $4::boolean THEN $5 ELSE fakultas END,
+             phone                 = COALESCE($6, phone),
+             status                = COALESCE($7, status),
+             tipe                  = COALESCE($8, tipe),
+             bergabung             = CASE WHEN $9::boolean THEN $10::date ELSE bergabung END,
+             pembimbing            = COALESCE($11, pembimbing),
+             withdrawal_at         = CASE WHEN $12 THEN NOW() ELSE withdrawal_at END,
+             scheduled_deletion_at = CASE WHEN $12 THEN NOW() + INTERVAL '30 days' ELSE scheduled_deletion_at END,
              updated_at            = NOW()
          WHERE id = $1`,
-        [studentId, nim, angkatan, phone, status, tipe, pembimbing, isWithdrawing]
+        [
+          studentId,
+          nim,
+          angkatan,
+          hasOwn(req.body || {}, "fakultas"),
+          fakultas == null || fakultas === "" ? null : String(fakultas),
+          phone,
+          status,
+          tipe,
+          hasOwn(req.body || {}, "bergabung"),
+          normalizedBergabung,
+          pembimbing,
+          isWithdrawing
+        ]
       );
 
       // BUG FIX 3: Role mapping yang benar; hindari null pada kolom NOT NULL.

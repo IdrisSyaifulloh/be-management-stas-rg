@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS students (
   user_id TEXT UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   nim TEXT UNIQUE NOT NULL,
   angkatan TEXT,
+  fakultas TEXT,
   phone TEXT,
   status TEXT NOT NULL CHECK (status IN ('Aktif', 'Cuti', 'Alumni', 'Mengundurkan Diri')),
   tipe TEXT NOT NULL CHECK (tipe IN ('Riset', 'Magang')),
