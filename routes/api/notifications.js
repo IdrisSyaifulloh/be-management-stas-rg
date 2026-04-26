@@ -43,6 +43,18 @@ async function resolveRecipientUserId(inputId) {
   return null;
 }
 
+function mapNotificationRow(row) {
+  return {
+    ...row,
+    readAt: row.read_at || null,
+    createdAt: row.created_at || null,
+    recipientUserId: row.recipient_user_id,
+    senderUserId: row.sender_user_id,
+    senderName: row.sender_name || null,
+    read: row.read_at != null
+  };
+}
+
 router.get(
   "/",
   asyncHandler(async (req, res) => {
@@ -79,7 +91,7 @@ router.get(
       params
     );
 
-    res.json(result.rows);
+    res.json(result.rows.map(mapNotificationRow));
   })
 );
 
@@ -208,36 +220,100 @@ router.post(
 );
 
 router.patch(
-  "/:id/read/all",
+  "/read-all",
   asyncHandler(async (req, res) => {
     await ensureNotificationsTable();
 
-    const requesterRole = extractRole(req);
     const requesterUserId = resolveRequesterUserId(req);
-    const userId = requesterRole === "operator" ? (req.body?.userId || requesterUserId) : requesterUserId;
-    const params = [req.params.id];
-    let where = "id = $1";
-
-    if (userId) {
-      params.push(userId);
-      where += ` AND recipient_user_id = $${params.length}`;
+    if (!requesterUserId) {
+      return res.status(400).json({ message: "userId wajib diisi." });
     }
 
     const result = await query(
       `
       UPDATE notifications
       SET read_at = NOW()
-      WHERE ${where}
+      WHERE recipient_user_id = $1
+        AND read_at IS NULL
       RETURNING id
       `,
-      params
+      [requesterUserId]
+    );
+
+    res.json({
+      message: "Semua notifikasi ditandai sudah dibaca.",
+      updatedCount: result.rowCount
+    });
+  })
+);
+
+router.patch(
+  "/:id/read",
+  asyncHandler(async (req, res) => {
+    await ensureNotificationsTable();
+
+    const requesterUserId = resolveRequesterUserId(req);
+    if (!requesterUserId) {
+      return res.status(400).json({ message: "userId wajib diisi." });
+    }
+
+    const result = await query(
+      `
+      UPDATE notifications
+      SET read_at = COALESCE(read_at, NOW())
+      WHERE id = $1
+        AND recipient_user_id = $2
+      RETURNING id, read_at
+      `,
+      [req.params.id, requesterUserId]
     );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Notifikasi tidak ditemukan." });
     }
 
-    res.json({ message: "Notifikasi ditandai sudah dibaca." });
+    res.json({
+      message: "Notifikasi ditandai sudah dibaca.",
+      id: result.rows[0].id,
+      read_at: result.rows[0].read_at,
+      readAt: result.rows[0].read_at,
+      read: true
+    });
+  })
+);
+
+router.patch(
+  "/:id/read/all",
+  asyncHandler(async (req, res) => {
+    await ensureNotificationsTable();
+
+    const requesterUserId = resolveRequesterUserId(req);
+    if (!requesterUserId) {
+      return res.status(400).json({ message: "userId wajib diisi." });
+    }
+
+    const result = await query(
+      `
+      UPDATE notifications
+      SET read_at = COALESCE(read_at, NOW())
+      WHERE id = $1
+        AND recipient_user_id = $2
+      RETURNING id, read_at
+      `,
+      [req.params.id, requesterUserId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Notifikasi tidak ditemukan." });
+    }
+
+    res.json({
+      message: "Notifikasi ditandai sudah dibaca.",
+      id: result.rows[0].id,
+      read_at: result.rows[0].read_at,
+      readAt: result.rows[0].read_at,
+      read: true
+    });
   })
 );
 
@@ -246,11 +322,8 @@ router.patch(
   asyncHandler(async (req, res) => {
     await ensureNotificationsTable();
 
-    const requesterRole = extractRole(req);
-    const { userId: bodyUserId } = req.body || {};
     const requesterUserId = resolveRequesterUserId(req);
-    const userId = requesterRole === "operator" ? (bodyUserId || requesterUserId) : requesterUserId;
-    if (!userId) {
+    if (!requesterUserId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
 
@@ -260,7 +333,7 @@ router.patch(
       SET read_at = NOW()
       WHERE recipient_user_id = $1 AND read_at IS NULL
       `,
-      [userId]
+      [requesterUserId]
     );
 
     res.json({ message: "Semua notifikasi ditandai sudah dibaca." });
