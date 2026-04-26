@@ -5,6 +5,7 @@ const DASHBOARD_REMINDER_TYPES = ["logbook_missing", "attendance_absent", "low_h
 const DASHBOARD_REMINDER_TYPE_SET = new Set(DASHBOARD_REMINDER_TYPES);
 
 let ensureDashboardReminderTablePromise = null;
+let ensureDashboardWarningReviewTablePromise = null;
 
 async function ensureDashboardReminderTable() {
   if (!ensureDashboardReminderTablePromise) {
@@ -41,6 +42,42 @@ async function ensureDashboardReminderTable() {
   }
 
   await ensureDashboardReminderTablePromise;
+}
+
+async function ensureDashboardWarningReviewTable() {
+  if (!ensureDashboardWarningReviewTablePromise) {
+    ensureDashboardWarningReviewTablePromise = (async () => {
+      await query(`
+        CREATE TABLE IF NOT EXISTS dashboard_warning_reviews (
+          id TEXT PRIMARY KEY,
+          student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+          type TEXT NOT NULL CHECK (type IN ('logbook_missing', 'attendance_absent', 'low_hours')),
+          reference_date DATE,
+          reference_period TEXT,
+          reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          review_note TEXT,
+          reviewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_dashboard_warning_reviews_student_date
+        ON dashboard_warning_reviews(student_id, type, reference_date, reviewed_at DESC)
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_dashboard_warning_reviews_student_period
+        ON dashboard_warning_reviews(student_id, type, reference_period, reviewed_at DESC)
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_dashboard_warning_reviews_reviewer
+        ON dashboard_warning_reviews(reviewed_by, reviewed_at DESC)
+      `);
+    })();
+  }
+
+  await ensureDashboardWarningReviewTablePromise;
 }
 
 function normalizeDashboardReminderType(value) {
@@ -242,15 +279,101 @@ async function recordDashboardReminder({
   };
 }
 
+async function findExistingDashboardWarningReview({ studentId, type, referenceDate, referencePeriod }) {
+  await ensureDashboardWarningReviewTable();
+
+  if (!studentId || !type) return null;
+
+  const identity = buildReminderIdentity({ type, referenceDate, referencePeriod });
+
+  if (type === "low_hours") {
+    const result = await query(
+      `
+      SELECT id, reviewed_by, review_note, reviewed_at
+      FROM dashboard_warning_reviews
+      WHERE student_id = $1
+        AND type = $2
+        AND reference_period = $3
+      ORDER BY reviewed_at DESC, id DESC
+      LIMIT 1
+      `,
+      [studentId, type, identity.referencePeriod]
+    );
+
+    return result.rows[0] || null;
+  }
+
+  const result = await query(
+    `
+    SELECT id, reviewed_by, review_note, reviewed_at
+    FROM dashboard_warning_reviews
+    WHERE student_id = $1
+      AND type = $2
+      AND reference_date = $3
+    ORDER BY reviewed_at DESC, id DESC
+    LIMIT 1
+    `,
+    [studentId, type, identity.referenceDate]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function recordDashboardWarningReview({
+  studentId,
+  type,
+  referenceDate,
+  referencePeriod,
+  reviewedBy,
+  reviewNote
+}) {
+  await ensureDashboardWarningReviewTable();
+
+  const identity = buildReminderIdentity({ type, referenceDate, referencePeriod });
+  const reviewId = `WRV-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+
+  await query(
+    `
+    INSERT INTO dashboard_warning_reviews (
+      id,
+      student_id,
+      type,
+      reference_date,
+      reference_period,
+      reviewed_by,
+      review_note
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `,
+    [
+      reviewId,
+      studentId,
+      type,
+      identity.referenceDate,
+      identity.referencePeriod,
+      reviewedBy || null,
+      reviewNote || null
+    ]
+  );
+
+  return {
+    id: reviewId,
+    ...identity
+  };
+}
+
 module.exports = {
   DASHBOARD_REMINDER_TYPES,
   buildReminderIdentity,
   ensureDashboardReminderTable,
+  ensureDashboardWarningReviewTable,
+  findExistingDashboardWarningReview,
   findExistingDashboardReminder,
   getIsoWeekKey,
   inferDashboardReminderType,
   normalizeDashboardReminderType,
   normalizeReferenceDate,
   recordDashboardReminder,
+  recordDashboardWarningReview,
   resolveDashboardReminderStudentId
 };

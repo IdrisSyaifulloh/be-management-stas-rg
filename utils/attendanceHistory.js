@@ -26,6 +26,22 @@ function formatIsoDate(date) {
   return `${year}-${month}-${day}`;
 }
 
+function maxIsoDate(...values) {
+  return values
+    .map(normalizeToIsoDate)
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
+}
+
+function minIsoDate(...values) {
+  return values
+    .map(normalizeToIsoDate)
+    .filter(Boolean)
+    .sort()
+    .shift() || null;
+}
+
 function getMonthBounds(isoDate) {
   const date = parseIsoDate(isoDate);
   const year = date.getUTCFullYear();
@@ -102,15 +118,25 @@ function buildLeaveDateSet(leaveRows, rangeStart, rangeEnd) {
   return leaveSet;
 }
 
-function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows }) {
+function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows, activeStartDate }) {
+  const effectiveStartDate = activeStartDate ? maxIsoDate(startDate, activeStartDate) : startDate;
   const attendanceMap = new Map(
     (attendanceRows || []).map((row) => [row.attendance_date_text || row.attendance_date, row])
   );
-  const leaveSet = buildLeaveDateSet(leaveRows || [], startDate, endDate);
+  const leaveSet = buildLeaveDateSet(leaveRows || [], effectiveStartDate, endDate);
   const history = [];
   const summary = { hadir: 0, cuti: 0, tidakHadir: 0, libur: 0 };
-  const start = parseIsoDate(startDate);
+  const start = parseIsoDate(effectiveStartDate);
   const end = parseIsoDate(endDate);
+
+  if (start > end) {
+    return {
+      attendanceMap,
+      leaveSet,
+      history,
+      summary
+    };
+  }
 
   for (let current = new Date(start); current <= end; current.setUTCDate(current.getUTCDate() + 1)) {
     const isoDate = formatIsoDate(current);
@@ -163,5 +189,7 @@ module.exports = {
   formatAttendanceTime,
   getJakartaDateIso,
   getMonthBounds,
+  maxIsoDate,
+  minIsoDate,
   resolveAttendanceRange
 };

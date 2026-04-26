@@ -2,6 +2,7 @@
 -- Run this before re-seeding if you want clean database
 
 DELETE FROM dashboard_reminder_logs;
+DELETE FROM dashboard_warning_reviews;
 DELETE FROM notification_dispatch_logs;
 DELETE FROM notifications;
 DELETE FROM audit_logs;
@@ -14,6 +15,7 @@ DELETE FROM research_board_tasks;
 DELETE FROM logbook_comments;
 DELETE FROM logbook_entries;
 DELETE FROM certificate_requests;
+DELETE FROM letter_database;
 DELETE FROM letter_requests;
 DELETE FROM leave_requests;
 DELETE FROM board_access;

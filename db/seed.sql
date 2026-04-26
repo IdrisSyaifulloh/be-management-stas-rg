@@ -357,9 +357,12 @@ VALUES
         "logoDataUrl": null
       },
       "gps": {
-        "latitude": -7.5571,
-        "longitude": 110.8316,
-        "radius": 15
+        "latitude": -6.87361,
+        "longitude": 107.60510,
+        "radius": 80,
+        "maxAccuracyMeters": 100,
+        "sampleCount": 2,
+        "timeoutMs": 6000
       },
       "cuti": {
         "maxSemesterDays": 3,

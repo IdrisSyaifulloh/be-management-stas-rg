@@ -2,15 +2,23 @@ const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { getSettingsAsync } = require("../../config/systemSettingsStore");
+const {
+  createNotification,
+  hasNotificationDispatch,
+  recordNotificationDispatch
+} = require("../../utils/notificationService");
 const { extractRole } = require("../../utils/roleGuard");
 const { resolveStudentId } = require("../../utils/studentResolver");
 const {
   buildAttendanceHistory,
   getJakartaDateIso,
-  getMonthBounds
+  getMonthBounds,
+  maxIsoDate,
+  minIsoDate
 } = require("../../utils/attendanceHistory");
 
 const router = express.Router();
+let ensureAttendanceColumnsPromise = null;
 
 function toRadians(value) {
   return (value * Math.PI) / 180;
@@ -27,6 +35,130 @@ function haversineDistanceMeters(lat1, lng1, lat2, lng2) {
   return earthRadius * partC;
 }
 
+function calculateDurationHours(startDate, endDate = new Date()) {
+  const start = new Date(startDate);
+  return Math.max(0, (endDate.getTime() - start.getTime()) / (1000 * 60 * 60));
+}
+
+function roundHours(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function getAttendanceRules(settings) {
+  return {
+    magangMinCheckoutHours: Number(settings.attendanceRules?.magangMinCheckoutHours || 8),
+    earlyCheckoutWarning: Boolean(settings.attendanceRules?.earlyCheckoutWarning ?? true)
+  };
+}
+
+async function ensureAttendanceColumns() {
+  if (!ensureAttendanceColumnsPromise) {
+    ensureAttendanceColumnsPromise = query(`
+      ALTER TABLE attendance_records
+      ADD COLUMN IF NOT EXISTS check_out_accuracy_meters DOUBLE PRECISION
+    `);
+  }
+  await ensureAttendanceColumnsPromise;
+}
+
+function parseGpsNumber(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isValidLatitude(value) {
+  return Number.isFinite(value) && value >= -90 && value <= 90;
+}
+
+function isValidLongitude(value) {
+  return Number.isFinite(value) && value >= -180 && value <= 180;
+}
+
+function buildGpsPolicy(settings) {
+  const gps = settings.gps || {};
+  return {
+    targetLatitude: Number(gps.latitude),
+    targetLongitude: Number(gps.longitude),
+    radiusMeters: Number(gps.radius || 80),
+    maxAccuracyMeters: Number(gps.maxAccuracyMeters || 100),
+    sampleCount: Number(gps.sampleCount || 2),
+    timeoutMs: Number(gps.timeoutMs || 6000)
+  };
+}
+
+function buildGpsValidationError({
+  message,
+  reason,
+  accuracyMeters = null,
+  maxAccuracyMeters = null,
+  distanceMeters = null,
+  allowedRadiusMeters = null
+}) {
+  return {
+    message,
+    reason,
+    accuracyMeters,
+    maxAccuracyMeters,
+    distanceMeters,
+    allowedRadiusMeters
+  };
+}
+
+async function notifyOperatorsAboutEarlyCheckout({ attendanceRecordId, student, durationHours, requiredHours }) {
+  const operators = await query(
+    `
+    SELECT id
+    FROM users
+    WHERE role = 'operator'
+      AND is_active = TRUE
+    `
+  );
+
+  const eventId = "early_checkout_magang";
+  const referenceKey = `${attendanceRecordId}:${student.id}`;
+  const title = `Checkout Magang Kurang dari ${requiredHours} Jam`;
+  const body = `${student.name || "Mahasiswa"} (${student.nim || "-"}) checkout setelah ${durationHours} jam, di bawah batas ${requiredHours} jam.`;
+  let notifiedCount = 0;
+
+  for (const operator of operators.rows) {
+    const alreadySent = await hasNotificationDispatch({
+      eventId,
+      recipientUserId: operator.id,
+      referenceKey
+    });
+
+    if (alreadySent) continue;
+
+    const notification = await createNotification({
+      recipientUserId: operator.id,
+      type: "pengumuman",
+      title,
+      body,
+      eventId
+    });
+
+    if (notification.sent && notification.id) {
+      notifiedCount += 1;
+      await recordNotificationDispatch({
+        eventId,
+        recipientUserId: operator.id,
+        referenceKey,
+        notificationId: notification.id,
+        payload: {
+          attendanceRecordId,
+          studentId: student.id,
+          durationHours,
+          requiredHours
+        }
+      });
+    }
+  }
+
+  return notifiedCount;
+}
+
 router.post(
   "/check-in",
   asyncHandler(async (req, res) => {
@@ -37,8 +169,21 @@ router.post(
 
     const { studentId, latitude, longitude, accuracy } = req.body || {};
     const studentIdInput = role === "mahasiswa" ? (req.authUser?.id || studentId) : studentId;
-    if (!studentIdInput || latitude == null || longitude == null) {
-      return res.status(400).json({ message: "studentId, latitude, dan longitude wajib diisi." });
+    const userLatitude = parseGpsNumber(latitude);
+    const userLongitude = parseGpsNumber(longitude);
+    const accuracyMetersValue = accuracy == null ? null : parseGpsNumber(accuracy);
+
+    if (
+      !studentIdInput ||
+      !isValidLatitude(userLatitude) ||
+      !isValidLongitude(userLongitude) ||
+      (accuracy != null && (!Number.isFinite(accuracyMetersValue) || accuracyMetersValue < 0))
+    ) {
+      return res.status(400).json(buildGpsValidationError({
+        message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
+        reason: "INVALID_GPS_PAYLOAD",
+        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
+      }));
     }
 
     const resolvedStudentId = await resolveStudentId(studentIdInput);
@@ -47,23 +192,44 @@ router.post(
     }
 
     const settings = await getSettingsAsync();
-    const gps = settings.gps || {};
-    const refLat = Number(gps.latitude);
-    const refLng = Number(gps.longitude);
-    const refRadius = Number(gps.radius || 0);
+    const gpsPolicy = buildGpsPolicy(settings);
+    const refLat = gpsPolicy.targetLatitude;
+    const refLng = gpsPolicy.targetLongitude;
+    const refRadius = gpsPolicy.radiusMeters;
+    const maxAccuracyMeters = gpsPolicy.maxAccuracyMeters;
 
-    if (!refLat || !refLng) {
-      return res.status(500).json({ message: "Koordinat titik absensi belum dikonfigurasi. Hubungi operator." });
+    if (!isValidLatitude(refLat) || !isValidLongitude(refLng) || !Number.isFinite(refRadius) || refRadius <= 0) {
+      return res.status(500).json(buildGpsValidationError({
+        message: "Koordinat titik absensi belum dikonfigurasi. Hubungi operator.",
+        reason: "GPS_NOT_CONFIGURED",
+        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
+        maxAccuracyMeters: Number.isFinite(maxAccuracyMeters) ? maxAccuracyMeters : null,
+        allowedRadiusMeters: Number.isFinite(refRadius) ? refRadius : null
+      }));
     }
 
-    const distanceMeters = haversineDistanceMeters(Number(latitude), Number(longitude), refLat, refLng);
+    const distanceMeters = haversineDistanceMeters(userLatitude, userLongitude, refLat, refLng);
 
-    if (distanceMeters > refRadius) {
-      return res.status(400).json({
-        message: "Lokasi di luar radius absensi.",
+    if (accuracyMetersValue != null && Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
+      return res.status(400).json(buildGpsValidationError({
+        message: "Akurasi GPS terlalu rendah. Coba pindah ke area terbuka atau aktifkan mode akurasi tinggi.",
+        reason: "GPS_ACCURACY_TOO_LOW",
+        accuracyMeters: Math.round(accuracyMetersValue),
+        maxAccuracyMeters,
         distanceMeters: Math.round(distanceMeters),
         allowedRadiusMeters: refRadius
-      });
+      }));
+    }
+
+    if (distanceMeters > refRadius) {
+      return res.status(400).json(buildGpsValidationError({
+        message: "Lokasi di luar radius absensi.",
+        reason: "OUTSIDE_RADIUS",
+        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
+        maxAccuracyMeters,
+        distanceMeters: Math.round(distanceMeters),
+        allowedRadiusMeters: refRadius
+      }));
     }
 
     const todayRecord = await query(
@@ -103,7 +269,7 @@ router.post(
             updated_at = NOW()
         WHERE id = $1
         `,
-        [todayRecord.rows[0].id, Number(latitude), Number(longitude), accuracy == null ? null : Number(accuracy), distanceMeters]
+        [todayRecord.rows[0].id, userLatitude, userLongitude, accuracyMetersValue, distanceMeters]
       );
     } else {
       await query(
@@ -113,13 +279,17 @@ router.post(
           check_in_lat, check_in_lng, accuracy_meters, distance_meters, within_radius
         ) VALUES ($1, $2, (NOW() AT TIME ZONE 'Asia/Jakarta')::date, 'Hadir', NOW(), $3, $4, $5, $6, TRUE)
         `,
-        [recordId, resolvedStudentId, Number(latitude), Number(longitude), accuracy == null ? null : Number(accuracy), distanceMeters]
+        [recordId, resolvedStudentId, userLatitude, userLongitude, accuracyMetersValue, distanceMeters]
       );
     }
 
     res.status(201).json({
       message: "Check-in berhasil.",
-      distanceMeters: Math.round(distanceMeters)
+      accepted: true,
+      accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
+      maxAccuracyMeters,
+      distanceMeters: Math.round(distanceMeters),
+      allowedRadiusMeters: refRadius
     });
   })
 );
@@ -132,16 +302,47 @@ router.post(
       return res.status(403).json({ message: "Role tidak diizinkan melakukan check-out." });
     }
 
-    const { studentId, latitude, longitude } = req.body || {};
+    const { studentId, latitude, longitude, accuracy, forceEarlyCheckout, earlyCheckoutAcknowledged } = req.body || {};
     const studentIdInput = role === "mahasiswa" ? (req.authUser?.id || studentId) : studentId;
-    if (!studentIdInput || latitude == null || longitude == null) {
-      return res.status(400).json({ message: "studentId, latitude, dan longitude wajib diisi." });
+    const userLatitude = parseGpsNumber(latitude);
+    const userLongitude = parseGpsNumber(longitude);
+    const accuracyMetersValue = accuracy == null ? null : parseGpsNumber(accuracy);
+
+    if (
+      !studentIdInput ||
+      !isValidLatitude(userLatitude) ||
+      !isValidLongitude(userLongitude) ||
+      (accuracy != null && (!Number.isFinite(accuracyMetersValue) || accuracyMetersValue < 0))
+    ) {
+      return res.status(400).json(buildGpsValidationError({
+        message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
+        reason: "INVALID_GPS_PAYLOAD",
+        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
+      }));
     }
 
     const resolvedStudentId = await resolveStudentId(studentIdInput);
     if (!resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
+
+    const studentResult = await query(
+      `
+      SELECT s.id, s.user_id, s.nim, s.tipe, u.name,
+             TO_CHAR(s.created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.id = $1
+      LIMIT 1
+      `,
+      [resolvedStudentId]
+    );
+
+    if (studentResult.rowCount === 0) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const student = studentResult.rows[0];
 
     const todayRecord = await query(
       `
@@ -161,19 +362,61 @@ router.post(
       return res.status(409).json({ message: "Check-out hari ini sudah tercatat." });
     }
 
+    const settings = await getSettingsAsync();
+    const attendanceRules = getAttendanceRules(settings);
+    const durationHoursValue = calculateDurationHours(todayRecord.rows[0].check_in_at);
+    const durationHours = roundHours(durationHoursValue);
+    const requiredHours = attendanceRules.magangMinCheckoutHours;
+    const isEarlyMagangCheckout =
+      student.tipe === "Magang" &&
+      attendanceRules.earlyCheckoutWarning === true &&
+      durationHoursValue < requiredHours;
+
+    if (isEarlyMagangCheckout && !(forceEarlyCheckout === true && earlyCheckoutAcknowledged === true)) {
+      return res.status(409).json({
+        message: "Durasi magang belum memenuhi batas minimum checkout.",
+        earlyCheckoutWarning: true,
+        durationHours,
+        requiredHours
+      });
+    }
+
+    await ensureAttendanceColumns();
     await query(
       `
       UPDATE attendance_records
       SET check_out_at = NOW(),
           check_out_lat = $2,
           check_out_lng = $3,
+          check_out_accuracy_meters = $4,
           updated_at = NOW()
       WHERE id = $1
       `,
-      [todayRecord.rows[0].id, Number(latitude), Number(longitude)]
+      [todayRecord.rows[0].id, userLatitude, userLongitude, accuracyMetersValue]
     );
 
-    res.json({ message: "Check-out berhasil." });
+    let operatorNotified = false;
+    if (isEarlyMagangCheckout) {
+      const notifiedCount = await notifyOperatorsAboutEarlyCheckout({
+        attendanceRecordId: todayRecord.rows[0].id,
+        student,
+        durationHours,
+        requiredHours
+      });
+      operatorNotified = notifiedCount > 0;
+    }
+
+    res.json({
+      message: "Check-out berhasil.",
+      ...(isEarlyMagangCheckout
+        ? {
+            earlyCheckoutWarning: true,
+            operatorNotified,
+            durationHours,
+            requiredHours
+          }
+        : {})
+    });
   })
 );
 
@@ -256,8 +499,30 @@ router.get(
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
+    const studentResult = await query(
+      `
+      SELECT s.id, s.user_id, s.nim, s.tipe, u.name,
+             TO_CHAR(s.created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.id = $1
+      LIMIT 1
+      `,
+      [resolvedStudentId]
+    );
+
+    if (studentResult.rowCount === 0) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const student = studentResult.rows[0];
+
     const monthValue = String(month || getJakartaDateIso().slice(0, 7));
     const { startDate, endDate } = getMonthBounds(`${monthValue}-01`);
+    const todayIso = getJakartaDateIso();
+    const activeStartDate = student.active_start_date || startDate;
+    const effectiveStartDate = maxIsoDate(startDate, activeStartDate);
+    const effectiveEndDate = minIsoDate(endDate, todayIso);
 
     const attendanceRows = await query(
       `
@@ -267,9 +532,11 @@ router.get(
       FROM attendance_records
       WHERE student_id = $1
         AND TO_CHAR(attendance_date, 'YYYY-MM') = $2
+        AND attendance_date >= $3::date
+        AND attendance_date <= $4::date
       ORDER BY attendance_date DESC
       `,
-      [resolvedStudentId, monthValue]
+      [resolvedStudentId, monthValue, effectiveStartDate, effectiveEndDate]
     );
 
     const leaves = await query(
@@ -280,18 +547,20 @@ router.get(
         AND status = 'Disetujui'
         AND TO_CHAR(periode_start, 'YYYY-MM') <= $2
         AND TO_CHAR(periode_end, 'YYYY-MM') >= $2
+        AND periode_end >= $3::date
+        AND periode_start <= $4::date
       `,
-      [resolvedStudentId, monthValue]
+      [resolvedStudentId, monthValue, effectiveStartDate, effectiveEndDate]
     );
 
     const { attendanceMap, leaveSet, history, summary } = buildAttendanceHistory({
-      startDate,
-      endDate,
+      startDate: effectiveStartDate,
+      endDate: effectiveEndDate,
       attendanceRows: attendanceRows.rows,
-      leaveRows: leaves.rows
+      leaveRows: leaves.rows,
+      activeStartDate
     });
 
-    const todayIso = getJakartaDateIso();
     const todayAttendance = attendanceMap.get(todayIso);
     const todayStatus = leaveSet.has(todayIso)
       ? "Cuti"
@@ -303,9 +572,19 @@ router.get(
 
     const settings = await getSettingsAsync();
     const gps = settings.gps || {};
+    const attendanceRules = getAttendanceRules(settings);
+    const gpsPolicy = buildGpsPolicy(settings);
 
     res.json({
       month: monthValue,
+      student: {
+        id: student.id,
+        userId: student.user_id,
+        name: student.name,
+        nim: student.nim,
+        tipe: student.tipe
+      },
+      attendanceRules,
       chartData: [
         { name: "Hadir", value: summary.hadir, color: "#0AB600" },
         { name: "Tidak Hadir", value: summary.tidakHadir, color: "#EF4444" },
@@ -326,6 +605,7 @@ router.get(
         longitude: Number(gps.longitude),
         radius: Number(gps.radius)
       },
+      gpsPolicy,
       history: history
         .map((item) => ({
           date: item.dateLabel,

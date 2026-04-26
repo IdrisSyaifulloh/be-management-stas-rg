@@ -9,9 +9,12 @@ const DEFAULT_SETTINGS = {
     logoDataUrl: null
   },
   gps: {
-    latitude: -6.973185,
-    longitude: 107.632543,
-    radius: 15
+    latitude: -6.87361,
+    longitude: 107.60510,
+    radius: 80,
+    maxAccuracyMeters: 100,
+    sampleCount: 2,
+    timeoutMs: 6000
   },
   cuti: {
     maxSemesterDays: 3,
@@ -39,6 +42,7 @@ const DEFAULT_SETTINGS = {
     risetMinWeeklyHours: 4,
     risetTargetWeeklyHours: 6,
     magangDailyHours: 9,
+    magangMinCheckoutHours: 8,
     magangWorkDays: "5",
     earlyCheckoutWarning: true
   }

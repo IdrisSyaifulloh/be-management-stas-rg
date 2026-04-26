@@ -358,7 +358,8 @@ const EXPORT_DEFINITIONS = {
 
       const studentsResult = await query(
         `
-        SELECT s.id, s.user_id, s.nim, u.name
+        SELECT s.id, s.user_id, s.nim, u.name,
+               TO_CHAR(s.created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
         FROM students s
         JOIN users u ON u.id = s.user_id
         ${buildWhereSql(studentClauses)}
@@ -425,7 +426,8 @@ const EXPORT_DEFINITIONS = {
           startDate: request.startDate,
           endDate: request.endDate,
           attendanceRows: attendanceByStudentId.get(student.id) || [],
-          leaveRows: leaveByStudentId.get(student.id) || []
+          leaveRows: leaveByStudentId.get(student.id) || [],
+          activeStartDate: student.active_start_date
         });
 
         history.forEach((item) => {

@@ -187,6 +187,19 @@ CREATE TABLE IF NOT EXISTS letter_requests (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS letter_database (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'Lainnya',
+  number TEXT,
+  date DATE,
+  description TEXT,
+  file_url TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS certificate_requests (
   id TEXT PRIMARY KEY,
   student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -261,6 +274,7 @@ CREATE TABLE IF NOT EXISTS attendance_records (
   check_out_lat DOUBLE PRECISION,
   check_out_lng DOUBLE PRECISION,
   accuracy_meters DOUBLE PRECISION,
+  check_out_accuracy_meters DOUBLE PRECISION,
   distance_meters DOUBLE PRECISION,
   within_radius BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -306,6 +320,17 @@ CREATE TABLE IF NOT EXISTS dashboard_reminder_logs (
   notification_id TEXT,
   sent_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS dashboard_warning_reviews (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('logbook_missing', 'attendance_absent', 'low_hours')),
+  reference_date DATE,
+  reference_period TEXT,
+  reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  review_note TEXT,
+  reviewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS notification_dispatch_logs (
@@ -359,6 +384,9 @@ CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created ON notifications(
 CREATE INDEX IF NOT EXISTS idx_dashboard_reminders_student_date ON dashboard_reminder_logs(student_id, type, reference_date, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dashboard_reminders_student_period ON dashboard_reminder_logs(student_id, type, reference_period, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dashboard_reminders_recipient_sent ON dashboard_reminder_logs(recipient_user_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dashboard_warning_reviews_student_date ON dashboard_warning_reviews(student_id, type, reference_date, reviewed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dashboard_warning_reviews_student_period ON dashboard_warning_reviews(student_id, type, reference_period, reviewed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dashboard_warning_reviews_reviewer ON dashboard_warning_reviews(reviewed_by, reviewed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notification_dispatch_event_recipient ON notification_dispatch_logs(event_id, recipient_user_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_student ON withdrawal_requests(student_id);
 CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_advisor ON withdrawal_requests(advisor_id);
