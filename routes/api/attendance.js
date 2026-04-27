@@ -474,6 +474,7 @@ router.post(
     }
 
     const student = studentResult.rows[0];
+    const todayIso = getJakartaDateIso();
 
     const todayRecord = await query(
       `
@@ -491,6 +492,27 @@ router.post(
 
     if (todayRecord.rows[0].check_out_at) {
       return res.status(409).json({ message: "Check-out hari ini sudah tercatat." });
+    }
+
+    if (role === "mahasiswa") {
+      const logbookToday = await query(
+        `
+        SELECT id
+        FROM logbook_entries
+        WHERE student_id = $1
+          AND date = $2::date
+        LIMIT 1
+        `,
+        [resolvedStudentId, todayIso]
+      );
+
+      if (logbookToday.rowCount === 0) {
+        return res.status(409).json({
+          message: "Isi logbook hari ini terlebih dahulu sebelum check-out.",
+          logbookRequired: true,
+          date: todayIso
+        });
+      }
     }
 
     const settings = await getSettingsAsync();
