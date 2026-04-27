@@ -132,6 +132,23 @@ router.post(
     if (!jenisPengajuan) {
       return res.status(400).json({ message: "jenisPengajuan harus cuti, izin, atau sakit." });
     }
+
+    const studentTypeResult = await query(
+      `
+      SELECT tipe
+      FROM students
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [resolvedStudentId]
+    );
+    const studentType = studentTypeResult.rows[0]?.tipe;
+    if (studentType === "Riset" && jenisPengajuan === "cuti") {
+      return res.status(400).json({
+        message: "Mahasiswa Riset tidak dapat mengajukan cuti. Silakan pilih izin atau sakit."
+      });
+    }
+
     const countsAgainstQuota = jenisPengajuan === "cuti" && countsAgainstLeaveQuota !== false;
     const settings = await getSettingsAsync();
     const maxSemesterDays = Number(settings?.cuti?.maxSemesterDays || 0);

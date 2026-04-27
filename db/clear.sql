@@ -17,6 +17,7 @@ DELETE FROM logbook_comments;
 DELETE FROM logbook_entries;
 DELETE FROM certificate_requests;
 DELETE FROM letter_database;
+DELETE FROM letter_categories;
 DELETE FROM letter_requests;
 DELETE FROM leave_requests;
 DELETE FROM board_access;

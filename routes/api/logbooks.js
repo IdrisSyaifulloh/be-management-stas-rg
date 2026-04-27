@@ -384,22 +384,38 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureLogbookAttachmentColumns();
-    const result = await query(
-      "DELETE FROM logbook_entries WHERE id = $1 RETURNING id, file_url",
+
+    const role = extractRole(req);
+    if (!["mahasiswa", "operator"].includes(role)) {
+      return res.status(403).json({ message: "Hanya mahasiswa atau operator yang dapat menghapus logbook." });
+    }
+
+    const existing = await query(
+      "SELECT id, student_id, file_url FROM logbook_entries WHERE id = $1 LIMIT 1",
       [req.params.id]
     );
 
-    if (result.rowCount === 0) {
+    if (existing.rowCount === 0) {
       return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
     }
 
+    if (role === "mahasiswa") {
+      const requesterUserId = String(req.authUser?.id || req.headers["x-user-id"] || req.query.userId || "").trim();
+      const requesterStudentId = requesterUserId ? await resolveStudentId(requesterUserId) : null;
+      if (!requesterStudentId || requesterStudentId !== existing.rows[0].student_id) {
+        return res.status(403).json({ message: "Mahasiswa hanya boleh menghapus logbook miliknya sendiri." });
+      }
+    }
+
+    await query("DELETE FROM logbook_entries WHERE id = $1", [req.params.id]);
+
     try {
-      await removeLogbookAttachment(result.rows[0].file_url);
+      await removeLogbookAttachment(existing.rows[0].file_url);
     } catch {
       // Deletion of DB record succeeded; ignore orphan cleanup failure.
     }
 
-    res.json({ message: "Entri logbook berhasil dihapus." });
+    res.json({ message: "Logbook berhasil dihapus." });
   })
 );
 

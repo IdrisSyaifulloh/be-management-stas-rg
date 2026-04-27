@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
   initials TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('mahasiswa', 'dosen', 'operator')),
   email TEXT UNIQUE,
+  username TEXT UNIQUE,
+  phone TEXT,
   password_hash TEXT,
   prodi TEXT,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -202,6 +204,16 @@ CREATE TABLE IF NOT EXISTS letter_database (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS letter_categories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_letter_categories_name_lower
+ON letter_categories (LOWER(name));
 
 CREATE TABLE IF NOT EXISTS certificate_requests (
   id TEXT PRIMARY KEY,
