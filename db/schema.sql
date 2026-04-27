@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   periode_start DATE NOT NULL,
   periode_end DATE NOT NULL,
   durasi INTEGER NOT NULL,
+  jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti' CHECK (jenis_pengajuan IN ('cuti', 'izin', 'sakit')),
+  counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE,
   alasan TEXT NOT NULL,
   catatan TEXT,
   tanggal_pengajuan DATE NOT NULL,
@@ -304,6 +306,22 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS student_access_locks (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  lock_date DATE NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('LOCKED', 'UNLOCKED')),
+  locked BOOLEAN NOT NULL DEFAULT TRUE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  unlocked_at TIMESTAMPTZ,
+  unlocked_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(student_id, lock_date, reason)
+);
+
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -384,6 +402,7 @@ CREATE INDEX IF NOT EXISTS idx_logbook_entries_student_date ON logbook_entries(s
 CREATE INDEX IF NOT EXISTS idx_logbook_comments_entry_created ON logbook_comments(logbook_entry_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_draft_reports_student_upload ON draft_reports(student_id, upload_date DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_attendance_records_student_date ON attendance_records(student_id, attendance_date DESC);
+CREATE INDEX IF NOT EXISTS idx_student_access_locks_active ON student_access_locks(student_id, active, lock_date DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_logged_at ON audit_logs(logged_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created ON notifications(recipient_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dashboard_reminders_student_date ON dashboard_reminder_logs(student_id, type, reference_date, sent_at DESC);

@@ -7,6 +7,7 @@ DELETE FROM notification_dispatch_logs;
 DELETE FROM notifications;
 DELETE FROM audit_logs;
 DELETE FROM attendance_records;
+DELETE FROM student_access_locks;
 DELETE FROM research_board_task_comments;
 DELETE FROM research_board_task_attachments;
 DELETE FROM research_board_task_subtasks;

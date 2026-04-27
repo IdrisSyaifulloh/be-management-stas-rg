@@ -8,6 +8,29 @@ const { resolveStudentId } = require("../../utils/studentResolver");
 const { createNotification } = require("../../utils/notificationService");
 
 const router = express.Router();
+let ensureLeaveColumnsPromise = null;
+
+async function ensureLeaveColumns() {
+  if (!ensureLeaveColumnsPromise) {
+    ensureLeaveColumnsPromise = query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
+      ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE
+    `);
+  }
+  await ensureLeaveColumnsPromise;
+}
+
+function normalizeLeaveType(value) {
+  const normalized = String(value || "cuti").trim().toLowerCase();
+  return ["cuti", "izin", "sakit"].includes(normalized) ? normalized : null;
+}
+
+function getLeaveLabel(type) {
+  if (type === "izin") return "izin";
+  if (type === "sakit") return "sakit";
+  return "cuti";
+}
 
 function parseDateOnly(value) {
   const d = new Date(value);
@@ -23,6 +46,7 @@ function inclusiveDays(startDate, endDate) {
 router.get(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureLeaveColumns();
     const role = extractRole(req);
     const requestedStudentId = req.query.studentId;
     const studentIdInput = requestedStudentId;
@@ -42,6 +66,8 @@ router.get(
       SELECT lr.id, lr.student_id, su.name AS student_name, su.initials AS student_initials,
              s.nim, lr.project_id, rp.short_title AS project_name,
              lr.periode_start, lr.periode_end, lr.durasi,
+             lr.jenis_pengajuan, lr.jenis_pengajuan AS jenis,
+             lr.counts_against_leave_quota,
              lr.alasan, lr.catatan, lr.tanggal_pengajuan, lr.status,
              lr.reviewed_by, ru.name AS reviewed_by_name,
              lr.reviewed_at, lr.review_note
@@ -63,6 +89,7 @@ router.get(
 router.post(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureLeaveColumns();
     const role = extractRole(req);
     if (role !== "mahasiswa") {
       return res.status(403).json({ message: "Hanya mahasiswa yang dapat membuat pengajuan cuti." });
@@ -74,6 +101,9 @@ router.post(
       projectId,
       periodeStart,
       periodeEnd,
+      jenis,
+      jenisPengajuan: jenisPengajuanInput,
+      countsAgainstLeaveQuota,
       alasan,
       catatan,
       tanggalPengajuan
@@ -98,59 +128,70 @@ router.post(
     }
 
     const requestedDays = inclusiveDays(startDate, endDate);
+    const jenisPengajuan = normalizeLeaveType(jenisPengajuanInput || jenis);
+    if (!jenisPengajuan) {
+      return res.status(400).json({ message: "jenisPengajuan harus cuti, izin, atau sakit." });
+    }
+    const countsAgainstQuota = jenisPengajuan === "cuti" && countsAgainstLeaveQuota !== false;
     const settings = await getSettingsAsync();
     const maxSemesterDays = Number(settings?.cuti?.maxSemesterDays || 0);
     const maxMonthDays = Number(settings?.cuti?.maxMonthDays || 0);
     const minAttendancePct = Number(settings?.cuti?.minAttendancePct || 0);
 
-    if (maxSemesterDays > 0 && requestedDays > maxSemesterDays) {
+    if (countsAgainstQuota && maxSemesterDays > 0 && requestedDays > maxSemesterDays) {
       return res.status(400).json({ message: `Durasi cuti melebihi batas semester (${maxSemesterDays} hari).` });
     }
 
-    if (maxMonthDays > 0 && requestedDays > maxMonthDays) {
+    if (countsAgainstQuota && maxMonthDays > 0 && requestedDays > maxMonthDays) {
       return res.status(400).json({ message: `Durasi cuti melebihi batas bulanan (${maxMonthDays} hari).` });
     }
 
     const monthStart = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1));
     const monthEnd = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth() + 1, 0));
 
-    const monthUsageResult = await query(
-      `
-      SELECT COALESCE(SUM(durasi), 0)::int AS used_days
-      FROM leave_requests
-      WHERE student_id = $1
-        AND status IN ('Menunggu', 'Disetujui')
-        AND periode_start <= $3
-        AND periode_end >= $2
-      `,
-      [resolvedStudentId, monthStart.toISOString().slice(0, 10), monthEnd.toISOString().slice(0, 10)]
-    );
+    if (countsAgainstQuota) {
+      const monthUsageResult = await query(
+        `
+        SELECT COALESCE(SUM(durasi), 0)::int AS used_days
+        FROM leave_requests
+        WHERE student_id = $1
+          AND status IN ('Menunggu', 'Disetujui')
+          AND jenis_pengajuan = 'cuti'
+          AND counts_against_leave_quota = TRUE
+          AND periode_start <= $3
+          AND periode_end >= $2
+        `,
+        [resolvedStudentId, monthStart.toISOString().slice(0, 10), monthEnd.toISOString().slice(0, 10)]
+      );
 
-    const usedMonthDays = Number(monthUsageResult.rows[0]?.used_days || 0);
-    if (maxMonthDays > 0 && usedMonthDays + requestedDays > maxMonthDays) {
-      return res.status(400).json({
-        message: `Kuota cuti bulanan terlampaui. Sisa kuota bulan ini ${Math.max(0, maxMonthDays - usedMonthDays)} hari.`
-      });
+      const usedMonthDays = Number(monthUsageResult.rows[0]?.used_days || 0);
+      if (maxMonthDays > 0 && usedMonthDays + requestedDays > maxMonthDays) {
+        return res.status(400).json({
+          message: `Kuota cuti bulanan terlampaui. Sisa kuota bulan ini ${Math.max(0, maxMonthDays - usedMonthDays)} hari.`
+        });
+      }
+
+      const semesterUsageResult = await query(
+        `
+        SELECT COALESCE(SUM(durasi), 0)::int AS used_days
+        FROM leave_requests
+        WHERE student_id = $1
+          AND status IN ('Menunggu', 'Disetujui')
+          AND jenis_pengajuan = 'cuti'
+          AND counts_against_leave_quota = TRUE
+          AND periode_start >= (CURRENT_DATE - INTERVAL '6 months')
+        `,
+        [resolvedStudentId]
+      );
+      const usedSemesterDays = Number(semesterUsageResult.rows[0]?.used_days || 0);
+      if (maxSemesterDays > 0 && usedSemesterDays + requestedDays > maxSemesterDays) {
+        return res.status(400).json({
+          message: `Kuota cuti semester terlampaui. Sisa kuota semester ${Math.max(0, maxSemesterDays - usedSemesterDays)} hari.`
+        });
+      }
     }
 
-    const semesterUsageResult = await query(
-      `
-      SELECT COALESCE(SUM(durasi), 0)::int AS used_days
-      FROM leave_requests
-      WHERE student_id = $1
-        AND status IN ('Menunggu', 'Disetujui')
-        AND periode_start >= (CURRENT_DATE - INTERVAL '6 months')
-      `,
-      [resolvedStudentId]
-    );
-    const usedSemesterDays = Number(semesterUsageResult.rows[0]?.used_days || 0);
-    if (maxSemesterDays > 0 && usedSemesterDays + requestedDays > maxSemesterDays) {
-      return res.status(400).json({
-        message: `Kuota cuti semester terlampaui. Sisa kuota semester ${Math.max(0, maxSemesterDays - usedSemesterDays)} hari.`
-      });
-    }
-
-    if (minAttendancePct > 0) {
+    if (countsAgainstQuota && minAttendancePct > 0) {
       const attendanceResult = await query(
         `
         SELECT kehadiran, total_hari
@@ -175,10 +216,23 @@ router.post(
       `
       INSERT INTO leave_requests (
         id, student_id, project_id, periode_start, periode_end, durasi,
+        jenis_pengajuan, counts_against_leave_quota,
         alasan, catatan, tanggal_pengajuan, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Menunggu')
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Menunggu')
       `,
-      [id, resolvedStudentId, projectId || null, periodeStart, periodeEnd, requestedDays, alasan, catatan || null, tanggalPengajuan]
+      [
+        id,
+        resolvedStudentId,
+        projectId || null,
+        periodeStart,
+        periodeEnd,
+        requestedDays,
+        jenisPengajuan,
+        countsAgainstQuota,
+        alasan,
+        catatan || null,
+        tanggalPengajuan
+      ]
     );
 
     const studentNameResult = await query(
@@ -197,8 +251,8 @@ router.post(
       operatorsResult.rows.map((row) =>
         createNotification({
           recipientUserId: row.id,
-          title: "Pengajuan Cuti Baru",
-          body: `${studentName} mengajukan cuti ${requestedDays} hari (${periodeStart} s.d. ${periodeEnd}).`,
+          title: `Pengajuan ${getLeaveLabel(jenisPengajuan)} Baru`,
+          body: `${studentName} mengajukan ${getLeaveLabel(jenisPengajuan)} ${requestedDays} hari (${periodeStart} s.d. ${periodeEnd}).`,
           senderUserId: null,
           type: "cuti",
           eventId: "cuti_request"

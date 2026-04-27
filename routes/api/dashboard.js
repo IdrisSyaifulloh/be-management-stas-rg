@@ -12,6 +12,7 @@ const {
   recordDashboardWarningReview,
   resolveDashboardReminderStudentId
 } = require("../../utils/dashboardReminders");
+const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks");
 
 const router = express.Router();
 const DASHBOARD_TIMEZONE = "Asia/Jakarta";
@@ -243,6 +244,13 @@ router.get(
       lowHours: lowHoursRows.rows.map((row) => mapWarningItem(row, "low_hours"))
     };
 
+    if (attendanceSectionActive && warnings.attendanceAbsent.length > 0) {
+      await createAttendanceAbsentLocks({
+        studentIds: warnings.attendanceAbsent.map((item) => item.studentId),
+        date: today
+      });
+    }
+
     res.json({
       generatedAt: new Date().toISOString(),
       referenceDate: today,
@@ -367,6 +375,12 @@ router.get(
 
     const studentId = studentResult.rows[0].id;
 
+    await query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
+      ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE
+    `);
+
     const [researchRows, milestonesRows, logbookRows, leaveRows, attendanceRows, todayAttendanceRows, letterRows, certRows, settings] = await Promise.all([
       query(
         `
@@ -389,7 +403,7 @@ router.get(
         [userId]
       ),
       query("SELECT id, title, date, description, output, project_id FROM logbook_entries WHERE student_id = $1 ORDER BY date DESC LIMIT 5", [studentId]),
-      query("SELECT id, status, durasi, periode_start, periode_end FROM leave_requests WHERE student_id = $1 ORDER BY tanggal_pengajuan DESC", [studentId]),
+      query("SELECT id, status, durasi, periode_start, periode_end, jenis_pengajuan, counts_against_leave_quota FROM leave_requests WHERE student_id = $1 ORDER BY tanggal_pengajuan DESC", [studentId]),
       query(
         `
         SELECT status
@@ -439,7 +453,9 @@ router.get(
     }, {});
     const attendanceHadir = attendanceRows.rows.filter((item) => item.status === "Hadir").length;
     const attendanceTotal = attendanceRows.rows.length;
-    const approvedLeaveCount = leaveRows.rows.filter((item) => item.status === "Disetujui").length;
+    const approvedLeaveCount = leaveRows.rows
+      .filter((item) => item.status === "Disetujui" && item.jenis_pengajuan === "cuti" && item.counts_against_leave_quota !== false)
+      .reduce((sum, item) => sum + Number(item.durasi || 0), 0);
     const totalCuti = Number(settings?.cuti?.maxSemesterDays || 3);
     const sisaCuti = Math.max(0, totalCuti - approvedLeaveCount);
     const dokSiapUnduh = letterRows.rows.filter((item) => item.status === "Siap Unduh").length;

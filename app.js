@@ -10,6 +10,7 @@ var validateEnv = require('./config/validateEnv');
 var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/users');
 var apiRouter = require('./routes/api');
+var { studentAccessLockMiddleware } = require('./utils/studentAccessLocks');
 
 var envValidationResult = validateEnv();
 if (!envValidationResult.isValid) {
@@ -42,6 +43,8 @@ app.use((req, res, next) => {
 
   next();
 });
+
+app.use(studentAccessLockMiddleware);
 
 // ======================================================
 // START CLEANUP JOB FOR WITHDRAWN STUDENTS

@@ -18,6 +18,7 @@ const {
   maxIsoDate,
   minIsoDate
 } = require("../../utils/attendanceHistory");
+const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks");
 
 const router = express.Router();
 let ensureAttendanceColumnsPromise = null;
@@ -882,6 +883,13 @@ router.get(
       }
       absentIds.push(studentId);
     });
+
+    if (absentIds.length > 0) {
+      await createAttendanceAbsentLocks({
+        studentIds: absentIds,
+        date: getJakartaDateIso()
+      });
+    }
 
     res.json({
       date: getJakartaDateIso(),
