@@ -1,7 +1,8 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
-const { buildWhereClause, clampLimit } = require("../../utils/queryFilters");
+const { buildWhereClause } = require("../../utils/queryFilters");
+const { parseBoundedLimit, requireEnum } = require("../../utils/securityValidation");
 
 const router = express.Router();
 
@@ -9,12 +10,14 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     const { action, role, limit = 50 } = req.query;
+    const normalizedAction = requireEnum(action, ["Login", "Create", "Update", "Delete", "Approve", "Export"], "action");
+    const normalizedRole = requireEnum(role, ["Mahasiswa", "Dosen", "Operator"], "role");
     const { whereClause, params } = buildWhereClause([
-      { value: action, sql: (index) => `al.action = $${index}` },
-      { value: role, sql: (index) => `al.user_role = $${index}` }
+      { value: normalizedAction, sql: (index) => `al.action = $${index}` },
+      { value: normalizedRole, sql: (index) => `al.user_role = $${index}` }
     ]);
 
-    params.push(clampLimit(limit, 50, 200));
+    params.push(parseBoundedLimit(limit, 50, 200));
 
     const result = await query(
       `

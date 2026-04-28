@@ -11,6 +11,7 @@ const {
   PDF_MIME,
   XLSX_MIME
 } = require("../../utils/exportFiles");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
 const SUPPORTED_FORMATS = ["xlsx", "csv", "pdf"];
@@ -178,6 +179,11 @@ function parseExportRequest(req, typeOverride) {
   }
 
   const angkatan = normalizeText(req.query.angkatan || req.body?.angkatan || "");
+  if (studentId) requireSafeId(studentId, "studentId");
+  if (projectId) requireSafeId(projectId, "projectId");
+  if (angkatan && !/^[A-Za-z0-9 _.-]{1,40}$/.test(angkatan)) {
+    throw createHttpError(400, "Input tidak valid.");
+  }
 
   return { type, format, studentId, projectId, startDate, endDate, angkatan };
 }

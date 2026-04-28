@@ -1,7 +1,7 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
-const { clampLimit } = require("../../utils/queryFilters");
+const { parseBoundedLimit, requireSafeId } = require("../../utils/securityValidation");
 const { extractRole } = require("../../utils/roleGuard");
 const { createNotification, ensureNotificationsTable, inferNotificationEventId } = require("../../utils/notificationService");
 const {
@@ -69,14 +69,20 @@ router.get(
       return res.status(400).json({ message: "userId wajib diisi." });
     }
 
+    requireSafeId(resolvedUserId, "userId");
+    const normalizedUnreadOnly = String(unreadOnly).toLowerCase();
+    if (!["true", "false"].includes(normalizedUnreadOnly)) {
+      return res.status(400).json({ message: "Input tidak valid." });
+    }
+
     const params = [resolvedUserId];
     let where = "WHERE n.recipient_user_id = $1";
 
-    if (String(unreadOnly).toLowerCase() === "true") {
+    if (normalizedUnreadOnly === "true") {
       where += " AND n.read_at IS NULL";
     }
 
-    params.push(clampLimit(limit, 50, 200));
+    params.push(parseBoundedLimit(limit, 50, 200));
 
     const result = await query(
       `
@@ -121,6 +127,7 @@ router.post(
     if (!recipientUserId || !title || !body) {
       return res.status(400).json({ message: "recipientUserId, title, body wajib diisi." });
     }
+    requireSafeId(recipientUserId, "recipientUserId");
 
     const resolvedRecipient = await resolveRecipientUserId(recipientUserId);
     if (!resolvedRecipient) {
@@ -228,6 +235,7 @@ router.patch(
     if (!requesterUserId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(requesterUserId, "userId");
 
     const result = await query(
       `
@@ -256,6 +264,8 @@ router.patch(
     if (!requesterUserId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(req.params.id, "id");
+    requireSafeId(requesterUserId, "userId");
 
     const result = await query(
       `
@@ -291,6 +301,8 @@ router.patch(
     if (!requesterUserId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(req.params.id, "id");
+    requireSafeId(requesterUserId, "userId");
 
     const result = await query(
       `
@@ -326,6 +338,7 @@ router.patch(
     if (!requesterUserId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(requesterUserId, "userId");
 
     await query(
       `
@@ -349,6 +362,7 @@ router.get(
     if (!userId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(userId, "userId");
 
     const settingKey = `notification_prefs:${userId}`;
     const result = await query(
@@ -371,6 +385,7 @@ router.put(
     if (!userId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(userId, "userId");
     if (!Array.isArray(items)) {
       return res.status(400).json({ message: "items wajib berupa array." });
     }

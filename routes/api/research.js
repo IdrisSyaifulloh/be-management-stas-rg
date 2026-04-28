@@ -14,8 +14,19 @@ const {
   setTaskAssignees
 } = require("../../utils/researchBoardStore");
 const { createNotification } = require("../../utils/notificationService");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
+["id", "cardId", "taskId", "subtaskId", "attachmentId", "commentId", "userId", "milestoneId"].forEach((paramName) => {
+  router.param(paramName, (req, res, next, value) => {
+    try {
+      req.params[paramName] = requireSafeId(value, paramName);
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+});
 
 function resolveRequesterUserId(req) {
   return String(req?.authUser?.id || req.headers["x-user-id"] || req.query.userId || req.body?.userId || "").trim();

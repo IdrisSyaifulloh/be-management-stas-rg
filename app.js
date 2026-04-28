@@ -11,6 +11,7 @@ var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/users');
 var apiRouter = require('./routes/api');
 var { studentAccessLockMiddleware } = require('./utils/studentAccessLocks');
+var { hasControlChars } = require('./utils/securityValidation');
 
 var envValidationResult = validateEnv();
 if (!envValidationResult.isValid) {
@@ -21,8 +22,8 @@ var app = express();
 
 app.use(logger('dev'));
 app.use(cors({ origin: env.corsOrigin }));
-app.use(express.json({ limit: '6mb' }));
-app.use(express.urlencoded({ extended: false, limit: '6mb' }));
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: false, limit: '15mb' }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -31,6 +32,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 // 🔥 FIX AUTH MIDDLEWARE (PENTING BANGET)
 // ======================================================
 app.use((req, res, next) => {
+  if (hasControlChars(req.query) || hasControlChars(req.body) || hasControlChars(req.headers["x-user-id"]) || hasControlChars(req.headers["x-user-role"])) {
+    return res.status(400).json({ message: "Input tidak valid." });
+  }
+
   const role = req.headers["x-user-role"];
   const id = req.headers["x-user-id"];
 
@@ -79,8 +84,9 @@ app.use(function(req, res, next) {
 // error handler
 app.use(function(err, req, res, next) {
   if (req.path.startsWith('/api')) {
-    return res.status(err.status || 500).json({
-      message: err.message || 'Internal server error'
+    const status = err.status || err.statusCode || 500;
+    return res.status(status).json({
+      message: status >= 500 ? 'Terjadi kesalahan pada server.' : (err.message || 'Input tidak valid.')
     });
   }
 

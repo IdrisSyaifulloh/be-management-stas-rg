@@ -8,8 +8,17 @@ const { createNotification } = require("../../utils/notificationService");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
+router.param("id", (req, res, next, value) => {
+  try {
+    req.params.id = requireSafeId(value, "id");
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 const LETTER_UPLOAD_DIR = path.join(__dirname, "../../public/uploads/letters");
 const ALLOWED_LETTER_FILE_TYPES = {
   "application/pdf": ".pdf",
