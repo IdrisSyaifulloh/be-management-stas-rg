@@ -15,7 +15,9 @@ async function ensureLeaveColumns() {
     ensureLeaveColumnsPromise = query(`
       ALTER TABLE leave_requests
       ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
-      ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE
+      ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS file_url TEXT,
+      ADD COLUMN IF NOT EXISTS file_name TEXT
     `);
   }
   await ensureLeaveColumnsPromise;
@@ -70,7 +72,8 @@ router.get(
              lr.counts_against_leave_quota,
              lr.alasan, lr.catatan, lr.tanggal_pengajuan, lr.status,
              lr.reviewed_by, ru.name AS reviewed_by_name,
-             lr.reviewed_at, lr.review_note
+             lr.reviewed_at, lr.review_note,
+             lr.file_url, lr.file_name
       FROM leave_requests lr
       JOIN students s ON s.id = lr.student_id
       JOIN users su ON su.id = s.user_id
@@ -106,7 +109,9 @@ router.post(
       countsAgainstLeaveQuota,
       alasan,
       catatan,
-      tanggalPengajuan
+      tanggalPengajuan,
+      fileUrl,
+      fileName
     } = req.body;
 
     if (!id || !studentId || !periodeStart || !periodeEnd || !alasan || !tanggalPengajuan) {
@@ -234,8 +239,8 @@ router.post(
       INSERT INTO leave_requests (
         id, student_id, project_id, periode_start, periode_end, durasi,
         jenis_pengajuan, counts_against_leave_quota,
-        alasan, catatan, tanggal_pengajuan, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Menunggu')
+        alasan, catatan, tanggal_pengajuan, status, file_url, file_name
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Menunggu',$12,$13)
       `,
       [
         id,
@@ -248,7 +253,9 @@ router.post(
         countsAgainstQuota,
         alasan,
         catatan || null,
-        tanggalPengajuan
+        tanggalPengajuan,
+        fileUrl || null,
+        fileName || null
       ]
     );
 
@@ -284,6 +291,7 @@ router.post(
 router.patch(
   "/:id/status",
   asyncHandler(async (req, res) => {
+    await ensureLeaveColumns();
     const role = extractRole(req);
     if (role !== "operator") {
       return res.status(403).json({ message: "Hanya operator yang dapat mengubah status cuti." });
@@ -343,6 +351,7 @@ router.patch(
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
+    await ensureLeaveColumns();
     const role = extractRole(req);
     if (role !== "operator") {
       return res.status(403).json({ message: "Hanya operator yang dapat menghapus pengajuan cuti." });
