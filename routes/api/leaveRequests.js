@@ -54,6 +54,7 @@ router.get(
     const studentIdInput = requestedStudentId;
     const { status } = req.query;
     const resolvedStudentId = studentIdInput ? await resolveStudentId(String(studentIdInput)) : null;
+
     if (studentIdInput && !resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
@@ -94,6 +95,7 @@ router.post(
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
     const role = extractRole(req);
+
     if (role !== "mahasiswa") {
       return res.status(403).json({ message: "Hanya mahasiswa yang dapat membuat pengajuan cuti." });
     }
@@ -148,6 +150,7 @@ router.post(
       [resolvedStudentId]
     );
     const studentType = studentTypeResult.rows[0]?.tipe;
+
     if (studentType === "Riset" && jenisPengajuan === "cuti") {
       return res.status(400).json({
         message: "Mahasiswa Riset tidak dapat mengajukan cuti. Silakan pilih izin atau sakit."
@@ -205,6 +208,7 @@ router.post(
         `,
         [resolvedStudentId]
       );
+
       const usedSemesterDays = Number(semesterUsageResult.rows[0]?.used_days || 0);
       if (maxSemesterDays > 0 && usedSemesterDays + requestedDays > maxSemesterDays) {
         return res.status(400).json({
@@ -223,10 +227,12 @@ router.post(
         `,
         [resolvedStudentId]
       );
+
       const studentRow = attendanceResult.rows[0] || {};
       const totalHari = Number(studentRow.total_hari || 0);
       const kehadiran = Number(studentRow.kehadiran || 0);
       const attendancePct = totalHari > 0 ? (kehadiran / totalHari) * 100 : 100;
+
       if (attendancePct < minAttendancePct) {
         return res.status(400).json({
           message: `Pengajuan ditolak. Kehadiran ${attendancePct.toFixed(1)}% masih di bawah batas minimum ${minAttendancePct}%.`
@@ -269,8 +275,10 @@ router.post(
       `,
       [resolvedStudentId]
     );
+
     const studentName = studentNameResult.rows[0]?.name || "Mahasiswa";
     const operatorsResult = await query("SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE");
+
     await Promise.all(
       operatorsResult.rows.map((row) =>
         createNotification({
@@ -293,6 +301,7 @@ router.patch(
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
     const role = extractRole(req);
+
     if (role !== "operator") {
       return res.status(403).json({ message: "Hanya operator yang dapat mengubah status cuti." });
     }
@@ -332,6 +341,7 @@ router.patch(
       `,
       [req.params.id]
     );
+
     const recipientUserId = leaveRow.rows[0]?.user_id;
     if (recipientUserId) {
       await createNotification({
@@ -353,6 +363,7 @@ router.delete(
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
     const role = extractRole(req);
+
     if (role !== "operator") {
       return res.status(403).json({ message: "Hanya operator yang dapat menghapus pengajuan cuti." });
     }
