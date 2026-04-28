@@ -25,6 +25,10 @@ function validateEnv() {
     });
   }
 
+  if (!env.jwtSecret || String(env.jwtSecret).trim() === "") {
+    errors.push("JWT_SECRET wajib diisi untuk keamanan token.");
+  }
+
   return {
     isValid: errors.length === 0,
     errors

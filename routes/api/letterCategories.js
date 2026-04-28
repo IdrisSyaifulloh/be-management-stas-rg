@@ -3,8 +3,17 @@ const crypto = require("crypto");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { extractRole } = require("../../utils/roleGuard");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
+router.param("id", (req, res, next, value) => {
+  try {
+    req.params.id = requireSafeId(value, "id");
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 let ensureTablePromise = null;
 
 function requireOperator(req, res) {

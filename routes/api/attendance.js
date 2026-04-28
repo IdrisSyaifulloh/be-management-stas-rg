@@ -19,8 +19,17 @@ const {
   minIsoDate
 } = require("../../utils/attendanceHistory");
 const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
+router.param("id", (req, res, next, value) => {
+  try {
+    req.params.id = requireSafeId(value, "id");
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 let ensureAttendanceColumnsPromise = null;
 
 function toRadians(value) {

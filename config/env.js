@@ -21,7 +21,8 @@ const env = {
   dbPort: Number(process.env.DB_PORT || 5432),
   dbName: process.env.DB_NAME || "stasrg",
   dbUser: process.env.DB_USER || "postgres",
-  dbPassword: process.env.DB_PASSWORD || "postgres"
+  dbPassword: process.env.DB_PASSWORD || "postgres",
+  jwtSecret: process.env.JWT_SECRET || null
 };
 
 module.exports = env;

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS students (
   kehadiran INTEGER NOT NULL DEFAULT 0,
   total_hari INTEGER NOT NULL DEFAULT 0,
   logbook_count INTEGER NOT NULL DEFAULT 0,
+  wfh_quota INTEGER NOT NULL DEFAULT 0,
   jam_minggu_ini INTEGER,
   jam_minggu_target INTEGER,
   withdrawal_at TIMESTAMPTZ,
@@ -161,8 +162,9 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   periode_start DATE NOT NULL,
   periode_end DATE NOT NULL,
   durasi INTEGER NOT NULL,
-  jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti' CHECK (jenis_pengajuan IN ('cuti', 'izin', 'sakit')),
+  jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti' CHECK (jenis_pengajuan IN ('cuti', 'izin', 'sakit', 'wfh')),
   counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE,
+  counts_against_wfh_quota BOOLEAN NOT NULL DEFAULT FALSE,
   alasan TEXT NOT NULL,
   catatan TEXT,
   tanggal_pengajuan DATE NOT NULL,
@@ -170,6 +172,9 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   reviewed_at TIMESTAMPTZ,
   review_note TEXT,
+  file_url TEXT,
+  file_name TEXT,
+  file_size BIGINT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -13,6 +13,7 @@ const {
   resolveDashboardReminderStudentId
 } = require("../../utils/dashboardReminders");
 const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
 const DASHBOARD_TIMEZONE = "Asia/Jakarta";
@@ -364,9 +365,15 @@ router.get(
     if (!userId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(userId, "userId");
+
+    await query(`
+      ALTER TABLE students
+      ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
+    `);
 
     const studentResult = await query(
-      "SELECT id, nim, TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date FROM students WHERE user_id = $1",
+      "SELECT id, nim, COALESCE(wfh_quota, 0)::int AS wfh_quota, TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date FROM students WHERE user_id = $1",
       [userId]
     );
     if (studentResult.rowCount === 0) {
@@ -378,7 +385,14 @@ router.get(
     await query(`
       ALTER TABLE leave_requests
       ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
-      ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE
+      ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS counts_against_wfh_quota BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await query(`
+      ALTER TABLE leave_requests
+      DROP CONSTRAINT IF EXISTS leave_requests_jenis_pengajuan_check,
+      ADD CONSTRAINT leave_requests_jenis_pengajuan_check
+        CHECK (jenis_pengajuan IN ('cuti', 'izin', 'sakit', 'wfh'))
     `);
 
     const [researchRows, milestonesRows, logbookRows, leaveRows, attendanceRows, todayAttendanceRows, letterRows, certRows, settings] = await Promise.all([
@@ -403,7 +417,7 @@ router.get(
         [userId]
       ),
       query("SELECT id, title, date, description, output, project_id FROM logbook_entries WHERE student_id = $1 ORDER BY date DESC LIMIT 5", [studentId]),
-      query("SELECT id, status, durasi, periode_start, periode_end, jenis_pengajuan, counts_against_leave_quota FROM leave_requests WHERE student_id = $1 ORDER BY tanggal_pengajuan DESC", [studentId]),
+      query("SELECT id, status, durasi, periode_start, periode_end, jenis_pengajuan, counts_against_leave_quota, counts_against_wfh_quota FROM leave_requests WHERE student_id = $1 ORDER BY tanggal_pengajuan DESC", [studentId]),
       query(
         `
         SELECT status
@@ -458,6 +472,13 @@ router.get(
       .reduce((sum, item) => sum + Number(item.durasi || 0), 0);
     const totalCuti = Number(settings?.cuti?.maxSemesterDays || 3);
     const sisaCuti = Math.max(0, totalCuti - approvedLeaveCount);
+    const wfhQuota = Number(studentResult.rows[0].wfh_quota || 0);
+    const wfhUsed = leaveRows.rows.filter((item) =>
+      item.status === "Disetujui" &&
+      item.jenis_pengajuan === "wfh" &&
+      item.counts_against_wfh_quota !== false
+    ).length;
+    const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);
     const dokSiapUnduh = letterRows.rows.filter((item) => item.status === "Siap Unduh").length;
     const todayAttendance = todayAttendanceRows.rows[0] || null;
     const certTerbitCount = certRows.rows.filter((item) => item.status === "Terbit").length;
@@ -476,6 +497,12 @@ router.get(
         tasksTotal: Math.max(projects.length * 10, 0),
         sisaCuti,
         totalCuti,
+        totalWfh: wfhQuota,
+        usedWfh: wfhUsed,
+        sisaWfh: wfhRemaining,
+        wfhQuota,
+        wfhUsed,
+        wfhRemaining,
         dokSiapUnduh
       },
       projects: projects.map((item) => ({
@@ -500,6 +527,8 @@ router.get(
       })),
       leaveRecent: leaveRows.rows.slice(0, 3).map((item) => ({
         id: item.id,
+        jenis: item.jenis_pengajuan,
+        jenis_pengajuan: item.jenis_pengajuan,
         period: `${new Date(item.periode_start).toLocaleDateString("id-ID")} - ${new Date(item.periode_end).toLocaleDateString("id-ID")}`,
         durasi: `${item.durasi} hari`,
         status: item.status
@@ -535,6 +564,7 @@ router.get(
     if (!userId) {
       return res.status(400).json({ message: "userId wajib diisi." });
     }
+    requireSafeId(userId, "userId");
 
     const [researchRows, pendingLogRows, leaveRows, boardRows, deadlineRows, mahasiswaRows] = await Promise.all([
       query(

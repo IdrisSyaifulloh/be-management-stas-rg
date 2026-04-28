@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { extractRole } = require("../../utils/roleGuard");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
 let ensureOperatorColumnsPromise = null;
@@ -114,6 +115,7 @@ router.post(
   asyncHandler(async (req, res) => {
     if (!requireOperator(req, res)) return;
     await ensureOperatorColumns();
+    const operatorId = requireSafeId(req.params.id, "id");
 
     const {
       name,
@@ -194,7 +196,7 @@ router.put(
         RETURNING id, name, initials, email, username, phone, is_active, role, created_at, updated_at
         `,
         [
-          req.params.id,
+          operatorId,
           normalizeText(body.name),
           normalizeText(body.initials),
           normalizeText(body.email),
@@ -225,10 +227,11 @@ router.delete(
   asyncHandler(async (req, res) => {
     if (!requireOperator(req, res)) return;
     await ensureOperatorColumns();
+    const operatorId = requireSafeId(req.params.id, "id");
 
     const result = await query(
       "DELETE FROM users WHERE id = $1 AND role = 'operator' RETURNING id",
-      [req.params.id]
+      [operatorId]
     );
 
     if (result.rowCount === 0) {

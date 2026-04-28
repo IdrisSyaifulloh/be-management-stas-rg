@@ -2,6 +2,13 @@ const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const bcrypt = require("bcrypt");
+const {
+  parseBoundedLimit,
+  parseBoundedOffset,
+  requireSafeId,
+  resolveSortColumn,
+  resolveSortDirection
+} = require("../../utils/securityValidation");
 
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
@@ -11,7 +18,8 @@ async function ensureStudentColumns() {
     ensureStudentColumnsPromise = query(`
       ALTER TABLE students
       ADD COLUMN IF NOT EXISTS fakultas TEXT,
-      ADD COLUMN IF NOT EXISTS bergabung DATE
+      ADD COLUMN IF NOT EXISTS bergabung DATE,
+      ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
     `);
   }
   await ensureStudentColumnsPromise;
@@ -32,15 +40,69 @@ function normalizeOptionalDate(value) {
   return normalized;
 }
 
+function normalizeNonNegativeInteger(value, fieldName) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    const error = new Error(`${fieldName} wajib berupa integer minimal 0.`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return parsed;
+}
+
+function mapStudentRow(row) {
+  const wfhQuota = Number(row.wfh_quota || 0);
+  const wfhUsed = Number(row.wfh_used || 0);
+  const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);
+  return {
+    ...row,
+    wfh_quota: wfhQuota,
+    wfhQuota,
+    wfh_used: wfhUsed,
+    wfhUsed,
+    wfh_remaining: wfhRemaining,
+    wfhRemaining
+  };
+}
+
 router.get(
   "/",
   asyncHandler(async (req, res) => {
     await ensureStudentColumns();
+    const { search, sortBy = "name", sortDirection = "ASC", limit, offset } = req.query;
+    const searchValue = String(search || "").trim();
+    const allowedSort = {
+      name: "u.name",
+      nim: "s.nim",
+      createdAt: "s.created_at",
+      wfhQuota: "s.wfh_quota"
+    };
+    const sortColumn = resolveSortColumn(sortBy, allowedSort, "name");
+    const sortDir = resolveSortDirection(sortDirection, "ASC");
+    const rowLimit = parseBoundedLimit(limit, 200, 500);
+    const rowOffset = parseBoundedOffset(offset, 0, 10000);
+    const params = [];
+    const where = [];
+
+    if (searchValue) {
+      params.push(`%${searchValue}%`);
+      where.push(`(u.name ILIKE $${params.length} OR s.nim ILIKE $${params.length} OR u.email ILIKE $${params.length})`);
+    }
+
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    params.push(rowLimit);
+    const limitPlaceholder = `$${params.length}`;
+    params.push(rowOffset);
+    const offsetPlaceholder = `$${params.length}`;
+
     const result = await query(
       `
       SELECT s.id, s.user_id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
              s.fakultas, s.status, s.tipe, TO_CHAR(s.bergabung, 'YYYY-MM-DD') AS bergabung, s.pembimbing,
              s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target,
+             s.wfh_quota,
+             COUNT(DISTINCT lr.id)::int AS wfh_used,
              COALESCE(
                array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
                ARRAY[]::text[]
@@ -49,14 +111,19 @@ router.get(
       JOIN users u ON u.id = s.user_id
       LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
+      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui'
+      ${whereClause}
       GROUP BY s.id, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
                s.fakultas, s.status, s.tipe, s.bergabung, s.pembimbing,
-               s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
-      ORDER BY u.name ASC
-      `
+               s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target, s.wfh_quota
+      ORDER BY ${sortColumn} ${sortDir}, s.id ASC
+      LIMIT ${limitPlaceholder}
+      OFFSET ${offsetPlaceholder}
+      `,
+      params
     );
 
-    res.json(result.rows);
+    res.json(result.rows.map(mapStudentRow));
   })
 );
 
@@ -64,11 +131,14 @@ router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureStudentColumns();
+    const studentId = requireSafeId(req.params.id);
     const result = await query(
       `
       SELECT s.id, s.user_id, s.nim, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
              s.fakultas, s.status, s.tipe, TO_CHAR(s.bergabung, 'YYYY-MM-DD') AS bergabung, s.pembimbing,
              s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target,
+             s.wfh_quota,
+             COUNT(DISTINCT lr.id)::int AS wfh_used,
              COALESCE(
                array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
                ARRAY[]::text[]
@@ -77,19 +147,20 @@ router.get(
       JOIN users u ON u.id = s.user_id
       LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
+      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui'
       WHERE s.id = $1
       GROUP BY s.id, u.name, u.initials, u.prodi, s.angkatan, u.email, s.phone,
                s.fakultas, s.status, s.tipe, s.bergabung, s.pembimbing,
-               s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target
+               s.kehadiran, s.total_hari, s.logbook_count, s.jam_minggu_ini, s.jam_minggu_target, s.wfh_quota
       `,
-      [req.params.id]
+      [studentId]
     );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
-    res.json(result.rows[0]);
+    res.json(mapStudentRow(result.rows[0]));
   })
 );
 
@@ -109,6 +180,8 @@ router.post(
       tipe,
       bergabung,
       pembimbing,
+      wfhQuota,
+      wfh_quota: wfhQuotaSnake,
       password
     } = req.body;
 
@@ -118,6 +191,12 @@ router.post(
 
     await ensureStudentColumns();
     const normalizedBergabung = normalizeOptionalDate(bergabung);
+    let normalizedWfhQuota;
+    try {
+      normalizedWfhQuota = normalizeNonNegativeInteger(wfhQuota ?? wfhQuotaSnake, "wfhQuota");
+    } catch (error) {
+      return res.status(error?.statusCode || 400).json({ message: error.message });
+    }
 
     await query("BEGIN");
     try {
@@ -141,10 +220,10 @@ router.post(
       // Insert student with user_id referencing the user
       await query(
         `
-        INSERT INTO students (id, user_id, nim, angkatan, fakultas, phone, status, tipe, bergabung, pembimbing)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::date, CURRENT_DATE), $10)
+        INSERT INTO students (id, user_id, nim, angkatan, fakultas, phone, status, tipe, bergabung, pembimbing, wfh_quota)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::date, CURRENT_DATE), $10, COALESCE($11, 0))
         `,
-        [studentId, userId, nim, angkatan || null, fakultas || null, phone || null, status, tipe, normalizedBergabung, pembimbing || null]
+        [studentId, userId, nim, angkatan || null, fakultas || null, phone || null, status, tipe, normalizedBergabung, pembimbing || null, normalizedWfhQuota]
       );
 
       await query("COMMIT");
@@ -162,7 +241,7 @@ router.post(
 router.put(
   "/:id",
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
+    const id = requireSafeId(req.params.id);
     const {
       nim,
       name,
@@ -176,11 +255,22 @@ router.put(
       tipe,
       bergabung,
       pembimbing,
+      wfhQuota,
+      wfh_quota: wfhQuotaSnake,
       password
     } = req.body;
 
     await ensureStudentColumns();
     const normalizedBergabung = hasOwn(req.body || {}, "bergabung") ? normalizeOptionalDate(bergabung) : null;
+    let normalizedWfhQuota = null;
+    const hasWfhQuota = hasOwn(req.body || {}, "wfhQuota") || hasOwn(req.body || {}, "wfh_quota");
+    if (hasWfhQuota) {
+      try {
+        normalizedWfhQuota = normalizeNonNegativeInteger(wfhQuota ?? wfhQuotaSnake, "wfhQuota");
+      } catch (error) {
+        return res.status(error?.statusCode || 400).json({ message: error.message });
+      }
+    }
 
     await query("BEGIN");
     try {
@@ -236,6 +326,7 @@ router.put(
              pembimbing            = COALESCE($11, pembimbing),
              withdrawal_at         = CASE WHEN $12 THEN NOW() ELSE withdrawal_at END,
              scheduled_deletion_at = CASE WHEN $12 THEN NOW() + INTERVAL '30 days' ELSE scheduled_deletion_at END,
+             wfh_quota             = CASE WHEN $13::boolean THEN $14 ELSE wfh_quota END,
              updated_at            = NOW()
          WHERE id = $1`,
         [
@@ -250,7 +341,9 @@ router.put(
           hasOwn(req.body || {}, "bergabung"),
           normalizedBergabung,
           pembimbing,
-          isWithdrawing
+          isWithdrawing,
+          hasWfhQuota,
+          normalizedWfhQuota
         ]
       );
 
@@ -297,17 +390,18 @@ router.put(
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
+    const id = requireSafeId(req.params.id);
     // Coba hapus berdasarkan user_id terlebih dahulu
     let result = await query(
       "DELETE FROM users WHERE id = $1 AND role = 'mahasiswa' RETURNING id",
-      [req.params.id]
+      [id]
     );
 
     // Jika tidak ketemu, coba cari berdasarkan student_id
     if (result.rowCount === 0) {
       const studentCheck = await query(
         "SELECT user_id FROM students WHERE id = $1",
-        [req.params.id]
+        [id]
       );
       if (studentCheck.rowCount > 0) {
         result = await query(

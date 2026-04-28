@@ -11,7 +11,8 @@
     "db:clear": "node ./db/runSqlFile.js ./db/clear.sql",
     "db:create-operator": "node ./db/runSqlFile.js ./db/create_operator.sql",
     "db:reset": "npm run db:migrate && npm run db:seed",
-    "db:migrate-withdrawal": "node ./db/runSqlFile.js ./db/migrations/001_add_withdrawal_tracking.sql"
+    "db:migrate-withdrawal": "node ./db/runSqlFile.js ./db/migrations/001_add_withdrawal_tracking.sql",
+    "test:security": "node ./scripts/securitySmokeTest.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
@@ -23,6 +24,7 @@
     "express-validator": "^7.3.1",
     "http-errors": "~1.6.3",
     "jade": "~1.11.0",
+    "jsonwebtoken": "^9.1.2",
     "morgan": "~1.9.1",
     "pg": "^8.16.3",
     "zod": "^4.3.6"

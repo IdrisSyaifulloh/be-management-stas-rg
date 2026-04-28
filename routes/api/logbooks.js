@@ -7,6 +7,7 @@ const { resolveStudentId } = require("../../utils/studentResolver");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
 const LOGBOOK_UPLOAD_DIR = path.join(__dirname, "../../public/uploads/logbooks");
@@ -26,12 +27,46 @@ async function ensureLogbookAttachmentColumns() {
   if (!ensureLogbookColumnsPromise) {
     ensureLogbookColumnsPromise = query(`
       ALTER TABLE logbook_entries
+      ALTER COLUMN project_id DROP NOT NULL,
       ADD COLUMN IF NOT EXISTS file_url TEXT,
       ADD COLUMN IF NOT EXISTS file_name TEXT,
       ADD COLUMN IF NOT EXISTS file_size BIGINT
     `);
   }
   await ensureLogbookColumnsPromise;
+}
+
+function normalizeOptionalProjectId(projectId) {
+  const normalized = String(projectId || "").trim();
+  if (["null", "undefined"].includes(normalized.toLowerCase())) return null;
+  return normalized || null;
+}
+
+async function ensureProjectCanBeUsed(projectId, studentId) {
+  const normalizedProjectId = normalizeOptionalProjectId(projectId);
+  if (!normalizedProjectId) return null;
+
+  const result = await query(
+    `
+    SELECT rp.id
+    FROM research_projects rp
+    JOIN research_memberships rm ON rm.project_id = rp.id
+    JOIN students s ON s.user_id = rm.user_id
+    WHERE rp.id = $1
+      AND s.id = $2
+      AND rm.status = 'Aktif'
+    LIMIT 1
+    `,
+    [normalizedProjectId, studentId]
+  );
+
+  if (result.rowCount === 0) {
+    const error = new Error("Riset yang dipilih tidak ditemukan atau tidak terhubung dengan mahasiswa.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  return normalizedProjectId;
 }
 
 function sanitizeFilenameBase(name) {
@@ -119,6 +154,7 @@ router.get(
     const role = extractRole(req);
     let studentId = role === "mahasiswa" ? req.authUser?.id : req.query.studentId;
     const { projectId } = req.query;
+    const normalizedProjectId = normalizeOptionalProjectId(projectId);
 
     // Resolve studentId if it's actually a user_id
     if (studentId) {
@@ -127,15 +163,16 @@ router.get(
 
     const { whereClause, params } = buildWhereClause([
       { value: studentId, sql: (index) => `le.student_id = $${index}` },
-      { value: projectId, sql: (index) => `le.project_id = $${index}` }
+      { value: normalizedProjectId, sql: (index) => `le.project_id = $${index}` }
     ]);
 
     const result = await query(
       `
       SELECT le.id, le.student_id, su.name AS student_name, su.initials AS student_initials,
-             le.project_id, rp.short_title AS project_name,
+             le.project_id, COALESCE(rp.short_title, rp.title, 'Logbook Umum') AS project_name,
              le.date, le.title, le.description, le.output, le.kendala, le.has_attachment,
              le.file_url, le.file_name, le.file_size,
+             le.created_at, le.updated_at,
              COALESCE(lc.comments, '[]'::json) AS comments,
              COALESCE(lc.comments_count, 0) AS comments_count,
              lv.detail->>'verificationStatus' AS verification_status,
@@ -221,6 +258,13 @@ router.post(
       return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
     }
 
+    let normalizedProjectId = null;
+    try {
+      normalizedProjectId = await ensureProjectCanBeUsed(projectId, resolvedStudentId);
+    } catch (error) {
+      return res.status(error?.statusCode || 400).json({ message: error?.message || "Riset tidak valid." });
+    }
+
     let uploadedAttachment = null;
     if (typeof fileDataUrl === "string" && fileDataUrl.trim()) {
       try {
@@ -242,7 +286,7 @@ router.post(
       [
         id,
         resolvedStudentId,
-        projectId || null,
+        normalizedProjectId,
         date,
         title,
         description,
@@ -276,8 +320,9 @@ router.patch(
     if (!verifiedBy) {
       return res.status(400).json({ message: "verifiedBy wajib diisi." });
     }
+    const logbookId = requireSafeId(req.params.id, "id");
 
-    const exists = await query("SELECT id FROM logbook_entries WHERE id = $1", [req.params.id]);
+    const exists = await query("SELECT id FROM logbook_entries WHERE id = $1", [logbookId]);
     if (exists.rowCount === 0) {
       return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
     }
@@ -295,7 +340,7 @@ router.patch(
         roleLabel,
         req.ip || null,
         {
-          logbookId: req.params.id,
+          logbookId,
           verificationStatus,
           verificationNote: verificationNote || null,
           verifiedByName: verifiedByName || null
@@ -311,15 +356,27 @@ router.put(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureLogbookAttachmentColumns();
-    const { projectId, date, title, description, output, kendala, hasAttachment, fileDataUrl, fileName, clearAttachment } = req.body;
+    const logbookId = requireSafeId(req.params.id, "id");
+    const body = req.body || {};
+    const { projectId, date, title, description, output, kendala, hasAttachment, fileDataUrl, fileName, clearAttachment } = body;
 
     const existingEntry = await query(
-      "SELECT id, file_url, file_name, file_size, has_attachment FROM logbook_entries WHERE id = $1 LIMIT 1",
-      [req.params.id]
+      "SELECT id, student_id, project_id, file_url, file_name, file_size, has_attachment FROM logbook_entries WHERE id = $1 LIMIT 1",
+      [logbookId]
     );
 
     if (existingEntry.rowCount === 0) {
       return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
+    }
+
+    const hasProjectIdInput = Object.prototype.hasOwnProperty.call(body, "projectId");
+    let nextProjectId = existingEntry.rows[0].project_id;
+    if (hasProjectIdInput) {
+      try {
+        nextProjectId = await ensureProjectCanBeUsed(projectId, existingEntry.rows[0].student_id);
+      } catch (error) {
+        return res.status(error?.statusCode || 400).json({ message: error?.message || "Riset tidak valid." });
+      }
     }
 
     let uploadedAttachment = null;
@@ -349,7 +406,7 @@ router.put(
     const result = await query(
       `
       UPDATE logbook_entries
-      SET project_id = COALESCE($2, project_id),
+      SET project_id = $2,
           date = COALESCE($3, date),
           title = COALESCE($4, title),
           description = COALESCE($5, description),
@@ -363,7 +420,7 @@ router.put(
       WHERE id = $1
       RETURNING id
       `,
-      [req.params.id, projectId, date, title, description, output, kendala, nextHasAttachment, nextFileUrl, nextFileName, nextFileSize]
+      [logbookId, nextProjectId, date, title, description, output, kendala, nextHasAttachment, nextFileUrl, nextFileName, nextFileSize]
     );
 
     try {
@@ -384,6 +441,7 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureLogbookAttachmentColumns();
+    const logbookId = requireSafeId(req.params.id, "id");
 
     const role = extractRole(req);
     if (!["mahasiswa", "operator"].includes(role)) {
@@ -392,7 +450,7 @@ router.delete(
 
     const existing = await query(
       "SELECT id, student_id, file_url FROM logbook_entries WHERE id = $1 LIMIT 1",
-      [req.params.id]
+      [logbookId]
     );
 
     if (existing.rowCount === 0) {
@@ -407,7 +465,7 @@ router.delete(
       }
     }
 
-    await query("DELETE FROM logbook_entries WHERE id = $1", [req.params.id]);
+    await query("DELETE FROM logbook_entries WHERE id = $1", [logbookId]);
 
     try {
       await removeLogbookAttachment(existing.rows[0].file_url);
@@ -444,18 +502,20 @@ router.delete(
   "/:logbookId/comments/:commentId",
   asyncHandler(async (req, res) => {
     const { logbookId, commentId } = req.params;
+    const safeLogbookId = requireSafeId(logbookId, "logbookId");
+    const safeCommentId = requireSafeId(commentId, "commentId");
 
     // Verify the comment belongs to the specified logbook entry
     const commentCheck = await query(
       "SELECT id FROM logbook_comments WHERE id = $1 AND logbook_entry_id = $2",
-      [commentId, logbookId]
+      [safeCommentId, safeLogbookId]
     );
 
     if (commentCheck.rowCount === 0) {
       return res.status(404).json({ message: "Komentar tidak ditemukan." });
     }
 
-    await query("DELETE FROM logbook_comments WHERE id = $1", [commentId]);
+    await query("DELETE FROM logbook_comments WHERE id = $1", [safeCommentId]);
 
     res.json({ message: "Komentar berhasil dihapus." });
   })
