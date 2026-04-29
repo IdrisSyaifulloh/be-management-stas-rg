@@ -15,12 +15,19 @@ let ensureStudentColumnsPromise = null;
 
 async function ensureStudentColumns() {
   if (!ensureStudentColumnsPromise) {
-    ensureStudentColumnsPromise = query(`
-      ALTER TABLE students
-      ADD COLUMN IF NOT EXISTS fakultas TEXT,
-      ADD COLUMN IF NOT EXISTS bergabung DATE,
-      ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
-    `);
+    ensureStudentColumnsPromise = (async () => {
+      await query(`
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS fakultas TEXT,
+        ADD COLUMN IF NOT EXISTS bergabung DATE,
+        ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
+      `);
+
+      await query(`
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS photo_url TEXT
+      `);
+    })();
   }
 
   await ensureStudentColumnsPromise;
@@ -58,13 +65,46 @@ function normalizeNonNegativeInteger(value, fieldName) {
   return parsed;
 }
 
-function mapStudentRow(row) {
+function getRequestBaseUrl(req) {
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+
+  if (!host) return "";
+
+  return `${protocol}://${host}`;
+}
+
+function resolvePhotoUrl(req, value) {
+  const photoUrl = String(value || "").trim();
+
+  if (!photoUrl) return null;
+
+  if (/^https?:\/\//i.test(photoUrl)) {
+    return photoUrl;
+  }
+
+  if (photoUrl.startsWith("/")) {
+    return `${getRequestBaseUrl(req)}${photoUrl}`;
+  }
+
+  return photoUrl;
+}
+
+function mapStudentRow(row, req) {
   const wfhUsed = Number(row.wfh_used || 0);
   const wfhQuota = Number(row.wfh_quota || 0);
   const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);
+  const photoUrl = resolvePhotoUrl(req, row.photo_url || row.photoUrl);
 
   return {
     ...row,
+
+    photo_url: photoUrl,
+    photoUrl,
+
+    user_id: row.user_id,
+    userId: row.user_id,
+
     wfh_quota: wfhQuota,
     wfhQuota,
     manual_wfh_quota: wfhQuota,
@@ -126,6 +166,7 @@ router.get(
         s.nim,
         u.name,
         u.initials,
+        u.photo_url,
         u.prodi,
         s.angkatan,
         u.email,
@@ -156,6 +197,7 @@ router.get(
         s.id,
         u.name,
         u.initials,
+        u.photo_url,
         u.prodi,
         s.angkatan,
         u.email,
@@ -178,7 +220,7 @@ router.get(
       params
     );
 
-    res.json(result.rows.map((row) => mapStudentRow(row)));
+    res.json(result.rows.map((row) => mapStudentRow(row, req)));
   })
 );
 
@@ -197,6 +239,7 @@ router.get(
         s.nim,
         u.name,
         u.initials,
+        u.photo_url,
         u.prodi,
         s.angkatan,
         u.email,
@@ -227,6 +270,7 @@ router.get(
         s.id,
         u.name,
         u.initials,
+        u.photo_url,
         u.prodi,
         s.angkatan,
         u.email,
@@ -250,7 +294,7 @@ router.get(
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
-    res.json(mapStudentRow(result.rows[0]));
+    res.json(mapStudentRow(result.rows[0], req));
   })
 );
 
