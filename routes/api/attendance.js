@@ -30,6 +30,27 @@ router.param("id", (req, res, next, value) => {
     next(error);
   }
 });
+const ATTENDANCE_TIMEZONE = "Asia/Jakarta";
+const ATTENDANCE_ABSENT_LOCK_AFTER = "10:00";
+
+function getJakartaTimeHm(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: ATTENDANCE_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23"
+  });
+  const parts = formatter.formatToParts(date).reduce((acc, item) => {
+    acc[item.type] = item.value;
+    return acc;
+  }, {});
+  return `${parts.hour}:${parts.minute}`;
+}
+
+function canCreateAttendanceAbsentLock(date = new Date()) {
+  return getJakartaTimeHm(date) >= ATTENDANCE_ABSENT_LOCK_AFTER;
+}
 let ensureAttendanceColumnsPromise = null;
 
 function toRadians(value) {
@@ -868,6 +889,9 @@ router.get(
       return res.status(403).json({ message: "Akses monitor absensi hanya untuk operator." });
     }
 
+    const todayIso = getJakartaDateIso();
+    const currentTime = getJakartaTimeHm();
+    const lockWindowOpen = canCreateAttendanceAbsentLock();
     const studentsResult = await query(
       `
       SELECT s.id
@@ -901,6 +925,8 @@ router.get(
     const presentIds = [];
     const leaveIds = [];
     const absentIds = [];
+    const noInformationIds = [];
+    const reportedAbsentIds = [];
 
     allStudentIds.forEach((studentId) => {
       const status = attendanceMap.get(studentId);
@@ -912,21 +938,34 @@ router.get(
         leaveIds.push(studentId);
         return;
       }
-      absentIds.push(studentId);
+      if (status) {
+        reportedAbsentIds.push(studentId);
+        return;
+      }
+      noInformationIds.push(studentId);
+      if (lockWindowOpen) {
+        absentIds.push(studentId);
+      }
     });
 
-    if (absentIds.length > 0) {
+    if (lockWindowOpen && absentIds.length > 0) {
       await createAttendanceAbsentLocks({
         studentIds: absentIds,
-        date: getJakartaDateIso()
+        date: todayIso
       });
     }
 
     res.json({
-      date: getJakartaDateIso(),
+      date: todayIso,
+      timezone: ATTENDANCE_TIMEZONE,
+      currentTime,
+      lockVisibleAfter: ATTENDANCE_ABSENT_LOCK_AFTER,
+      lockWindowOpen,
       presentIds,
       leaveIds,
-      absentIds
+      absentIds,
+      reportedAbsentIds,
+      noInformationIds
     });
   })
 );

@@ -42,14 +42,21 @@ function mapAccessLockRow(row) {
   if (!row) {
     return {
       id: null,
+      student_id: null,
       locked: false,
       active: false,
       status: "UNLOCKED",
       studentId: null,
+      student_name: null,
       studentName: null,
+      student_nim: null,
+      nim: null,
+      reference_date: null,
       date: null,
+      lock_reason: null,
       reason: null,
       message: null,
+      locked_at: null,
       lockedAt: null
     };
   }
@@ -57,17 +64,26 @@ function mapAccessLockRow(row) {
   const locked = row.locked === true && row.active === true && row.status === "LOCKED";
   return {
     id: row.id,
+    student_id: row.student_id,
     studentId: row.student_id,
+    student_name: row.student_name || null,
     studentName: row.student_name || null,
     studentInitials: row.student_initials || null,
+    student_initials: row.student_initials || null,
+    student_nim: row.nim || null,
     nim: row.nim || null,
+    reference_date: row.lock_date_text || row.lock_date,
     date: row.lock_date_text || row.lock_date,
+    lock_reason: row.reason,
     reason: row.reason,
     status: row.status,
     locked,
     active: row.active === true,
+    locked_at: row.locked_at,
     lockedAt: row.locked_at,
+    unlocked_at: row.unlocked_at || null,
     unlockedAt: row.unlocked_at || null,
+    unlocked_by: row.unlocked_by || null,
     unlockedBy: row.unlocked_by || null,
     message: locked ? "Akses dikunci karena terdeteksi tidak hadir. Hubungi operator." : null
   };

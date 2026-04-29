@@ -8,6 +8,7 @@ const {
   unlockAccessLock
 } = require("../../utils/studentAccessLocks");
 const { resolveStudentRecord } = require("../../utils/studentResolver");
+const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
 
@@ -28,11 +29,18 @@ router.get(
         locked: false,
         active: false,
         status: "UNLOCKED",
+        student_id: student?.id || null,
         studentId: student?.id || null,
+        student_name: student?.name || null,
         studentName: student?.name || null,
+        student_nim: student?.nim || null,
+        nim: student?.nim || null,
+        reference_date: null,
         date: null,
+        lock_reason: null,
         reason: null,
         message: null,
+        locked_at: null,
         lockedAt: null
       });
     }
@@ -61,8 +69,33 @@ router.patch(
       return res.status(403).json({ message: "Unlock access lock hanya untuk operator." });
     }
 
+    const id = requireSafeId(req.params.id, "id");
     const unlockedBy = req.body?.unlockedBy || req.authUser?.id || req.headers["x-user-id"] || null;
-    const lock = await unlockAccessLock({ id: req.params.id, unlockedBy });
+    const lock = await unlockAccessLock({ id, unlockedBy });
+    if (!lock) {
+      return res.status(404).json({ message: "Access lock tidak ditemukan." });
+    }
+
+    res.json(lock);
+  })
+);
+
+router.post(
+  "/unlock",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Unlock access lock hanya untuk operator." });
+    }
+
+    const studentId = requireSafeId(req.body?.studentId || req.body?.student_id, "studentId");
+    const unlockedBy = req.body?.unlockedBy || req.authUser?.id || req.headers["x-user-id"] || null;
+    const activeLock = await getActiveLockForStudent(studentId);
+    if (!activeLock) {
+      return res.status(404).json({ message: "Access lock aktif tidak ditemukan." });
+    }
+
+    const lock = await unlockAccessLock({ id: activeLock.id, unlockedBy });
     if (!lock) {
       return res.status(404).json({ message: "Access lock tidak ditemukan." });
     }
