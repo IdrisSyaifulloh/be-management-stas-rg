@@ -16,6 +16,7 @@ const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks"
 const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
+
 const DASHBOARD_TIMEZONE = "Asia/Jakarta";
 const ATTENDANCE_ABSENT_VISIBLE_AFTER = "10:00";
 
@@ -50,11 +51,21 @@ router.get(
   "/summary",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
-      return res.status(403).json({ message: "Akses ditolak. Ringkasan dashboard hanya untuk operator." });
+      return res.status(403).json({
+        message: "Akses ditolak. Ringkasan dashboard hanya untuk operator."
+      });
     }
 
-    const [students, lecturers, research, leavePending, lettersPending, latestLogbooks] = await Promise.all([
+    const [
+      students,
+      lecturers,
+      research,
+      leavePending,
+      lettersPending,
+      latestLogbooks
+    ] = await Promise.all([
       query("SELECT COUNT(*)::int AS total FROM students"),
       query("SELECT COUNT(*)::int AS total FROM lecturers"),
       query("SELECT COUNT(*)::int AS total FROM research_projects WHERE status = 'Aktif'"),
@@ -88,8 +99,11 @@ router.get(
   "/operator-warnings",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
-      return res.status(403).json({ message: "Akses ditolak. Warning dashboard operator hanya untuk operator." });
+      return res.status(403).json({
+        message: "Akses ditolak. Warning dashboard operator hanya untuk operator."
+      });
     }
 
     await ensureDashboardReminderTable();
@@ -97,12 +111,14 @@ router.get(
 
     const nowParts = getJakartaNowParts();
     const attendanceSectionActive = isAfterAttendanceCutoff(nowParts.time);
+
     const calendarResult = await query(
       `
       SELECT to_char($1::date, 'IYYY-"W"IW') AS week_key
       `,
       [nowParts.date]
     );
+
     const today = nowParts.date;
     const weekKey = calendarResult.rows[0]?.week_key;
 
@@ -278,7 +294,10 @@ router.get(
         logbookMissing: warnings.logbookMissing.length,
         attendanceAbsent: warnings.attendanceAbsent.length,
         lowHours: warnings.lowHours.length,
-        total: warnings.logbookMissing.length + warnings.attendanceAbsent.length + warnings.lowHours.length
+        total:
+          warnings.logbookMissing.length +
+          warnings.attendanceAbsent.length +
+          warnings.lowHours.length
       }
     });
   })
@@ -288,8 +307,11 @@ router.post(
   "/operator-warnings/review",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
-      return res.status(403).json({ message: "Akses ditolak. Review warning dashboard hanya untuk operator." });
+      return res.status(403).json({
+        message: "Akses ditolak. Review warning dashboard hanya untuk operator."
+      });
     }
 
     await ensureDashboardWarningReviewTable();
@@ -304,13 +326,22 @@ router.post(
     } = req.body || {};
 
     const normalizedType = normalizeDashboardReminderType(type);
+
     if (!normalizedType) {
-      return res.status(400).json({ message: "type warning tidak valid." });
+      return res.status(400).json({
+        message: "type warning tidak valid."
+      });
     }
 
-    const resolvedStudentId = await resolveDashboardReminderStudentId({ studentId, recipientUserId });
+    const resolvedStudentId = await resolveDashboardReminderStudentId({
+      studentId,
+      recipientUserId
+    });
+
     if (!resolvedStudentId) {
-      return res.status(404).json({ message: "Mahasiswa warning tidak ditemukan." });
+      return res.status(404).json({
+        message: "Mahasiswa warning tidak ditemukan."
+      });
     }
 
     const identity = buildReminderIdentity({
@@ -339,7 +370,9 @@ router.post(
       });
     }
 
-    const reviewerUserId = req.authUser?.id || String(req.headers["x-user-id"] || "").trim() || null;
+    const reviewerUserId =
+      req.authUser?.id || String(req.headers["x-user-id"] || "").trim() || null;
+
     const reviewResult = await recordDashboardWarningReview({
       studentId: resolvedStudentId,
       type: normalizedType,
@@ -367,13 +400,19 @@ router.get(
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
     const userId = role === "mahasiswa" ? req.authUser?.id : req.query.userId;
+
     if (!["mahasiswa", "operator"].includes(role)) {
-      return res.status(403).json({ message: "Akses ditolak untuk role ini." });
+      return res.status(403).json({
+        message: "Akses ditolak untuk role ini."
+      });
     }
 
     if (!userId) {
-      return res.status(400).json({ message: "userId wajib diisi." });
+      return res.status(400).json({
+        message: "userId wajib diisi."
+      });
     }
+
     requireSafeId(userId, "userId");
 
     await query(`
@@ -381,22 +420,13 @@ router.get(
       ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
     `);
 
-    const studentResult = await query(
-      "SELECT id, nim, COALESCE(wfh_quota, 0)::int AS wfh_quota, TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date FROM students WHERE user_id = $1",
-      [userId]
-    );
-    if (studentResult.rowCount === 0) {
-      return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
-    }
-
-    const studentId = studentResult.rows[0].id;
-
     await query(`
       ALTER TABLE leave_requests
       ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
       ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE,
       ADD COLUMN IF NOT EXISTS counts_against_wfh_quota BOOLEAN NOT NULL DEFAULT FALSE
     `);
+
     await query(`
       ALTER TABLE leave_requests
       DROP CONSTRAINT IF EXISTS leave_requests_jenis_pengajuan_check,
@@ -404,7 +434,41 @@ router.get(
         CHECK (jenis_pengajuan IN ('cuti', 'izin', 'sakit', 'wfh'))
     `);
 
-    const [researchRows, milestonesRows, logbookRows, leaveRows, attendanceRows, todayAttendanceRows, letterRows, certRows, settings] = await Promise.all([
+    const studentResult = await query(
+      `
+      SELECT 
+        id,
+        nim,
+        pembimbing,
+        COALESCE(wfh_quota, 0)::int AS wfh_quota,
+        TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
+      FROM students
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    if (studentResult.rowCount === 0) {
+      return res.status(404).json({
+        message: "Data mahasiswa tidak ditemukan."
+      });
+    }
+
+    const studentRow = studentResult.rows[0];
+    const studentId = studentRow.id;
+
+    const [
+      researchRows,
+      milestonesRows,
+      logbookRows,
+      leaveRows,
+      attendanceRows,
+      todayAttendanceRows,
+      letterRows,
+      certRows,
+      settings
+    ] = await Promise.all([
       query(
         `
         SELECT rp.id, rp.short_title, rp.status, rp.progress, rp.period_text, rm.peran
@@ -425,8 +489,26 @@ router.get(
         `,
         [userId]
       ),
-      query("SELECT id, title, date, description, output, project_id FROM logbook_entries WHERE student_id = $1 ORDER BY date DESC LIMIT 5", [studentId]),
-      query("SELECT id, status, durasi, periode_start, periode_end, jenis_pengajuan, counts_against_leave_quota, counts_against_wfh_quota FROM leave_requests WHERE student_id = $1 ORDER BY tanggal_pengajuan DESC", [studentId]),
+      query(
+        `
+        SELECT id, title, date, description, output, project_id
+        FROM logbook_entries
+        WHERE student_id = $1
+        ORDER BY date DESC
+        LIMIT 5
+        `,
+        [studentId]
+      ),
+      query(
+        `
+        SELECT id, status, durasi, periode_start, periode_end, jenis_pengajuan,
+               counts_against_leave_quota, counts_against_wfh_quota
+        FROM leave_requests
+        WHERE student_id = $1
+        ORDER BY tanggal_pengajuan DESC
+        `,
+        [studentId]
+      ),
       query(
         `
         SELECT status
@@ -435,7 +517,7 @@ router.get(
           AND date_trunc('month', attendance_date) = date_trunc('month', CURRENT_DATE)
           AND attendance_date >= $2::date
         `,
-        [studentId, studentResult.rows[0].active_start_date]
+        [studentId, studentRow.active_start_date]
       ),
       query(
         `
@@ -469,25 +551,42 @@ router.get(
     ]);
 
     const projects = researchRows.rows;
+
     const milestonesByProject = milestonesRows.rows.reduce((acc, item) => {
       if (!acc[item.project_id]) acc[item.project_id] = [];
-      acc[item.project_id].push({ label: item.label, done: Boolean(item.done) });
+      acc[item.project_id].push({
+        label: item.label,
+        done: Boolean(item.done)
+      });
       return acc;
     }, {});
+
     const attendanceHadir = attendanceRows.rows.filter((item) => item.status === "Hadir").length;
     const attendanceTotal = attendanceRows.rows.length;
+
     const approvedLeaveCount = leaveRows.rows
-      .filter((item) => item.status === "Disetujui" && item.jenis_pengajuan === "cuti" && item.counts_against_leave_quota !== false)
+      .filter(
+        (item) =>
+          item.status === "Disetujui" &&
+          item.jenis_pengajuan === "cuti" &&
+          item.counts_against_leave_quota !== false
+      )
       .reduce((sum, item) => sum + Number(item.durasi || 0), 0);
+
     const totalCuti = Number(settings?.cuti?.maxSemesterDays || 3);
     const sisaCuti = Math.max(0, totalCuti - approvedLeaveCount);
-    const wfhQuota = Number(studentResult.rows[0].wfh_quota || 0);
-    const wfhUsed = leaveRows.rows.filter((item) =>
-      item.status === "Disetujui" &&
-      item.jenis_pengajuan === "wfh" &&
-      item.counts_against_wfh_quota !== false
+
+    const wfhQuota = Number(studentRow.wfh_quota || 0);
+
+    const wfhUsed = leaveRows.rows.filter(
+      (item) =>
+        item.status === "Disetujui" &&
+        item.jenis_pengajuan === "wfh" &&
+        item.counts_against_wfh_quota !== false
     ).length;
+
     const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);
+
     const dokSiapUnduh = letterRows.rows.filter((item) => item.status === "Siap Unduh").length;
     const todayAttendance = todayAttendanceRows.rows[0] || null;
     const certTerbitCount = certRows.rows.filter((item) => item.status === "Terbit").length;
@@ -495,14 +594,17 @@ router.get(
     res.json({
       header: {
         activeResearchCount: projects.filter((item) => item.status === "Aktif").length,
-        nim: studentResult.rows[0].nim
+        nim: studentRow.nim
       },
       stats: {
         attendanceHadir,
         attendanceTotal,
         logbookEntries: logbookRows.rowCount,
         logbookTarget: 40,
-        tasksDone: projects.reduce((sum, item) => sum + Math.round((Number(item.progress) || 0) / 10), 0),
+        tasksDone: projects.reduce(
+          (sum, item) => sum + Math.round((Number(item.progress) || 0) / 10),
+          0
+        ),
         tasksTotal: Math.max(projects.length * 10, 0),
         sisaCuti,
         totalCuti,
@@ -512,6 +614,9 @@ router.get(
         wfhQuota,
         wfhUsed,
         wfhRemaining,
+        manualWfhQuota: wfhQuota,
+        mentorWfhQuota: null,
+        wfhQuotaSource: "student",
         dokSiapUnduh
       },
       projects: projects.map((item) => ({
@@ -523,7 +628,9 @@ router.get(
         tugasTotal: 10,
         milestones: milestonesByProject[item.id] || [],
         peranSaya: item.peran || "Anggota",
-        peranColor: /ketua/i.test(item.peran || "") ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-600",
+        peranColor: /ketua/i.test(item.peran || "")
+          ? "bg-indigo-100 text-indigo-700"
+          : "bg-slate-100 text-slate-600",
         period: item.period_text || "-",
         progressColor: "bg-indigo-500"
       })),
@@ -538,7 +645,9 @@ router.get(
         id: item.id,
         jenis: item.jenis_pengajuan,
         jenis_pengajuan: item.jenis_pengajuan,
-        period: `${new Date(item.periode_start).toLocaleDateString("id-ID")} - ${new Date(item.periode_end).toLocaleDateString("id-ID")}`,
+        period: `${new Date(item.periode_start).toLocaleDateString("id-ID")} - ${new Date(
+          item.periode_end
+        ).toLocaleDateString("id-ID")}`,
         durasi: `${item.durasi} hari`,
         status: item.status
       })),
@@ -566,16 +675,29 @@ router.get(
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
     const userId = role === "dosen" ? req.authUser?.id : req.query.userId;
+
     if (!["dosen", "operator"].includes(role)) {
-      return res.status(403).json({ message: "Akses ditolak untuk role ini." });
+      return res.status(403).json({
+        message: "Akses ditolak untuk role ini."
+      });
     }
 
     if (!userId) {
-      return res.status(400).json({ message: "userId wajib diisi." });
+      return res.status(400).json({
+        message: "userId wajib diisi."
+      });
     }
+
     requireSafeId(userId, "userId");
 
-    const [researchRows, pendingLogRows, leaveRows, boardRows, deadlineRows, mahasiswaRows] = await Promise.all([
+    const [
+      researchRows,
+      pendingLogRows,
+      leaveRows,
+      boardRows,
+      deadlineRows,
+      mahasiswaRows
+    ] = await Promise.all([
       query(
         `
         SELECT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text

@@ -12,8 +12,14 @@ const crypto = require("crypto");
 const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
-const LEAVE_REQUEST_UPLOAD_DIR = path.join(__dirname, "../../public/uploads/leave-requests");
+
+const LEAVE_REQUEST_UPLOAD_DIR = path.join(
+  __dirname,
+  "../../public/uploads/leave-requests"
+);
+
 const MAX_LEAVE_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+
 const ALLOWED_LEAVE_ATTACHMENT_TYPES = {
   "application/pdf": ".pdf",
   "application/msword": ".doc",
@@ -22,6 +28,7 @@ const ALLOWED_LEAVE_ATTACHMENT_TYPES = {
   "image/jpeg": ".jpg",
   "image/jpg": ".jpg"
 };
+
 let ensureLeaveColumnsPromise = null;
 
 async function ensureLeaveColumns() {
@@ -31,6 +38,7 @@ async function ensureLeaveColumns() {
         ALTER TABLE students
         ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
       `);
+
       await query(`
         ALTER TABLE leave_requests
         ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
@@ -40,6 +48,7 @@ async function ensureLeaveColumns() {
         ADD COLUMN IF NOT EXISTS file_name TEXT,
         ADD COLUMN IF NOT EXISTS file_size BIGINT
       `);
+
       await query(`
         ALTER TABLE leave_requests
         DROP CONSTRAINT IF EXISTS leave_requests_jenis_pengajuan_check,
@@ -48,6 +57,7 @@ async function ensureLeaveColumns() {
       `);
     })();
   }
+
   await ensureLeaveColumnsPromise;
 }
 
@@ -75,12 +85,14 @@ function inclusiveDays(startDate, endDate) {
 }
 
 function sanitizeFilenameBase(name) {
-  return String(name || "lampiran-cuti")
-    .replace(/\.[^/.]+$/, "")
-    .replace(/[^a-zA-Z0-9-_]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .toLowerCase() || "lampiran-cuti";
+  return (
+    String(name || "lampiran-cuti")
+      .replace(/\.[^/.]+$/, "")
+      .replace(/[^a-zA-Z0-9-_]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .toLowerCase() || "lampiran-cuti"
+  );
 }
 
 function pickLeaveAttachment(body) {
@@ -91,11 +103,14 @@ function pickLeaveAttachment(body) {
     { dataUrl: body?.lampiranDataUrl, name: body?.lampiranName }
   ];
 
-  return candidates.find((item) => typeof item.dataUrl === "string" && item.dataUrl.trim()) || null;
+  return candidates.find(
+    (item) => typeof item.dataUrl === "string" && item.dataUrl.trim()
+  ) || null;
 }
 
 async function saveLeaveAttachment(fileDataUrl, originalFileName) {
   const match = String(fileDataUrl || "").match(/^data:([^;]+);base64,(.+)$/);
+
   if (!match) {
     const error = new Error("Format lampiran tidak valid. Gunakan data URL base64.");
     error.statusCode = 400;
@@ -105,6 +120,7 @@ async function saveLeaveAttachment(fileDataUrl, originalFileName) {
   const mimeType = match[1];
   const base64Payload = match[2].replace(/\s/g, "");
   const extension = ALLOWED_LEAVE_ATTACHMENT_TYPES[mimeType];
+
   if (!extension) {
     const error = new Error("Tipe lampiran harus PDF, DOC, DOCX, PNG, atau JPG.");
     error.statusCode = 400;
@@ -118,6 +134,7 @@ async function saveLeaveAttachment(fileDataUrl, originalFileName) {
   }
 
   let buffer;
+
   try {
     buffer = Buffer.from(base64Payload, "base64");
   } catch {
@@ -139,8 +156,10 @@ async function saveLeaveAttachment(fileDataUrl, originalFileName) {
   }
 
   await fs.mkdir(LEAVE_REQUEST_UPLOAD_DIR, { recursive: true });
+
   const baseName = sanitizeFilenameBase(originalFileName);
   const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${baseName}${extension}`;
+
   await fs.writeFile(path.join(LEAVE_REQUEST_UPLOAD_DIR, fileName), buffer);
 
   return {
@@ -152,12 +171,17 @@ async function saveLeaveAttachment(fileDataUrl, originalFileName) {
 
 function resolveLeaveAttachmentPath(fileUrl) {
   const normalizedUrl = String(fileUrl || "").trim();
-  if (!normalizedUrl.startsWith("/uploads/leave-requests/")) return null;
+
+  if (!normalizedUrl.startsWith("/uploads/leave-requests/")) {
+    return null;
+  }
+
   return path.join(LEAVE_REQUEST_UPLOAD_DIR, path.basename(normalizedUrl));
 }
 
 async function removeLeaveAttachment(fileUrl) {
   const targetPath = resolveLeaveAttachmentPath(fileUrl);
+
   if (!targetPath) return;
 
   try {
@@ -202,13 +226,15 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
-    const role = extractRole(req);
-    const requestedStudentId = req.query.studentId;
-    const studentIdInput = requestedStudentId;
-    const { status } = req.query;
-    const resolvedStudentId = studentIdInput ? await resolveStudentId(String(studentIdInput)) : null;
 
-    if (studentIdInput && !resolvedStudentId) {
+    const requestedStudentId = req.query.studentId;
+    const { status } = req.query;
+
+    const resolvedStudentId = requestedStudentId
+      ? await resolveStudentId(String(requestedStudentId))
+      : null;
+
+    if (requestedStudentId && !resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
@@ -219,15 +245,32 @@ router.get(
 
     const result = await query(
       `
-      SELECT lr.id, lr.student_id, su.name AS student_name, su.initials AS student_initials,
-             s.nim, lr.project_id, rp.short_title AS project_name,
-             lr.periode_start, lr.periode_end, lr.durasi,
-             lr.jenis_pengajuan, lr.jenis_pengajuan AS jenis,
-             lr.counts_against_leave_quota, lr.counts_against_wfh_quota,
-             lr.alasan, lr.catatan, lr.tanggal_pengajuan, lr.status,
-             lr.reviewed_by, ru.name AS reviewed_by_name,
-             lr.reviewed_at, lr.review_note,
-             lr.file_url, lr.file_name, lr.file_size
+      SELECT 
+        lr.id,
+        lr.student_id,
+        su.name AS student_name,
+        su.initials AS student_initials,
+        s.nim,
+        lr.project_id,
+        rp.short_title AS project_name,
+        lr.periode_start,
+        lr.periode_end,
+        lr.durasi,
+        lr.jenis_pengajuan,
+        lr.jenis_pengajuan AS jenis,
+        lr.counts_against_leave_quota,
+        lr.counts_against_wfh_quota,
+        lr.alasan,
+        lr.catatan,
+        lr.tanggal_pengajuan,
+        lr.status,
+        lr.reviewed_by,
+        ru.name AS reviewed_by_name,
+        lr.reviewed_at,
+        lr.review_note,
+        lr.file_url,
+        lr.file_name,
+        lr.file_size
       FROM leave_requests lr
       JOIN students s ON s.id = lr.student_id
       JOIN users su ON su.id = s.user_id
@@ -247,19 +290,37 @@ router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
+
     const leaveRequestId = requireSafeId(req.params.id, "id");
 
     const result = await query(
       `
-      SELECT lr.id, lr.student_id, su.name AS student_name, su.initials AS student_initials,
-             s.nim, lr.project_id, rp.short_title AS project_name,
-             lr.periode_start, lr.periode_end, lr.durasi,
-             lr.jenis_pengajuan, lr.jenis_pengajuan AS jenis,
-             lr.counts_against_leave_quota, lr.counts_against_wfh_quota,
-             lr.alasan, lr.catatan, lr.tanggal_pengajuan, lr.status,
-             lr.reviewed_by, ru.name AS reviewed_by_name,
-             lr.reviewed_at, lr.review_note,
-             lr.file_url, lr.file_name, lr.file_size
+      SELECT 
+        lr.id,
+        lr.student_id,
+        su.name AS student_name,
+        su.initials AS student_initials,
+        s.nim,
+        lr.project_id,
+        rp.short_title AS project_name,
+        lr.periode_start,
+        lr.periode_end,
+        lr.durasi,
+        lr.jenis_pengajuan,
+        lr.jenis_pengajuan AS jenis,
+        lr.counts_against_leave_quota,
+        lr.counts_against_wfh_quota,
+        lr.alasan,
+        lr.catatan,
+        lr.tanggal_pengajuan,
+        lr.status,
+        lr.reviewed_by,
+        ru.name AS reviewed_by_name,
+        lr.reviewed_at,
+        lr.review_note,
+        lr.file_url,
+        lr.file_name,
+        lr.file_size
       FROM leave_requests lr
       JOIN students s ON s.id = lr.student_id
       JOIN users su ON su.id = s.user_id
@@ -283,10 +344,13 @@ router.post(
   "/",
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
+
     const role = extractRole(req);
 
     if (role !== "mahasiswa") {
-      return res.status(403).json({ message: "Hanya mahasiswa yang dapat membuat pengajuan." });
+      return res.status(403).json({
+        message: "Hanya mahasiswa yang dapat membuat pengajuan."
+      });
     }
 
     const {
@@ -298,48 +362,58 @@ router.post(
       jenis,
       jenisPengajuan: jenisPengajuanInput,
       countsAgainstLeaveQuota,
-      countsAgainstWfhQuota,
       alasan,
       catatan,
-      tanggalPengajuan,
-      fileUrl,
-      fileName
+      tanggalPengajuan
     } = req.body;
 
     if (!id || !studentId || !periodeStart || !periodeEnd || !alasan || !tanggalPengajuan) {
-      return res.status(400).json({ message: "id, studentId, periodeStart, periodeEnd, alasan, tanggalPengajuan wajib diisi." });
+      return res.status(400).json({
+        message: "id, studentId, periodeStart, periodeEnd, alasan, tanggalPengajuan wajib diisi."
+      });
     }
 
     const resolvedStudentId = await resolveStudentId(String(studentId));
+
     if (!resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
     const startDate = parseDateOnly(periodeStart);
     const endDate = parseDateOnly(periodeEnd);
+
     if (!startDate || !endDate) {
       return res.status(400).json({ message: "Format tanggal pengajuan tidak valid." });
     }
+
     if (endDate < startDate) {
-      return res.status(400).json({ message: "Tanggal selesai tidak boleh sebelum tanggal mulai." });
+      return res.status(400).json({
+        message: "Tanggal selesai tidak boleh sebelum tanggal mulai."
+      });
     }
 
     const requestedDays = inclusiveDays(startDate, endDate);
     const jenisPengajuan = normalizeLeaveType(jenisPengajuanInput || jenis);
+
     if (!jenisPengajuan) {
-      return res.status(400).json({ message: "jenisPengajuan harus cuti, izin, sakit, atau wfh." });
+      return res.status(400).json({
+        message: "jenisPengajuan harus cuti, izin, sakit, atau wfh."
+      });
     }
 
-    const studentTypeResult = await query(
+    const studentResult = await query(
       `
-      SELECT tipe, wfh_quota
+      SELECT tipe, wfh_quota, pembimbing
       FROM students
       WHERE id = $1
       LIMIT 1
       `,
       [resolvedStudentId]
     );
-    const studentType = studentTypeResult.rows[0]?.tipe;
+
+    const studentRow = studentResult.rows[0] || {};
+    const studentType = studentRow.tipe;
+    const wfhQuota = Number(studentRow.wfh_quota || 0);
 
     if (studentType === "Riset" && jenisPengajuan === "cuti") {
       return res.status(400).json({
@@ -348,34 +422,45 @@ router.post(
     }
 
     if (jenisPengajuan === "wfh" && requestedDays !== 1) {
-      return res.status(400).json({ message: "Pengajuan WFH hanya berlaku 1 hari." });
+      return res.status(400).json({
+        message: "Pengajuan WFH hanya berlaku 1 hari."
+      });
     }
 
-    const wfhQuota = Number(studentTypeResult.rows[0]?.wfh_quota || 0);
     if (jenisPengajuan === "wfh") {
       if (wfhQuota <= 0) {
-        return res.status(400).json({ message: "Anda tidak punya jatah WFH." });
+        return res.status(400).json({
+          message: "Anda tidak punya jatah WFH."
+        });
       }
 
       const wfhUsed = await countApprovedWfhRequests(resolvedStudentId);
+
       if (wfhUsed >= wfhQuota) {
-        return res.status(400).json({ message: "Jatah WFH tidak mencukupi." });
+        return res.status(400).json({
+          message: "Jatah WFH tidak mencukupi."
+        });
       }
     }
 
     const countsAgainstQuota = jenisPengajuan === "cuti" && countsAgainstLeaveQuota !== false;
     const countsAgainstWfh = jenisPengajuan === "wfh";
+
     const settings = await getSettingsAsync();
     const maxSemesterDays = Number(settings?.cuti?.maxSemesterDays || 0);
     const maxMonthDays = Number(settings?.cuti?.maxMonthDays || 0);
     const minAttendancePct = Number(settings?.cuti?.minAttendancePct || 0);
 
     if (countsAgainstQuota && maxSemesterDays > 0 && requestedDays > maxSemesterDays) {
-      return res.status(400).json({ message: `Durasi cuti melebihi batas semester (${maxSemesterDays} hari).` });
+      return res.status(400).json({
+        message: `Durasi cuti melebihi batas semester (${maxSemesterDays} hari).`
+      });
     }
 
     if (countsAgainstQuota && maxMonthDays > 0 && requestedDays > maxMonthDays) {
-      return res.status(400).json({ message: `Durasi cuti melebihi batas bulanan (${maxMonthDays} hari).` });
+      return res.status(400).json({
+        message: `Durasi cuti melebihi batas bulanan (${maxMonthDays} hari).`
+      });
     }
 
     const monthStart = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1));
@@ -393,13 +478,21 @@ router.post(
           AND periode_start <= $3
           AND periode_end >= $2
         `,
-        [resolvedStudentId, monthStart.toISOString().slice(0, 10), monthEnd.toISOString().slice(0, 10)]
+        [
+          resolvedStudentId,
+          monthStart.toISOString().slice(0, 10),
+          monthEnd.toISOString().slice(0, 10)
+        ]
       );
 
       const usedMonthDays = Number(monthUsageResult.rows[0]?.used_days || 0);
+
       if (maxMonthDays > 0 && usedMonthDays + requestedDays > maxMonthDays) {
         return res.status(400).json({
-          message: `Kuota cuti bulanan terlampaui. Sisa kuota bulan ini ${Math.max(0, maxMonthDays - usedMonthDays)} hari.`
+          message: `Kuota cuti bulanan terlampaui. Sisa kuota bulan ini ${Math.max(
+            0,
+            maxMonthDays - usedMonthDays
+          )} hari.`
         });
       }
 
@@ -417,9 +510,13 @@ router.post(
       );
 
       const usedSemesterDays = Number(semesterUsageResult.rows[0]?.used_days || 0);
+
       if (maxSemesterDays > 0 && usedSemesterDays + requestedDays > maxSemesterDays) {
         return res.status(400).json({
-          message: `Kuota cuti semester terlampaui. Sisa kuota semester ${Math.max(0, maxSemesterDays - usedSemesterDays)} hari.`
+          message: `Kuota cuti semester terlampaui. Sisa kuota semester ${Math.max(
+            0,
+            maxSemesterDays - usedSemesterDays
+          )} hari.`
         });
       }
     }
@@ -435,26 +532,34 @@ router.post(
         [resolvedStudentId]
       );
 
-      const studentRow = attendanceResult.rows[0] || {};
-      const totalHari = Number(studentRow.total_hari || 0);
-      const kehadiran = Number(studentRow.kehadiran || 0);
+      const attendanceRow = attendanceResult.rows[0] || {};
+      const totalHari = Number(attendanceRow.total_hari || 0);
+      const kehadiran = Number(attendanceRow.kehadiran || 0);
       const attendancePct = totalHari > 0 ? (kehadiran / totalHari) * 100 : 100;
 
       if (attendancePct < minAttendancePct) {
         return res.status(400).json({
-          message: `Pengajuan ditolak. Kehadiran ${attendancePct.toFixed(1)}% masih di bawah batas minimum ${minAttendancePct}%.`
+          message: `Pengajuan ditolak. Kehadiran ${attendancePct.toFixed(
+            1
+          )}% masih di bawah batas minimum ${minAttendancePct}%.`
         });
       }
     }
 
     const attachmentInput = pickLeaveAttachment(req.body);
     let uploadedAttachment = null;
+
     if (attachmentInput) {
       try {
-        uploadedAttachment = await saveLeaveAttachment(attachmentInput.dataUrl.trim(), attachmentInput.name);
+        uploadedAttachment = await saveLeaveAttachment(
+          attachmentInput.dataUrl.trim(),
+          attachmentInput.name
+        );
       } catch (error) {
         const statusCode = error?.statusCode || 400;
-        return res.status(statusCode).json({ message: error?.message || "Gagal upload lampiran pengajuan." });
+        return res.status(statusCode).json({
+          message: error?.message || "Gagal upload lampiran pengajuan."
+        });
       }
     }
 
@@ -462,11 +567,41 @@ router.post(
       await query(
         `
         INSERT INTO leave_requests (
-          id, student_id, project_id, periode_start, periode_end, durasi,
-          jenis_pengajuan, counts_against_leave_quota, counts_against_wfh_quota,
-          alasan, catatan, tanggal_pengajuan, status,
-          file_url, file_name, file_size
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Menunggu',$13,$14,$15)
+          id,
+          student_id,
+          project_id,
+          periode_start,
+          periode_end,
+          durasi,
+          jenis_pengajuan,
+          counts_against_leave_quota,
+          counts_against_wfh_quota,
+          alasan,
+          catatan,
+          tanggal_pengajuan,
+          status,
+          file_url,
+          file_name,
+          file_size
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          $9,
+          $10,
+          $11,
+          $12,
+          'Menunggu',
+          $13,
+          $14,
+          $15
+        )
         `,
         [
           id,
@@ -491,9 +626,10 @@ router.post(
         try {
           await removeLeaveAttachment(uploadedAttachment.fileUrl);
         } catch {
-          // Preserve the original database error for the API response.
+          // Ignore attachment cleanup failure.
         }
       }
+
       throw error;
     }
 
@@ -509,14 +645,18 @@ router.post(
     );
 
     const studentName = studentNameResult.rows[0]?.name || "Mahasiswa";
-    const operatorsResult = await query("SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE");
+    const operatorsResult = await query(
+      "SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE"
+    );
 
     await Promise.all(
       operatorsResult.rows.map((row) =>
         createNotification({
           recipientUserId: row.id,
           title: `Pengajuan ${getLeaveLabel(jenisPengajuan)} Baru`,
-          body: `${studentName} mengajukan ${getLeaveLabel(jenisPengajuan)} ${requestedDays} hari (${periodeStart} s.d. ${periodeEnd}).`,
+          body: `${studentName} mengajukan ${getLeaveLabel(
+            jenisPengajuan
+          )} ${requestedDays} hari (${periodeStart} s.d. ${periodeEnd}).`,
           senderUserId: null,
           type: "cuti",
           eventId: "cuti_request"
@@ -524,7 +664,9 @@ router.post(
       )
     );
 
-    res.status(201).json({ message: "Pengajuan cuti berhasil dibuat." });
+    res.status(201).json({
+      message: "Pengajuan cuti berhasil dibuat."
+    });
   })
 );
 
@@ -532,23 +674,32 @@ router.patch(
   "/:id/status",
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
+
     const role = extractRole(req);
 
     if (role !== "operator") {
-      return res.status(403).json({ message: "Hanya operator yang dapat mengubah status cuti." });
+      return res.status(403).json({
+        message: "Hanya operator yang dapat mengubah status cuti."
+      });
     }
 
     const leaveRequestId = requireSafeId(req.params.id, "id");
     const { status, reviewedBy, reviewNote } = req.body;
 
     if (!status || !["Menunggu", "Disetujui", "Ditolak"].includes(status)) {
-      return res.status(400).json({ message: "status harus Menunggu/Disetujui/Ditolak." });
+      return res.status(400).json({
+        message: "status harus Menunggu/Disetujui/Ditolak."
+      });
     }
 
     const existingRequest = await query(
       `
-      SELECT lr.id, lr.student_id, lr.jenis_pengajuan, lr.counts_against_wfh_quota,
-             COALESCE(s.wfh_quota, 0)::int AS wfh_quota
+      SELECT 
+        lr.id,
+        lr.student_id,
+        lr.jenis_pengajuan,
+        lr.counts_against_wfh_quota,
+        COALESCE(s.wfh_quota, 0)::int AS wfh_quota
       FROM leave_requests lr
       JOIN students s ON s.id = lr.student_id
       WHERE lr.id = $1
@@ -558,26 +709,37 @@ router.patch(
     );
 
     if (existingRequest.rowCount === 0) {
-      return res.status(404).json({ message: "Pengajuan cuti tidak ditemukan." });
+      return res.status(404).json({
+        message: "Pengajuan cuti tidak ditemukan."
+      });
     }
 
     const requestRow = existingRequest.rows[0];
-    if (status === "Disetujui" && requestRow.jenis_pengajuan === "wfh" && requestRow.counts_against_wfh_quota !== false) {
+
+    if (
+      status === "Disetujui" &&
+      requestRow.jenis_pengajuan === "wfh" &&
+      requestRow.counts_against_wfh_quota !== false
+    ) {
       const wfhQuota = Number(requestRow.wfh_quota || 0);
       const usedWfh = await countApprovedWfhRequests(requestRow.student_id, leaveRequestId);
+
       if (wfhQuota <= 0 || usedWfh + 1 > wfhQuota) {
-        return res.status(400).json({ message: "Jatah WFH tidak mencukupi." });
+        return res.status(400).json({
+          message: "Jatah WFH tidak mencukupi."
+        });
       }
     }
 
     const result = await query(
       `
       UPDATE leave_requests
-      SET status = $2,
-          reviewed_by = COALESCE($3, reviewed_by),
-          reviewed_at = NOW(),
-          review_note = COALESCE($4, review_note),
-          updated_at = NOW()
+      SET 
+        status = $2,
+        reviewed_by = COALESCE($3, reviewed_by),
+        reviewed_at = NOW(),
+        review_note = COALESCE($4, review_note),
+        updated_at = NOW()
       WHERE id = $1
       RETURNING id
       `,
@@ -585,12 +747,17 @@ router.patch(
     );
 
     if (result.rowCount === 0) {
-      return res.status(404).json({ message: "Pengajuan cuti tidak ditemukan." });
+      return res.status(404).json({
+        message: "Pengajuan cuti tidak ditemukan."
+      });
     }
 
     const leaveRow = await query(
       `
-      SELECT s.user_id, u.name AS student_name, lr.jenis_pengajuan
+      SELECT 
+        s.user_id,
+        u.name AS student_name,
+        lr.jenis_pengajuan
       FROM leave_requests lr
       JOIN students s ON s.id = lr.student_id
       JOIN users u ON u.id = s.user_id
@@ -601,18 +768,23 @@ router.patch(
     );
 
     const recipientUserId = leaveRow.rows[0]?.user_id;
+
     if (recipientUserId) {
       await createNotification({
         recipientUserId,
         title: `Status ${getLeaveLabel(leaveRow.rows[0]?.jenis_pengajuan)} Diperbarui`,
-        body: `Pengajuan ${getLeaveLabel(leaveRow.rows[0]?.jenis_pengajuan)} Anda untuk ID ${leaveRequestId} telah ${status.toLowerCase()}.`,
+        body: `Pengajuan ${getLeaveLabel(
+          leaveRow.rows[0]?.jenis_pengajuan
+        )} Anda untuk ID ${leaveRequestId} telah ${status.toLowerCase()}.`,
         senderUserId: reviewedBy || null,
         type: "cuti",
         eventId: "cuti_request"
       });
     }
 
-    res.json({ message: "Status cuti berhasil diperbarui." });
+    res.json({
+      message: "Status cuti berhasil diperbarui."
+    });
   })
 );
 
@@ -620,26 +792,37 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
+
     const role = extractRole(req);
 
     if (role !== "operator") {
-      return res.status(403).json({ message: "Hanya operator yang dapat menghapus pengajuan cuti." });
+      return res.status(403).json({
+        message: "Hanya operator yang dapat menghapus pengajuan cuti."
+      });
     }
 
     const leaveRequestId = requireSafeId(req.params.id, "id");
-    const result = await query("DELETE FROM leave_requests WHERE id = $1 RETURNING id, file_url", [leaveRequestId]);
+
+    const result = await query(
+      "DELETE FROM leave_requests WHERE id = $1 RETURNING id, file_url",
+      [leaveRequestId]
+    );
 
     if (result.rowCount === 0) {
-      return res.status(404).json({ message: "Pengajuan cuti tidak ditemukan." });
+      return res.status(404).json({
+        message: "Pengajuan cuti tidak ditemukan."
+      });
     }
 
     try {
       await removeLeaveAttachment(result.rows[0].file_url);
     } catch {
-      // The row is already deleted; ignore attachment cleanup failure.
+      // Row sudah terhapus; abaikan kegagalan cleanup file.
     }
 
-    res.json({ message: "Pengajuan cuti berhasil dihapus." });
+    res.json({
+      message: "Pengajuan cuti berhasil dihapus."
+    });
   })
 );
 

@@ -19,13 +19,14 @@ const draftReportsRouter = require("./draftReports");
 const draftReportTypesRouter = require("./draftReportTypes");
 const profileRouter = require("./profile");
 const systemSettingsRouter = require("./systemSettings");
+const wfhSettingsRouter = require("./wfhSettings");
 const exportsRouter = require("./exports");
 const notificationsRouter = require("./notifications");
 const cleanupRouter = require("./cleanup");
 const monitoringRouter = require("./monitoring");
 const withdrawalRequestsRouter = require("./withdrawalRequests");
 const studentAccessLocksRouter = require("./studentAccessLocks");
-const { requireRoleSoft, requireRoleStrict } = require("../../utils/roleGuard");
+const { requireRoleStrict } = require("../../utils/roleGuard");
 
 const router = express.Router();
 
@@ -51,6 +52,7 @@ router.use("/draft-report-types", draftReportTypesRouter);
 router.use("/profile", profileRouter);
 router.use("/notifications", notificationsRouter);
 router.use("/system-settings", systemSettingsRouter);
+router.use("/wfh-settings", requireRoleStrict(["operator"]), wfhSettingsRouter);
 router.use("/student-access-locks", studentAccessLocksRouter);
 router.use("/exports", requireRoleStrict(["operator"]), exportsRouter);
 router.use("/cleanup", requireRoleStrict(["operator"]), cleanupRouter);
