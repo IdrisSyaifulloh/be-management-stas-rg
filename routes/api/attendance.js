@@ -22,6 +22,7 @@ const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks"
 const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
+
 router.param("id", (req, res, next, value) => {
   try {
     req.params.id = requireSafeId(value, "id");
@@ -30,6 +31,7 @@ router.param("id", (req, res, next, value) => {
     next(error);
   }
 });
+
 const ATTENDANCE_TIMEZONE = "Asia/Jakarta";
 const ATTENDANCE_ABSENT_LOCK_AFTER = "10:00";
 
@@ -41,16 +43,19 @@ function getJakartaTimeHm(date = new Date()) {
     hour12: false,
     hourCycle: "h23"
   });
+
   const parts = formatter.formatToParts(date).reduce((acc, item) => {
     acc[item.type] = item.value;
     return acc;
   }, {});
+
   return `${parts.hour}:${parts.minute}`;
 }
 
 function canCreateAttendanceAbsentLock(date = new Date()) {
   return getJakartaTimeHm(date) >= ATTENDANCE_ABSENT_LOCK_AFTER;
 }
+
 let ensureAttendanceColumnsPromise = null;
 
 function toRadians(value) {
@@ -61,10 +66,16 @@ function haversineDistanceMeters(lat1, lng1, lat2, lng2) {
   const earthRadius = 6371000;
   const dLat = toRadians(lat2 - lat1);
   const dLng = toRadians(lng2 - lng1);
+
   const partA =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+
   const partC = 2 * Math.atan2(Math.sqrt(partA), Math.sqrt(1 - partA));
+
   return earthRadius * partC;
 }
 
@@ -97,6 +108,7 @@ async function ensureAttendanceColumns() {
       ADD COLUMN IF NOT EXISTS note TEXT
     `);
   }
+
   await ensureAttendanceColumnsPromise;
 }
 
@@ -115,6 +127,9 @@ function hasOwn(object, key) {
 function getStatusColor(status) {
   if (status === "Hadir") return "green";
   if (status === "Cuti") return "amber";
+  if (status === "Izin") return "blue";
+  if (status === "Sakit") return "rose";
+  if (status === "WFH") return "sky";
   if (status === "Libur") return "gray";
   return "red";
 }
@@ -126,7 +141,7 @@ function resolveManualStatus({ status, checkIn, checkOut }) {
 }
 
 function validateAttendanceStatus(status) {
-  return ["Hadir", "Cuti", "Tidak Hadir"].includes(status);
+  return ["Hadir", "Cuti", "Izin", "Sakit", "WFH", "Tidak Hadir"].includes(status);
 }
 
 function compareTimes(checkIn, checkOut) {
@@ -136,6 +151,20 @@ function compareTimes(checkIn, checkOut) {
 
 function formatDbTime(value) {
   return value ? String(value).slice(0, 5) : null;
+}
+
+function normalizeLeaveType(type) {
+  switch (String(type || "").toLowerCase()) {
+    case "izin":
+      return "izin";
+    case "sakit":
+      return "sakit";
+    case "wfh":
+      return "wfh";
+    case "cuti":
+    default:
+      return "cuti";
+  }
 }
 
 function mapAttendanceRecord(row) {
@@ -165,6 +194,7 @@ function mapAttendanceRecord(row) {
 
 async function fetchAttendanceRecordById(id) {
   await ensureAttendanceColumns();
+
   const result = await query(
     `
     SELECT id, student_id, TO_CHAR(attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
@@ -181,9 +211,18 @@ async function fetchAttendanceRecordById(id) {
   return result.rows[0] || null;
 }
 
-async function recordAttendanceAudit({ req, action, actionType, attendanceRecordId, studentId, before = null, after = null }) {
+async function recordAttendanceAudit({
+  req,
+  action,
+  actionType,
+  attendanceRecordId,
+  studentId,
+  before = null,
+  after = null
+}) {
   const auditId = `AUD-ATT-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
   const actedByUserId = req.authUser?.id || String(req.headers["x-user-id"] || "").trim() || null;
+
   await query(
     `
     INSERT INTO audit_logs (id, user_id, user_role, action, target, ip, detail)
@@ -220,6 +259,7 @@ async function ensureStudentExists(studentId) {
 function parseGpsNumber(value) {
   if (value == null || value === "") return null;
   if (typeof value === "string" && !value.trim()) return null;
+
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -234,6 +274,7 @@ function isValidLongitude(value) {
 
 function buildGpsPolicy(settings) {
   const gps = settings.gps || {};
+
   return {
     targetLatitude: Number(gps.latitude),
     targetLongitude: Number(gps.longitude),
@@ -262,7 +303,12 @@ function buildGpsValidationError({
   };
 }
 
-async function notifyOperatorsAboutEarlyCheckout({ attendanceRecordId, student, durationHours, requiredHours }) {
+async function notifyOperatorsAboutEarlyCheckout({
+  attendanceRecordId,
+  student,
+  durationHours,
+  requiredHours
+}) {
   const operators = await query(
     `
     SELECT id
@@ -276,6 +322,7 @@ async function notifyOperatorsAboutEarlyCheckout({ attendanceRecordId, student, 
   const referenceKey = `${attendanceRecordId}:${student.id}`;
   const title = `Checkout Magang Kurang dari ${requiredHours} Jam`;
   const body = `${student.name || "Mahasiswa"} (${student.nim || "-"}) checkout setelah ${durationHours} jam, di bawah batas ${requiredHours} jam.`;
+
   let notifiedCount = 0;
 
   for (const operator of operators.rows) {
@@ -297,6 +344,7 @@ async function notifyOperatorsAboutEarlyCheckout({ attendanceRecordId, student, 
 
     if (notification.sent && notification.id) {
       notifiedCount += 1;
+
       await recordNotificationDispatch({
         eventId,
         recipientUserId: operator.id,
@@ -319,12 +367,13 @@ router.post(
   "/check-in",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (!["mahasiswa", "operator"].includes(role)) {
       return res.status(403).json({ message: "Role tidak diizinkan melakukan check-in." });
     }
 
     const { studentId, latitude, longitude, accuracy } = req.body || {};
-    const studentIdInput = role === "mahasiswa" ? (req.authUser?.id || studentId) : studentId;
+    const studentIdInput = role === "mahasiswa" ? req.authUser?.id || studentId : studentId;
     const userLatitude = parseGpsNumber(latitude);
     const userLongitude = parseGpsNumber(longitude);
     const accuracyMetersValue = accuracy == null ? null : parseGpsNumber(accuracy);
@@ -335,60 +384,71 @@ router.post(
       !isValidLongitude(userLongitude) ||
       (accuracy != null && (!Number.isFinite(accuracyMetersValue) || accuracyMetersValue < 0))
     ) {
-      return res.status(400).json(buildGpsValidationError({
-        message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
-        reason: "INVALID_GPS_PAYLOAD",
-        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
-      }));
+      return res.status(400).json(
+        buildGpsValidationError({
+          message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
+          reason: "INVALID_GPS_PAYLOAD",
+          accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
+        })
+      );
     }
 
     const resolvedStudentId = await resolveStudentId(studentIdInput);
+
     if (!resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
     const settings = await getSettingsAsync();
     const gpsPolicy = buildGpsPolicy(settings);
+
     const refLat = gpsPolicy.targetLatitude;
     const refLng = gpsPolicy.targetLongitude;
     const refRadius = gpsPolicy.radiusMeters;
     const maxAccuracyMeters = gpsPolicy.maxAccuracyMeters;
 
     if (!isValidLatitude(refLat) || !isValidLongitude(refLng) || !Number.isFinite(refRadius) || refRadius <= 0) {
-      return res.status(500).json(buildGpsValidationError({
-        message: "Koordinat titik absensi belum dikonfigurasi. Hubungi operator.",
-        reason: "GPS_NOT_CONFIGURED",
-        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
-        maxAccuracyMeters: Number.isFinite(maxAccuracyMeters) ? maxAccuracyMeters : null,
-        allowedRadiusMeters: Number.isFinite(refRadius) ? refRadius : null
-      }));
+      return res.status(500).json(
+        buildGpsValidationError({
+          message: "Koordinat titik absensi belum dikonfigurasi. Hubungi operator.",
+          reason: "GPS_NOT_CONFIGURED",
+          accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
+          maxAccuracyMeters: Number.isFinite(maxAccuracyMeters) ? maxAccuracyMeters : null,
+          allowedRadiusMeters: Number.isFinite(refRadius) ? refRadius : null
+        })
+      );
     }
 
     const distanceMeters = haversineDistanceMeters(userLatitude, userLongitude, refLat, refLng);
 
     if (accuracyMetersValue != null && Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
-      return res.status(400).json(buildGpsValidationError({
-        message: "Akurasi GPS terlalu rendah. Coba pindah ke area terbuka atau aktifkan mode akurasi tinggi.",
-        reason: "GPS_ACCURACY_TOO_LOW",
-        accuracyMeters: Math.round(accuracyMetersValue),
-        maxAccuracyMeters,
-        distanceMeters: Math.round(distanceMeters),
-        allowedRadiusMeters: refRadius
-      }));
+      return res.status(400).json(
+        buildGpsValidationError({
+          message: "Akurasi GPS terlalu rendah. Coba pindah ke area terbuka atau aktifkan mode akurasi tinggi.",
+          reason: "GPS_ACCURACY_TOO_LOW",
+          accuracyMeters: Math.round(accuracyMetersValue),
+          maxAccuracyMeters,
+          distanceMeters: Math.round(distanceMeters),
+          allowedRadiusMeters: refRadius
+        })
+      );
     }
 
     if (distanceMeters > refRadius) {
-      return res.status(400).json(buildGpsValidationError({
-        message: "Lokasi di luar radius absensi.",
-        reason: "OUTSIDE_RADIUS",
-        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
-        maxAccuracyMeters,
-        distanceMeters: Math.round(distanceMeters),
-        allowedRadiusMeters: refRadius
-      }));
+      return res.status(400).json(
+        buildGpsValidationError({
+          message: "Lokasi di luar radius absensi.",
+          reason: "OUTSIDE_RADIUS",
+          accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
+          maxAccuracyMeters,
+          distanceMeters: Math.round(distanceMeters),
+          allowedRadiusMeters: refRadius
+        })
+      );
     }
 
     await ensureAttendanceColumns();
+
     const todayRecord = await query(
       `
       SELECT id, check_in_at, check_out_at
@@ -415,11 +475,11 @@ router.post(
         UPDATE attendance_records
         SET status = 'Hadir',
             check_in_at = NOW(),
-          check_out_at = NULL,
+            check_out_at = NULL,
             check_in_lat = $2,
             check_in_lng = $3,
-          check_out_lat = NULL,
-          check_out_lng = NULL,
+            check_out_lat = NULL,
+            check_out_lng = NULL,
             check_out_accuracy_meters = NULL,
             checkout_source = NULL,
             auto_checkout = FALSE,
@@ -459,12 +519,13 @@ router.post(
   "/check-out",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (!["mahasiswa", "operator"].includes(role)) {
       return res.status(403).json({ message: "Role tidak diizinkan melakukan check-out." });
     }
 
     const { studentId, latitude, longitude, accuracy, forceEarlyCheckout, earlyCheckoutAcknowledged } = req.body || {};
-    const studentIdInput = role === "mahasiswa" ? (req.authUser?.id || studentId) : studentId;
+    const studentIdInput = role === "mahasiswa" ? req.authUser?.id || studentId : studentId;
     const userLatitude = parseGpsNumber(latitude);
     const userLongitude = parseGpsNumber(longitude);
     const accuracyMetersValue = accuracy == null ? null : parseGpsNumber(accuracy);
@@ -475,14 +536,17 @@ router.post(
       !isValidLongitude(userLongitude) ||
       (accuracy != null && (!Number.isFinite(accuracyMetersValue) || accuracyMetersValue < 0))
     ) {
-      return res.status(400).json(buildGpsValidationError({
-        message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
-        reason: "INVALID_GPS_PAYLOAD",
-        accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
-      }));
+      return res.status(400).json(
+        buildGpsValidationError({
+          message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
+          reason: "INVALID_GPS_PAYLOAD",
+          accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
+        })
+      );
     }
 
     const resolvedStudentId = await resolveStudentId(studentIdInput);
+
     if (!resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
@@ -550,6 +614,7 @@ router.post(
     const durationHoursValue = calculateDurationHours(todayRecord.rows[0].check_in_at);
     const durationHours = roundHours(durationHoursValue);
     const requiredHours = attendanceRules.magangMinCheckoutHours;
+
     const isEarlyMagangCheckout =
       student.tipe === "Magang" &&
       attendanceRules.earlyCheckoutWarning === true &&
@@ -565,6 +630,7 @@ router.post(
     }
 
     await ensureAttendanceColumns();
+
     await query(
       `
       UPDATE attendance_records
@@ -582,6 +648,7 @@ router.post(
     );
 
     let operatorNotified = false;
+
     if (isEarlyMagangCheckout) {
       const notifiedCount = await notifyOperatorsAboutEarlyCheckout({
         attendanceRecordId: todayRecord.rows[0].id,
@@ -589,6 +656,7 @@ router.post(
         durationHours,
         requiredHours
       });
+
       operatorNotified = notifiedCount > 0;
     }
 
@@ -610,11 +678,13 @@ router.get(
   "/records/:id",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
       return res.status(403).json({ message: "Akses detail absensi hanya untuk operator." });
     }
 
     const record = await fetchAttendanceRecordById(req.params.id);
+
     if (!record) {
       return res.status(404).json({ message: "Data absensi tidak ditemukan." });
     }
@@ -627,6 +697,7 @@ router.post(
   "/records",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
       return res.status(403).json({ message: "Hanya operator yang dapat menambah data absensi." });
     }
@@ -635,6 +706,7 @@ router.post(
 
     const { studentId, date, checkIn, checkOut, status, note } = req.body || {};
     const resolvedStudentId = await ensureStudentExists(studentId);
+
     if (!resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
@@ -647,12 +719,15 @@ router.post(
     if (!isValidIsoDate(normalizedDate)) {
       return res.status(400).json({ message: "date wajib format YYYY-MM-DD." });
     }
+
     if (normalizedCheckIn && !isValidTimeValue(normalizedCheckIn)) {
       return res.status(400).json({ message: "checkIn wajib format HH:mm." });
     }
+
     if (normalizedCheckOut && !isValidTimeValue(normalizedCheckOut)) {
       return res.status(400).json({ message: "checkOut wajib format HH:mm." });
     }
+
     if (normalizedCheckIn && normalizedCheckOut && compareTimes(normalizedCheckIn, normalizedCheckOut) < 0) {
       return res.status(400).json({ message: "checkOut tidak boleh lebih kecil dari checkIn pada tanggal yang sama." });
     }
@@ -662,11 +737,13 @@ router.post(
       checkIn: normalizedCheckIn,
       checkOut: normalizedCheckOut
     });
+
     if (!finalStatus) {
       return res.status(400).json({ message: "Isi minimal status atau checkIn/checkOut." });
     }
+
     if (!validateAttendanceStatus(finalStatus)) {
-      return res.status(400).json({ message: "status harus Hadir, Cuti, atau Tidak Hadir." });
+      return res.status(400).json({ message: "status harus Hadir, Cuti, Izin, Sakit, WFH, atau Tidak Hadir." });
     }
 
     const duplicate = await query(
@@ -687,6 +764,7 @@ router.post(
     }
 
     const recordId = `ATD-MAN-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+
     await query(
       `
       INSERT INTO attendance_records (
@@ -715,6 +793,7 @@ router.post(
     );
 
     const created = await fetchAttendanceRecordById(recordId);
+
     await recordAttendanceAudit({
       req,
       action: "Create",
@@ -732,6 +811,7 @@ router.patch(
   "/records/:id",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
       return res.status(403).json({ message: "Hanya operator yang dapat mengubah data absensi." });
     }
@@ -758,40 +838,57 @@ router.patch(
     const before = await fetchAttendanceRecordById(req.params.id);
     const body = req.body || {};
     const current = existing.rows[0];
+
     const finalDate = hasOwn(body, "date") ? String(body.date || "").trim() : current.attendance_date_text;
+
     const finalCheckIn = hasOwn(body, "checkIn")
-      ? (body.checkIn == null || body.checkIn === "" ? null : String(body.checkIn).trim())
+      ? body.checkIn == null || body.checkIn === ""
+        ? null
+        : String(body.checkIn).trim()
       : formatDbTime(current.check_in_time);
+
     const finalCheckOut = hasOwn(body, "checkOut")
-      ? (body.checkOut == null || body.checkOut === "" ? null : String(body.checkOut).trim())
+      ? body.checkOut == null || body.checkOut === ""
+        ? null
+        : String(body.checkOut).trim()
       : formatDbTime(current.check_out_time);
+
     const explicitStatus = hasOwn(body, "status")
-      ? (body.status == null || body.status === "" ? null : String(body.status).trim())
+      ? body.status == null || body.status === ""
+        ? null
+        : String(body.status).trim()
       : current.status;
+
     const finalStatus = resolveManualStatus({
       status: explicitStatus,
       checkIn: finalCheckIn,
       checkOut: finalCheckOut
     });
+
     const finalNote = hasOwn(body, "note") ? (body.note == null ? null : String(body.note)) : current.note;
 
     if (!isValidIsoDate(finalDate)) {
       return res.status(400).json({ message: "date wajib format YYYY-MM-DD." });
     }
+
     if (finalCheckIn && !isValidTimeValue(finalCheckIn)) {
       return res.status(400).json({ message: "checkIn wajib format HH:mm." });
     }
+
     if (finalCheckOut && !isValidTimeValue(finalCheckOut)) {
       return res.status(400).json({ message: "checkOut wajib format HH:mm." });
     }
+
     if (finalCheckIn && finalCheckOut && compareTimes(finalCheckIn, finalCheckOut) < 0) {
       return res.status(400).json({ message: "checkOut tidak boleh lebih kecil dari checkIn pada tanggal yang sama." });
     }
+
     if (!finalStatus) {
       return res.status(400).json({ message: "Isi minimal status atau checkIn/checkOut." });
     }
+
     if (!validateAttendanceStatus(finalStatus)) {
-      return res.status(400).json({ message: "status harus Hadir, Cuti, atau Tidak Hadir." });
+      return res.status(400).json({ message: "status harus Hadir, Cuti, Izin, Sakit, WFH, atau Tidak Hadir." });
     }
 
     const duplicate = await query(
@@ -839,6 +936,7 @@ router.patch(
     );
 
     const updated = await fetchAttendanceRecordById(req.params.id);
+
     await recordAttendanceAudit({
       req,
       action: "Update",
@@ -857,17 +955,21 @@ router.delete(
   "/records/:id",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
       return res.status(403).json({ message: "Hanya operator yang dapat menghapus data absensi." });
     }
 
     await ensureAttendanceColumns();
+
     const before = await fetchAttendanceRecordById(req.params.id);
+
     if (!before) {
       return res.status(404).json({ message: "Data absensi tidak ditemukan." });
     }
 
     await query("DELETE FROM attendance_records WHERE id = $1", [req.params.id]);
+
     await recordAttendanceAudit({
       req,
       action: "Delete",
@@ -885,6 +987,7 @@ router.get(
   "/monitor/today",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
+
     if (role !== "operator") {
       return res.status(403).json({ message: "Akses monitor absensi hanya untuk operator." });
     }
@@ -892,6 +995,7 @@ router.get(
     const todayIso = getJakartaDateIso();
     const currentTime = getJakartaTimeHm();
     const lockWindowOpen = canCreateAttendanceAbsentLock();
+
     const studentsResult = await query(
       `
       SELECT s.id
@@ -911,15 +1015,24 @@ router.get(
 
     const leavesResult = await query(
       `
-      SELECT DISTINCT student_id
+      SELECT DISTINCT ON (student_id)
+        student_id,
+        COALESCE(jenis_pengajuan, 'cuti') AS jenis_pengajuan
       FROM leave_requests
       WHERE status = 'Disetujui'
         AND (NOW() AT TIME ZONE 'Asia/Jakarta')::date BETWEEN periode_start AND periode_end
+      ORDER BY student_id, tanggal_pengajuan DESC, id DESC
       `
     );
 
     const allStudentIds = studentsResult.rows.map((row) => row.id);
     const leaveSet = new Set(leavesResult.rows.map((row) => row.student_id));
+
+    const leaveTypesByStudentId = {};
+    for (const row of leavesResult.rows) {
+      leaveTypesByStudentId[row.student_id] = normalizeLeaveType(row.jenis_pengajuan);
+    }
+
     const attendanceMap = new Map(attendanceResult.rows.map((row) => [row.student_id, row.status]));
 
     const presentIds = [];
@@ -930,19 +1043,43 @@ router.get(
 
     allStudentIds.forEach((studentId) => {
       const status = attendanceMap.get(studentId);
+
       if (status === "Hadir") {
         presentIds.push(studentId);
         return;
       }
-      if (status === "Cuti" || leaveSet.has(studentId)) {
+
+      if (
+        status === "Cuti" ||
+        status === "Izin" ||
+        status === "Sakit" ||
+        status === "WFH" ||
+        leaveSet.has(studentId)
+      ) {
         leaveIds.push(studentId);
+
+        if (!leaveTypesByStudentId[studentId]) {
+          if (status === "Izin") {
+            leaveTypesByStudentId[studentId] = "izin";
+          } else if (status === "Sakit") {
+            leaveTypesByStudentId[studentId] = "sakit";
+          } else if (status === "WFH") {
+            leaveTypesByStudentId[studentId] = "wfh";
+          } else {
+            leaveTypesByStudentId[studentId] = "cuti";
+          }
+        }
+
         return;
       }
+
       if (status) {
         reportedAbsentIds.push(studentId);
         return;
       }
+
       noInformationIds.push(studentId);
+
       if (lockWindowOpen) {
         absentIds.push(studentId);
       }
@@ -963,6 +1100,7 @@ router.get(
       lockWindowOpen,
       presentIds,
       leaveIds,
+      leaveTypesByStudentId,
       absentIds,
       reportedAbsentIds,
       noInformationIds
@@ -974,13 +1112,15 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
-    const studentId = role === "mahasiswa" ? (req.authUser?.id || req.query.studentId) : req.query.studentId;
+    const studentId = role === "mahasiswa" ? req.authUser?.id || req.query.studentId : req.query.studentId;
     const { month } = req.query;
+
     if (!studentId) {
       return res.status(400).json({ message: "studentId wajib diisi." });
     }
 
     const resolvedStudentId = await resolveStudentId(String(studentId));
+
     if (!resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
@@ -1011,6 +1151,7 @@ router.get(
     const effectiveEndDate = minIsoDate(endDate, todayIso);
 
     await ensureAttendanceColumns();
+
     const attendanceRows = await query(
       `
       SELECT id,
@@ -1034,7 +1175,10 @@ router.get(
 
     const leaves = await query(
       `
-      SELECT periode_start, periode_end
+      SELECT 
+        periode_start,
+        periode_end,
+        COALESCE(jenis_pengajuan, 'cuti') AS jenis_pengajuan
       FROM leave_requests
       WHERE student_id = $1
         AND status = 'Disetujui'
@@ -1046,7 +1190,7 @@ router.get(
       [resolvedStudentId, monthValue, effectiveStartDate, effectiveEndDate]
     );
 
-    const { attendanceMap, leaveSet, history, summary } = buildAttendanceHistory({
+    const { attendanceMap, leaveSet, leaveMap, history, summary } = buildAttendanceHistory({
       startDate: effectiveStartDate,
       endDate: effectiveEndDate,
       attendanceRows: attendanceRows.rows,
@@ -1055,13 +1199,14 @@ router.get(
     });
 
     const todayAttendance = attendanceMap.get(todayIso);
+
     const todayStatus = leaveSet.has(todayIso)
-      ? "Cuti"
+      ? leaveMap.get(todayIso) || "Cuti"
       : todayAttendance?.check_out_at
         ? "Selesai"
         : todayAttendance?.check_in_at
           ? "Berlangsung"
-        : "Belum Check-in";
+          : "Belum Check-in";
 
     const settings = await getSettingsAsync();
     const gps = settings.gps || {};
@@ -1082,14 +1227,25 @@ router.get(
         { name: "Hadir", value: summary.hadir, color: "#0AB600" },
         { name: "Tidak Hadir", value: summary.tidakHadir, color: "#EF4444" },
         { name: "Cuti", value: summary.cuti, color: "#F59E0B" },
+        { name: "Izin", value: summary.izin, color: "#3B82F6" },
+        { name: "Sakit", value: summary.sakit, color: "#F43F5E" },
+        { name: "WFH", value: summary.wfh, color: "#0EA5E9" },
         { name: "Libur", value: summary.libur, color: "#94A3B8" }
       ],
       today: {
         checkIn: todayAttendance?.check_in_at
-          ? new Date(todayAttendance.check_in_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", hour12: false })
+          ? new Date(todayAttendance.check_in_at).toLocaleTimeString("id-ID", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false
+            })
           : "--:--",
         checkOut: todayAttendance?.check_out_at
-          ? new Date(todayAttendance.check_out_at).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", hour12: false })
+          ? new Date(todayAttendance.check_out_at).toLocaleTimeString("id-ID", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false
+            })
           : "--:--",
         status: todayStatus,
         autoCheckout: Boolean(todayAttendance?.auto_checkout),
