@@ -17,6 +17,29 @@ const { createNotification } = require("../../utils/notificationService");
 const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
+let ensureResearchAttachmentLinkPromise = null;
+
+async function ensureResearchAttachmentLinkColumn() {
+  if (!ensureResearchAttachmentLinkPromise) {
+    ensureResearchAttachmentLinkPromise = query(`
+      ALTER TABLE research_projects
+      ADD COLUMN IF NOT EXISTS attachment_link TEXT
+    `).catch((error) => {
+      ensureResearchAttachmentLinkPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureResearchAttachmentLinkPromise;
+}
+
+router.use(
+  asyncHandler(async (req, res, next) => {
+    await ensureResearchAttachmentLinkColumn();
+    next();
+  })
+);
+
 ["id", "cardId", "taskId", "subtaskId", "attachmentId", "commentId", "userId", "milestoneId"].forEach((paramName) => {
   router.param(paramName, (req, res, next, value) => {
     try {
@@ -378,7 +401,8 @@ router.get(
 router.post(
   "/:id/board/cards",
   asyncHandler(async (req, res) => {
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
+    const role = extractRole(req);
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
     if (!allowed) {
       return res.status(403).json({ message: "Akses ditolak untuk menambah card di board ini." });
     }
@@ -387,6 +411,20 @@ router.post(
 
     if (!title || !date) {
       return res.status(400).json({ message: "title dan date wajib diisi." });
+    }
+
+    if (role === "mahasiswa") {
+      const normalizedDate = String(date || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+        return res.status(400).json({ message: "Format tanggal logbook harus YYYY-MM-DD." });
+      }
+
+      const todayDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta" }).format(new Date());
+      if (normalizedDate !== todayDate) {
+        return res.status(400).json({
+          message: "Tanggal logbook hanya boleh hari ini untuk role mahasiswa."
+        });
+      }
     }
 
     // Generate a unique ID for the logbook entry

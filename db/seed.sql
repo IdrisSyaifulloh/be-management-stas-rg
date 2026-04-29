@@ -160,6 +160,104 @@ ON CONFLICT (project_id, user_id) DO UPDATE SET
   bergabung = EXCLUDED.bergabung;
 
 -- ======================================================
+-- BULK USERS (MAHASISWA)
+-- ======================================================
+INSERT INTO users (id, name, initials, role, email, password_hash, prodi, is_active)
+SELECT
+  'SEED-BULK-USR-MHS-' || to_char(gs, 'FM000') AS id,
+  'Mahasiswa Seed ' || gs AS name,
+  'M' || to_char(gs, 'FM00') AS initials,
+  'mahasiswa' AS role,
+  'mhs.seed.' || gs || '@seed.stasrg.local' AS email,
+  '$2b$10$qnonB3nNMhreydndysp30efL9XjNElVVApzEum4IdIsGh84qtl.o6' AS password_hash,
+  CASE WHEN gs % 2 = 0 THEN 'Informatika' ELSE 'Sistem Informasi' END AS prodi,
+  TRUE AS is_active
+FROM generate_series(1, 40) AS gs
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  initials = EXCLUDED.initials,
+  role = EXCLUDED.role,
+  email = EXCLUDED.email,
+  password_hash = EXCLUDED.password_hash,
+  prodi = EXCLUDED.prodi,
+  is_active = EXCLUDED.is_active,
+  updated_at = NOW();
+
+-- ======================================================
+-- BULK STUDENTS
+-- ======================================================
+INSERT INTO students (
+  id, user_id, nim, angkatan, phone, status, tipe, bergabung, pembimbing,
+  kehadiran, total_hari, logbook_count, jam_minggu_ini, jam_minggu_target,
+  withdrawal_at, scheduled_deletion_at
+)
+SELECT
+  'SEED-BULK-STD-' || to_char(gs, 'FM000') AS id,
+  'SEED-BULK-USR-MHS-' || to_char(gs, 'FM000') AS user_id,
+  '22999' || lpad(gs::text, 5, '0') AS nim,
+  CASE WHEN gs % 3 = 0 THEN '2023' WHEN gs % 3 = 1 THEN '2022' ELSE '2021' END AS angkatan,
+  '0819' || lpad((770000 + gs)::text, 8, '0') AS phone,
+  'Aktif' AS status,
+  CASE WHEN gs % 2 = 0 THEN 'Riset' ELSE 'Magang' END AS tipe,
+  (DATE '2024-09-01' + ((gs % 60) * INTERVAL '1 day'))::date AS bergabung,
+  CASE WHEN gs % 3 = 0 THEN 'Dr. Ahmad Fauzi' WHEN gs % 3 = 1 THEN 'Siti Nurhaliza, M.Kom' ELSE 'Bima Prakoso, Ph.D' END AS pembimbing,
+  (gs % 5) + 1 AS kehadiran,
+  (gs % 7) + 2 AS total_hari,
+  (gs % 4) + 1 AS logbook_count,
+  6 + (gs % 12) AS jam_minggu_ini,
+  CASE WHEN gs % 2 = 0 THEN 20 ELSE 45 END AS jam_minggu_target,
+  NULL AS withdrawal_at,
+  NULL AS scheduled_deletion_at
+FROM generate_series(1, 40) AS gs
+ON CONFLICT (id) DO UPDATE SET
+  user_id = EXCLUDED.user_id,
+  nim = EXCLUDED.nim,
+  angkatan = EXCLUDED.angkatan,
+  phone = EXCLUDED.phone,
+  status = EXCLUDED.status,
+  tipe = EXCLUDED.tipe,
+  bergabung = EXCLUDED.bergabung,
+  pembimbing = EXCLUDED.pembimbing,
+  kehadiran = EXCLUDED.kehadiran,
+  total_hari = EXCLUDED.total_hari,
+  logbook_count = EXCLUDED.logbook_count,
+  jam_minggu_ini = EXCLUDED.jam_minggu_ini,
+  jam_minggu_target = EXCLUDED.jam_minggu_target,
+  withdrawal_at = EXCLUDED.withdrawal_at,
+  scheduled_deletion_at = EXCLUDED.scheduled_deletion_at,
+  updated_at = NOW();
+
+-- ======================================================
+-- BULK MEMBERSHIPS & BOARD ACCESS
+-- ======================================================
+INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
+SELECT
+  CASE WHEN gs % 2 = 0 THEN 'SEED-PRJ-001' ELSE 'SEED-PRJ-002' END AS project_id,
+  'SEED-BULK-USR-MHS-' || to_char(gs, 'FM000') AS user_id,
+  'Mahasiswa' AS member_type,
+  CASE
+    WHEN gs % 4 = 0 THEN 'Data Engineer'
+    WHEN gs % 4 = 1 THEN 'Backend Developer'
+    WHEN gs % 4 = 2 THEN 'Frontend Developer'
+    ELSE 'Research Assistant'
+  END AS peran,
+  'Aktif' AS status,
+  (DATE '2025-09-01' + ((gs % 45) * INTERVAL '1 day'))::date AS bergabung
+FROM generate_series(1, 40) AS gs
+ON CONFLICT (project_id, user_id) DO UPDATE SET
+  member_type = EXCLUDED.member_type,
+  peran = EXCLUDED.peran,
+  status = EXCLUDED.status,
+  bergabung = EXCLUDED.bergabung;
+
+INSERT INTO board_access (project_id, user_id)
+SELECT
+  CASE WHEN gs % 2 = 0 THEN 'SEED-PRJ-001' ELSE 'SEED-PRJ-002' END AS project_id,
+  'SEED-BULK-USR-MHS-' || to_char(gs, 'FM000') AS user_id
+FROM generate_series(1, 40) AS gs
+ON CONFLICT (project_id, user_id) DO NOTHING;
+
+-- ======================================================
 -- BOARD ACCESS
 -- ======================================================
 INSERT INTO board_access (project_id, user_id)
@@ -168,7 +266,7 @@ VALUES
   ('SEED-PRJ-001', 'SEED-USR-MHS-002'),
   ('SEED-PRJ-002', 'SEED-USR-MHS-003'),
   ('SEED-PRJ-002', 'SEED-USR-DOS-003'),
-  ('SEED-PRJ-003', 'SEED-USR-OP-001')
+  ('SEED-PRJ-003', 'OP001')
 ON CONFLICT (project_id, user_id) DO NOTHING;
 
 -- ======================================================
@@ -272,6 +370,40 @@ ON CONFLICT (id) DO UPDATE SET
   updated_at = NOW();
 
 -- ======================================================
+-- BULK LOGBOOK ENTRIES
+-- ======================================================
+INSERT INTO logbook_entries (
+  id, student_id, project_id, date, title, description, output, kendala, has_attachment, file_url, file_name, file_size
+)
+SELECT
+  'SEED-BULK-LGB-' || to_char(gs, 'FM000') AS id,
+  'SEED-BULK-STD-' || to_char(gs, 'FM000') AS student_id,
+  CASE WHEN gs % 2 = 0 THEN 'SEED-PRJ-001' ELSE 'SEED-PRJ-002' END AS project_id,
+  (DATE '2026-04-01' + ((gs % 20) * INTERVAL '1 day'))::date AS date,
+  'Progress Harian #' || gs AS title,
+  'Menyelesaikan task harian terkait implementasi modul riset ke-' || gs || '.' AS description,
+  'Task selesai dan siap direview oleh pembimbing.' AS output,
+  CASE WHEN gs % 5 = 0 THEN 'Perlu sinkronisasi data antar modul.' ELSE NULL END AS kendala,
+  FALSE AS has_attachment,
+  NULL AS file_url,
+  NULL AS file_name,
+  NULL AS file_size
+FROM generate_series(1, 40) AS gs
+ON CONFLICT (id) DO UPDATE SET
+  student_id = EXCLUDED.student_id,
+  project_id = EXCLUDED.project_id,
+  date = EXCLUDED.date,
+  title = EXCLUDED.title,
+  description = EXCLUDED.description,
+  output = EXCLUDED.output,
+  kendala = EXCLUDED.kendala,
+  has_attachment = EXCLUDED.has_attachment,
+  file_url = EXCLUDED.file_url,
+  file_name = EXCLUDED.file_name,
+  file_size = EXCLUDED.file_size,
+  updated_at = NOW();
+
+-- ======================================================
 -- LOGBOOK COMMENTS
 -- ======================================================
 INSERT INTO logbook_comments (id, logbook_entry_id, author_id, author_name, text)
@@ -280,7 +412,7 @@ VALUES
   ('SEED-CMT-002', 'SEED-LGB-001', 'SEED-USR-MHS-002', 'Rizky Maulana', 'Siap, saya bantu skenario validasi tanggal.'),
   ('SEED-CMT-003', 'SEED-LGB-003', 'SEED-USR-DOS-002', 'Siti Nurhaliza, M.Kom', 'Pastikan filter riset tidak muncul untuk layanan surat.'),
   ('SEED-CMT-004', 'SEED-LGB-004', 'SEED-USR-DOS-003', 'Bima Prakoso, Ph.D', 'UI preferensi sudah baik, lanjutkan pengujian.'),
-  ('SEED-CMT-005', 'SEED-LGB-005', 'SEED-USR-OP-001', 'Operator Sistem', 'Dokumentasi sudah diterima, akan dipakai untuk briefing.'),
+  ('SEED-CMT-005', 'SEED-LGB-005', 'OP001', 'Operator Sistem', 'Dokumentasi sudah diterima, akan dipakai untuk briefing.'),
   ('SEED-CMT-006', 'SEED-LGB-006', 'SEED-USR-DOS-001', 'Dr. Ahmad Fauzi', 'Terima kasih, laporan final sudah sesuai.')
 ON CONFLICT (id) DO UPDATE SET
   logbook_entry_id = EXCLUDED.logbook_entry_id,
@@ -321,18 +453,54 @@ ON CONFLICT (student_id, attendance_date) DO UPDATE SET
   updated_at = NOW();
 
 -- ======================================================
+-- BULK ATTENDANCE RECORDS
+-- ======================================================
+INSERT INTO attendance_records (
+  id, student_id, attendance_date, status, check_in_at, check_out_at,
+  check_in_lat, check_in_lng, check_out_lat, check_out_lng,
+  accuracy_meters, distance_meters, within_radius
+)
+SELECT
+  'SEED-BULK-ATT-' || to_char(gs, 'FM000') AS id,
+  'SEED-BULK-STD-' || to_char(gs, 'FM000') AS student_id,
+  (DATE '2026-04-01' + ((gs % 20) * INTERVAL '1 day'))::date AS attendance_date,
+  CASE WHEN gs % 9 = 0 THEN 'Tidak Hadir' ELSE 'Hadir' END AS status,
+  CASE WHEN gs % 9 = 0 THEN NULL ELSE ('2026-04-01 08:0' || (gs % 6) || ':00+07')::timestamptz END AS check_in_at,
+  CASE WHEN gs % 9 = 0 THEN NULL ELSE ('2026-04-01 16:0' || (gs % 6) || ':00+07')::timestamptz END AS check_out_at,
+  -6.9730 + ((gs % 10)::numeric / 10000) AS check_in_lat,
+  107.6300 + ((gs % 10)::numeric / 10000) AS check_in_lng,
+  -6.9731 + ((gs % 10)::numeric / 10000) AS check_out_lat,
+  107.6301 + ((gs % 10)::numeric / 10000) AS check_out_lng,
+  4 + (gs % 5) AS accuracy_meters,
+  10 + (gs % 12) AS distance_meters,
+  TRUE AS within_radius
+FROM generate_series(1, 40) AS gs
+ON CONFLICT (student_id, attendance_date) DO UPDATE SET
+  status = EXCLUDED.status,
+  check_in_at = EXCLUDED.check_in_at,
+  check_out_at = EXCLUDED.check_out_at,
+  check_in_lat = EXCLUDED.check_in_lat,
+  check_in_lng = EXCLUDED.check_in_lng,
+  check_out_lat = EXCLUDED.check_out_lat,
+  check_out_lng = EXCLUDED.check_out_lng,
+  accuracy_meters = EXCLUDED.accuracy_meters,
+  distance_meters = EXCLUDED.distance_meters,
+  within_radius = EXCLUDED.within_radius,
+  updated_at = NOW();
+
+-- ======================================================
 -- AUDIT LOGS
 -- ======================================================
 INSERT INTO audit_logs (id, user_id, user_role, action, target, ip, detail, logged_at)
 VALUES
-  ('SEED-AUD-001', 'SEED-USR-OP-001', 'Operator', 'Login', 'auth', '127.0.0.1', '{"identifier":"operator.sistem@seed.stasrg.local"}'::jsonb, '2026-04-10 08:00:00+07'),
+  ('SEED-AUD-001', 'OP001', 'Operator', 'Login', 'auth', '127.0.0.1', '{"identifier":"operator.sistem@seed.stasrg.local"}'::jsonb, '2026-04-10 08:00:00+07'),
   ('SEED-AUD-002', 'SEED-USR-DOS-001', 'Dosen', 'Approve', 'leave_request:SEED-LVR-001', '127.0.0.1', '{"status":"Disetujui"}'::jsonb, '2026-03-24 10:30:00+07'),
   ('SEED-AUD-003', 'SEED-USR-DOS-001', 'Dosen', 'Update', 'research_project:SEED-PRJ-001', '127.0.0.1', '{"field":"progress","value":40}'::jsonb, '2026-04-09 11:15:00+07'),
   ('SEED-AUD-004', 'SEED-USR-MHS-001', 'Mahasiswa', 'Create', 'logbook_entry:SEED-LGB-001', '127.0.0.1', '{"projectId":"SEED-PRJ-001"}'::jsonb, '2026-03-24 17:00:00+07'),
   ('SEED-AUD-005', 'SEED-USR-MHS-003', 'Mahasiswa', 'Create', 'letter_request:SEED-LTR-002', '127.0.0.1', '{"jenis":"Surat Keterangan Aktif"}'::jsonb, '2026-04-04 09:20:00+07'),
-  ('SEED-AUD-006', 'SEED-USR-OP-002', 'Operator', 'Export', 'exports:kehadiran', '127.0.0.1', '{"format":"xlsx","type":"kehadiran"}'::jsonb, '2026-04-10 13:00:00+07'),
+  ('SEED-AUD-006', 'OP002', 'Operator', 'Export', 'exports:kehadiran', '127.0.0.1', '{"format":"xlsx","type":"kehadiran"}'::jsonb, '2026-04-10 13:00:00+07'),
   ('SEED-AUD-007', 'SEED-USR-DOS-002', 'Dosen', 'Update', 'notification_preferences', '127.0.0.1', '{"recipient":"SEED-USR-MHS-003"}'::jsonb, '2026-04-05 16:10:00+07'),
-  ('SEED-AUD-008', 'SEED-USR-OP-001', 'Operator', 'Create', 'notification:SEED-NTF-001', '127.0.0.1', '{"recipient":"SEED-USR-MHS-001"}'::jsonb, '2026-04-10 14:00:00+07')
+  ('SEED-AUD-008', 'OP001', 'Operator', 'Create', 'notification:SEED-NTF-001', '127.0.0.1', '{"recipient":"SEED-USR-MHS-001"}'::jsonb, '2026-04-10 14:00:00+07')
 ON CONFLICT (id) DO UPDATE SET
   user_id = EXCLUDED.user_id,
   user_role = EXCLUDED.user_role,
@@ -433,7 +601,7 @@ VALUES
     'SEED-WDR-002', 'SEED-STD-002', 'SEED-USR-DOS-001',
     'Kondisi keluarga mengharuskan saya pindah ke luar kota sehingga tidak memungkinkan untuk melanjutkan penelitian secara luring.',
     '2026-04-08 14:30:00+07',
-    'Diteruskan', '2026-04-09 10:00:00+07', 'SEED-USR-OP-001', 'Data kelengkapan mahasiswa sudah sesuai. Diteruskan ke dosen pembimbing.',
+    'Diteruskan', '2026-04-09 10:00:00+07', 'OP001', 'Data kelengkapan mahasiswa sudah sesuai. Diteruskan ke dosen pembimbing.',
     'Menunggu', NULL, NULL, NULL,
     'Menunggu Dosen'
   ),
@@ -441,7 +609,7 @@ VALUES
     'SEED-WDR-003', 'SEED-STD-006', 'SEED-USR-DOS-003',
     'Terdapat hambatan pribadi yang mengharuskan saya berhenti dari kegiatan penelitian.',
     '2026-03-28 11:00:00+07',
-    'Diteruskan', '2026-03-29 09:30:00+07', 'SEED-USR-OP-002', 'Dokumen pendukung lengkap. Diteruskan ke dosen pembimbing.',
+    'Diteruskan', '2026-03-29 09:30:00+07', 'OP002', 'Dokumen pendukung lengkap. Diteruskan ke dosen pembimbing.',
     'Disetujui', '2026-03-31 13:00:00+07', 'SEED-USR-DOS-003', 'Pengajuan disetujui sesuai kondisi mahasiswa yang bersangkutan.',
     'Disetujui'
   )
@@ -466,11 +634,34 @@ ON CONFLICT (id) DO UPDATE SET
 -- ======================================================
 INSERT INTO notifications (id, recipient_user_id, sender_user_id, type, title, body, read_at, created_at)
 VALUES
-  ('SEED-NTF-001', 'SEED-USR-MHS-001', 'SEED-USR-OP-001', 'pengumuman', 'Jadwal Review Dashboard', 'Review progres dashboard dijadwalkan pada 12 April 2026 pukul 10.00 WIB.', NULL, '2026-04-10 14:00:00+07'),
+  ('SEED-NTF-001', 'SEED-USR-MHS-001', 'OP001', 'pengumuman', 'Jadwal Review Dashboard', 'Review progres dashboard dijadwalkan pada 12 April 2026 pukul 10.00 WIB.', NULL, '2026-04-10 14:00:00+07'),
   ('SEED-NTF-002', 'SEED-USR-MHS-003', 'SEED-USR-DOS-002', 'surat', 'Pengajuan Surat Diproses', 'Pengajuan surat aktif Anda sedang diproses operator.', '2026-04-05 12:00:00+07', '2026-04-05 10:30:00+07'),
-  ('SEED-NTF-003', 'SEED-USR-DOS-001', 'SEED-USR-OP-002', 'cuti', 'Pengajuan Cuti Baru', 'Terdapat pengajuan cuti baru dari Alya Putri Ramadhani.', NULL, '2026-04-10 09:00:00+07'),
+  ('SEED-NTF-003', 'SEED-USR-DOS-001', 'OP002', 'cuti', 'Pengajuan Cuti Baru', 'Terdapat pengajuan cuti baru dari Alya Putri Ramadhani.', NULL, '2026-04-10 09:00:00+07'),
   ('SEED-NTF-004', 'SEED-USR-MHS-004', 'SEED-USR-DOS-002', 'cuti', 'Pengajuan Cuti Disetujui', 'Pengajuan cuti Anda disetujui untuk periode 26-27 Maret 2026.', '2026-03-24 11:00:00+07', '2026-03-24 10:31:00+07'),
   ('SEED-NTF-005', 'SEED-USR-MHS-002', 'SEED-USR-DOS-001', 'riset', 'Target Export Baru', 'Silakan bantu validasi skenario export rekap-data sebelum Jumat.', NULL, '2026-04-09 15:20:00+07')
+ON CONFLICT (id) DO UPDATE SET
+  recipient_user_id = EXCLUDED.recipient_user_id,
+  sender_user_id = EXCLUDED.sender_user_id,
+  type = EXCLUDED.type,
+  title = EXCLUDED.title,
+  body = EXCLUDED.body,
+  read_at = EXCLUDED.read_at,
+  created_at = EXCLUDED.created_at;
+
+-- ======================================================
+-- BULK NOTIFICATIONS
+-- ======================================================
+INSERT INTO notifications (id, recipient_user_id, sender_user_id, type, title, body, read_at, created_at)
+SELECT
+  'SEED-BULK-NTF-' || to_char(gs, 'FM000') AS id,
+  'SEED-BULK-USR-MHS-' || to_char(gs, 'FM000') AS recipient_user_id,
+  'OP001' AS sender_user_id,
+  CASE WHEN gs % 3 = 0 THEN 'pengumuman' WHEN gs % 3 = 1 THEN 'riset' ELSE 'logbook' END AS type,
+  'Notifikasi Seed #' || gs AS title,
+  'Ini notifikasi seed otomatis untuk pengujian pagination/filter nomor ' || gs || '.' AS body,
+  CASE WHEN gs % 4 = 0 THEN NOW() - INTERVAL '1 day' ELSE NULL END AS read_at,
+  NOW() - ((gs % 12) * INTERVAL '6 hour') AS created_at
+FROM generate_series(1, 40) AS gs
 ON CONFLICT (id) DO UPDATE SET
   recipient_user_id = EXCLUDED.recipient_user_id,
   sender_user_id = EXCLUDED.sender_user_id,

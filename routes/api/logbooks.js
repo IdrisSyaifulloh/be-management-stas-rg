@@ -42,6 +42,14 @@ function normalizeOptionalProjectId(projectId) {
   return normalized || null;
 }
 
+function getTodayDateInJakarta() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta" }).format(new Date());
+}
+
+function resolveLogbookSource(req) {
+  return String(req.headers["x-logbook-source"] || req.query.source || req.body?.source || "").trim().toLowerCase();
+}
+
 async function ensureProjectCanBeUsed(projectId, studentId) {
   const normalizedProjectId = normalizeOptionalProjectId(projectId);
   if (!normalizedProjectId) return null;
@@ -247,6 +255,18 @@ router.post(
       return res.status(400).json({ message: "id, studentId, date, title, description wajib diisi." });
     }
 
+    const normalizedDate = String(date || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+      return res.status(400).json({ message: "Format tanggal logbook harus YYYY-MM-DD." });
+    }
+
+    const todayDate = getTodayDateInJakarta();
+    if (normalizedDate !== todayDate) {
+      return res.status(400).json({
+        message: "Tanggal logbook hanya boleh hari ini. Pengisian untuk tanggal lalu atau mendatang tidak diperbolehkan."
+      });
+    }
+
     // Validate against logged-in user (frontend sends user_id as studentId)
     if (String(studentId) !== String(req.authUser?.id)) {
       return res.status(403).json({ message: "studentId tidak sesuai akun login." });
@@ -287,7 +307,7 @@ router.post(
         id,
         resolvedStudentId,
         normalizedProjectId,
-        date,
+        normalizedDate,
         title,
         description,
         output || null,
@@ -356,9 +376,29 @@ router.put(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureLogbookAttachmentColumns();
+    const role = extractRole(req);
+    const source = resolveLogbookSource(req);
     const logbookId = requireSafeId(req.params.id, "id");
     const body = req.body || {};
     const { projectId, date, title, description, output, kendala, hasAttachment, fileDataUrl, fileName, clearAttachment } = body;
+    const hasDateInput = Object.prototype.hasOwnProperty.call(body, "date");
+
+    let normalizedUpdateDate = null;
+    if (hasDateInput) {
+      normalizedUpdateDate = String(date || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedUpdateDate)) {
+        return res.status(400).json({ message: "Format tanggal logbook harus YYYY-MM-DD." });
+      }
+
+      if (role === "mahasiswa" && source !== "logbook-page") {
+        const todayDate = getTodayDateInJakarta();
+        if (normalizedUpdateDate !== todayDate) {
+          return res.status(400).json({
+            message: "Untuk role mahasiswa, tanggal logbook hanya boleh hari ini pada flow checkout/absen."
+          });
+        }
+      }
+    }
 
     const existingEntry = await query(
       "SELECT id, student_id, project_id, file_url, file_name, file_size, has_attachment FROM logbook_entries WHERE id = $1 LIMIT 1",
@@ -420,7 +460,19 @@ router.put(
       WHERE id = $1
       RETURNING id
       `,
-      [logbookId, nextProjectId, date, title, description, output, kendala, nextHasAttachment, nextFileUrl, nextFileName, nextFileSize]
+      [
+        logbookId,
+        nextProjectId,
+        hasDateInput ? normalizedUpdateDate : null,
+        title,
+        description,
+        output,
+        kendala,
+        nextHasAttachment,
+        nextFileUrl,
+        nextFileName,
+        nextFileSize
+      ]
     );
 
     try {

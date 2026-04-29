@@ -152,15 +152,24 @@ router.get(
               u.name AS student_name,
               u.initials AS student_initials,
               s.nim,
-              COALESCE(ar.status, 'Belum Absen') AS attendance_status,
+              'Belum Absen' AS attendance_status,
               $1::date AS reference_date
             FROM students s
             JOIN users u ON u.id = s.user_id
-            LEFT JOIN attendance_records ar
-              ON ar.student_id = s.id
-             AND ar.attendance_date = $1::date
             WHERE s.status = 'Aktif'
-              AND COALESCE(ar.status, 'Belum Absen') NOT IN ('Hadir', 'Cuti')
+              AND NOT EXISTS (
+                SELECT 1
+                FROM attendance_records ar
+                WHERE ar.student_id = s.id
+                  AND ar.attendance_date = $1::date
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM leave_requests lr
+                WHERE lr.student_id = s.id
+                  AND lr.status = 'Disetujui'
+                  AND $1::date BETWEEN lr.periode_start AND lr.periode_end
+              )
               AND NOT EXISTS (
                 SELECT 1
                 FROM dashboard_warning_reviews dwr
