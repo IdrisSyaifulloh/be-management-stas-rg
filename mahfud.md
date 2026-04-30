@@ -328,6 +328,32 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 ### DELETE `/research/:id/milestones/:milestoneId`
 - Deskripsi: hapus milestone.
 
+### GET `/research/:id/meetings`
+- Deskripsi: list semua notulensi rapat proyek riset, diurutkan terbaru dulu.
+- Akses: operator, dosen, mahasiswa (yang tergabung di riset).
+- Response: array of meeting objects dengan field `attendees[]` dan `attendeeCount`.
+
+### POST `/research/:id/meetings`
+- Deskripsi: buat notulensi rapat baru.
+- Akses: operator, dosen.
+- Body wajib: `title`, `meetingDate` (YYYY-MM-DD), `content`.
+- Body opsional: `location`, `agenda`, `decisions`, `nextMeetingDate`, `attendees[]`.
+- `attendees[]` shape: `{ name, userId?, roleLabel?, attended? }`.
+- Response: `{ message, id }` — status 201.
+
+### GET `/research/:id/meetings/:meetingId`
+- Deskripsi: detail satu notulensi.
+- Akses: operator, dosen, mahasiswa (yang tergabung di riset).
+
+### PATCH `/research/:id/meetings/:meetingId`
+- Deskripsi: update notulensi. Semua field opsional.
+- Akses: operator (semua), dosen (hanya notulensi milik sendiri).
+- Jika `attendees[]` disertakan, daftar peserta di-replace seluruhnya.
+
+### DELETE `/research/:id/meetings/:meetingId`
+- Deskripsi: hapus notulensi (cascade hapus peserta).
+- Akses: operator only.
+
 ## 6) Logbooks
 
 ### GET `/logbooks?studentId=...&projectId=...`

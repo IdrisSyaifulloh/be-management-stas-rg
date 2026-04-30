@@ -40,7 +40,7 @@ router.use(
   })
 );
 
-["id", "cardId", "taskId", "subtaskId", "attachmentId", "commentId", "userId", "milestoneId"].forEach((paramName) => {
+["id", "cardId", "taskId", "subtaskId", "attachmentId", "commentId", "userId", "milestoneId", "meetingId"].forEach((paramName) => {
   router.param(paramName, (req, res, next, value) => {
     try {
       req.params[paramName] = requireSafeId(value, paramName);
@@ -257,9 +257,23 @@ router.get(
 router.get(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureMeetingNotesTables();
     const role = extractRole(req);
     const userId = resolveRequesterUserId(req);
     let result;
+
+    const meetingSub = `
+      LEFT JOIN (
+        SELECT project_id,
+               COUNT(*)::int            AS meeting_count,
+               MAX(meeting_date)::text  AS last_meeting_date
+        FROM research_meeting_notes
+        GROUP BY project_id
+      ) mn ON mn.project_id = rp.id
+    `;
+    const meetingCols = `,
+               COALESCE(mn.meeting_count, 0)  AS meeting_count,
+               mn.last_meeting_date`;
 
     if (role === "operator") {
       result = await query(
@@ -267,9 +281,11 @@ router.get(
         SELECT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
                rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
+               ${meetingCols}
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
         LEFT JOIN users u ON u.id = l.user_id
+        ${meetingSub}
         ORDER BY rp.id ASC
         `
       );
@@ -279,11 +295,13 @@ router.get(
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
                rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
+               ${meetingCols}
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
         LEFT JOIN users u ON u.id = l.user_id
         LEFT JOIN research_memberships rm ON rm.project_id = rp.id
         LEFT JOIN lecturers own_l ON own_l.id = rp.supervisor_lecturer_id
+        ${meetingSub}
         WHERE rm.user_id = $1 OR own_l.user_id = $1
         ORDER BY rp.id ASC
         `,
@@ -295,11 +313,13 @@ router.get(
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
                rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
+               ${meetingCols}
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
         LEFT JOIN users u ON u.id = l.user_id
         LEFT JOIN research_memberships rm ON rm.project_id = rp.id
         LEFT JOIN board_access ba ON ba.project_id = rp.id
+        ${meetingSub}
         WHERE rm.user_id = $1 OR ba.user_id = $1
         ORDER BY rp.id ASC
         `,
@@ -1569,6 +1589,296 @@ router.delete(
     );
 
     res.json({ message: "Milestone berhasil dihapus." });
+  })
+);
+
+// ─── Meeting Notes ────────────────────────────────────────────────────────────
+
+let ensureMeetingNotesTablesPromise = null;
+
+async function ensureMeetingNotesTables() {
+  if (!ensureMeetingNotesTablesPromise) {
+    ensureMeetingNotesTablesPromise = (async () => {
+      await query(`
+        CREATE TABLE IF NOT EXISTS research_meeting_notes (
+          id                TEXT PRIMARY KEY,
+          project_id        TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+          title             TEXT NOT NULL,
+          meeting_date      DATE NOT NULL,
+          location          TEXT,
+          agenda            TEXT,
+          content           TEXT NOT NULL,
+          decisions         TEXT,
+          next_meeting_date DATE,
+          created_by        TEXT REFERENCES users(id) ON DELETE SET NULL,
+          created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await query(`
+        CREATE TABLE IF NOT EXISTS research_meeting_attendees (
+          id         BIGSERIAL PRIMARY KEY,
+          meeting_id TEXT NOT NULL REFERENCES research_meeting_notes(id) ON DELETE CASCADE,
+          user_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
+          name       TEXT NOT NULL,
+          role_label TEXT,
+          attended   BOOLEAN NOT NULL DEFAULT TRUE
+        )
+      `);
+    })().catch((err) => {
+      ensureMeetingNotesTablesPromise = null;
+      throw err;
+    });
+  }
+  return ensureMeetingNotesTablesPromise;
+}
+
+async function fetchMeetings(projectId, meetingId) {
+  const params = [projectId];
+  const meetingFilter = meetingId ? "AND m.id = $2" : "";
+  if (meetingId) params.push(meetingId);
+
+  const result = await query(
+    `
+    SELECT
+      m.id,
+      m.title,
+      m.meeting_date,
+      m.location,
+      m.agenda,
+      m.content,
+      m.decisions,
+      m.next_meeting_date,
+      m.created_by,
+      m.created_at,
+      m.updated_at,
+      COALESCE(
+        JSON_AGG(
+          JSON_BUILD_OBJECT(
+            'id',        a.id,
+            'userId',    a.user_id,
+            'name',      a.name,
+            'roleLabel', a.role_label,
+            'attended',  a.attended
+          ) ORDER BY a.id
+        ) FILTER (WHERE a.id IS NOT NULL),
+        '[]'::json
+      ) AS attendees,
+      COUNT(a.id) FILTER (WHERE a.id IS NOT NULL)::int AS attendee_count
+    FROM research_meeting_notes m
+    LEFT JOIN research_meeting_attendees a ON a.meeting_id = m.id
+    WHERE m.project_id = $1 ${meetingFilter}
+    GROUP BY m.id
+    ORDER BY m.meeting_date DESC, m.created_at DESC
+    `,
+    params
+  );
+
+  return result.rows.map((m) => ({
+    id: m.id,
+    title: m.title,
+    meetingDate: m.meeting_date,
+    location: m.location,
+    agenda: m.agenda,
+    content: m.content,
+    decisions: m.decisions,
+    nextMeetingDate: m.next_meeting_date,
+    createdBy: m.created_by,
+    createdAt: m.created_at,
+    updatedAt: m.updated_at,
+    attendees: m.attendees,
+    attendeeCount: m.attendee_count
+  }));
+}
+
+async function upsertAttendees(meetingId, attendees) {
+  if (!Array.isArray(attendees) || attendees.length === 0) return;
+  await query("DELETE FROM research_meeting_attendees WHERE meeting_id = $1", [meetingId]);
+  for (const a of attendees) {
+    const name = String(a.name || "").trim();
+    if (!name) continue;
+    await query(
+      `INSERT INTO research_meeting_attendees (meeting_id, user_id, name, role_label, attended)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [meetingId, a.userId || null, name, a.roleLabel ? String(a.roleLabel).trim() : null, a.attended !== false]
+    );
+  }
+}
+
+router.get(
+  "/:id/meetings",
+  asyncHandler(async (req, res) => {
+    await ensureMeetingNotesTables();
+    const role = extractRole(req);
+    const userId = resolveRequesterUserId(req);
+    const allowed = await hasProjectAccess({ userId, role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak melihat notulensi riset ini." });
+    }
+    const meetings = await fetchMeetings(req.params.id, null);
+    res.json(meetings);
+  })
+);
+
+router.post(
+  "/:id/meetings",
+  asyncHandler(async (req, res) => {
+    await ensureMeetingNotesTables();
+    const role = extractRole(req);
+    const userId = resolveRequesterUserId(req);
+
+    if (!["operator", "dosen"].includes(role)) {
+      return res.status(403).json({ message: "Akses ditolak. Hanya operator atau dosen yang dapat membuat notulensi." });
+    }
+    const allowed = await hasProjectAccess({ userId, role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak membuat notulensi di riset ini." });
+    }
+
+    const { title, meetingDate, location, agenda, content, decisions, nextMeetingDate, attendees } = req.body;
+
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ message: "Judul notulensi wajib diisi." });
+    }
+    if (!meetingDate) {
+      return res.status(400).json({ message: "Tanggal rapat wajib diisi." });
+    }
+    if (!content || !String(content).trim()) {
+      return res.status(400).json({ message: "Isi notulensi wajib diisi." });
+    }
+
+    const id = buildEntityId("mtg");
+
+    await query(
+      `INSERT INTO research_meeting_notes
+         (id, project_id, title, meeting_date, location, agenda, content, decisions, next_meeting_date, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        id,
+        req.params.id,
+        String(title).trim(),
+        meetingDate,
+        toNullableText(location),
+        toNullableText(agenda),
+        String(content).trim(),
+        toNullableText(decisions),
+        nextMeetingDate || null,
+        userId || null
+      ]
+    );
+
+    if (Array.isArray(attendees) && attendees.length > 0) {
+      await upsertAttendees(id, attendees);
+    }
+
+    res.status(201).json({ message: "Notulensi berhasil dibuat.", id });
+  })
+);
+
+router.get(
+  "/:id/meetings/:meetingId",
+  asyncHandler(async (req, res) => {
+    await ensureMeetingNotesTables();
+    const role = extractRole(req);
+    const userId = resolveRequesterUserId(req);
+    const allowed = await hasProjectAccess({ userId, role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
+    const meetings = await fetchMeetings(req.params.id, req.params.meetingId);
+    if (meetings.length === 0) {
+      return res.status(404).json({ message: "Notulensi tidak ditemukan." });
+    }
+    res.json(meetings[0]);
+  })
+);
+
+router.patch(
+  "/:id/meetings/:meetingId",
+  asyncHandler(async (req, res) => {
+    await ensureMeetingNotesTables();
+    const role = extractRole(req);
+    const userId = resolveRequesterUserId(req);
+
+    if (!["operator", "dosen"].includes(role)) {
+      return res.status(403).json({ message: "Akses ditolak. Hanya operator atau dosen yang dapat mengedit notulensi." });
+    }
+    const allowed = await hasProjectAccess({ userId, role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak mengedit notulensi di riset ini." });
+    }
+
+    const existing = await query(
+      "SELECT id, created_by FROM research_meeting_notes WHERE project_id = $1 AND id = $2 LIMIT 1",
+      [req.params.id, req.params.meetingId]
+    );
+    if (existing.rowCount === 0) {
+      return res.status(404).json({ message: "Notulensi tidak ditemukan." });
+    }
+    if (role === "dosen" && existing.rows[0].created_by !== userId) {
+      return res.status(403).json({ message: "Dosen hanya dapat mengedit notulensi yang dibuat sendiri." });
+    }
+
+    const { title, meetingDate, location, agenda, content, decisions, nextMeetingDate, attendees } = req.body;
+
+    if (title !== undefined && !String(title).trim()) {
+      return res.status(400).json({ message: "Judul tidak boleh kosong." });
+    }
+    if (content !== undefined && !String(content).trim()) {
+      return res.status(400).json({ message: "Isi notulensi tidak boleh kosong." });
+    }
+
+    await query(
+      `UPDATE research_meeting_notes
+       SET title             = COALESCE($3, title),
+           meeting_date      = COALESCE($4, meeting_date),
+           location          = COALESCE($5, location),
+           agenda            = COALESCE($6, agenda),
+           content           = COALESCE($7, content),
+           decisions         = COALESCE($8, decisions),
+           next_meeting_date = COALESCE($9, next_meeting_date),
+           updated_at        = NOW()
+       WHERE project_id = $1 AND id = $2`,
+      [
+        req.params.id,
+        req.params.meetingId,
+        title !== undefined ? String(title).trim() : undefined,
+        meetingDate !== undefined ? (meetingDate || null) : undefined,
+        location !== undefined ? toNullableText(location) : undefined,
+        agenda !== undefined ? toNullableText(agenda) : undefined,
+        content !== undefined ? String(content).trim() : undefined,
+        decisions !== undefined ? toNullableText(decisions) : undefined,
+        nextMeetingDate !== undefined ? (nextMeetingDate || null) : undefined
+      ]
+    );
+
+    if (Array.isArray(attendees)) {
+      await upsertAttendees(req.params.meetingId, attendees);
+    }
+
+    res.json({ message: "Notulensi berhasil diperbarui." });
+  })
+);
+
+router.delete(
+  "/:id/meetings/:meetingId",
+  asyncHandler(async (req, res) => {
+    await ensureMeetingNotesTables();
+    const role = extractRole(req);
+
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Akses ditolak. Hanya operator yang dapat menghapus notulensi." });
+    }
+
+    const result = await query(
+      "DELETE FROM research_meeting_notes WHERE project_id = $1 AND id = $2 RETURNING id",
+      [req.params.id, req.params.meetingId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Notulensi tidak ditemukan." });
+    }
+
+    res.json({ message: "Notulensi berhasil dihapus." });
   })
 );
 
