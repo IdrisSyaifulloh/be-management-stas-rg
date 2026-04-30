@@ -39,9 +39,17 @@ router.get(
         date: null,
         lock_reason: null,
         reason: null,
+        reason_label: null,
+        reasonLabel: null,
+        reason_detail: null,
+        reasonDetail: null,
         message: null,
         locked_at: null,
-        lockedAt: null
+        lockedAt: null,
+        unlocked_at: null,
+        unlockedAt: null,
+        unlocked_by: null,
+        unlockedBy: null
       });
     }
 

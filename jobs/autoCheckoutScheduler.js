@@ -5,6 +5,7 @@ const {
   hasNotificationDispatch,
   recordNotificationDispatch
 } = require("../utils/notificationService");
+const { createCheckoutMissing22Locks } = require("../utils/studentAccessLocks");
 
 const TIMEZONE = "Asia/Jakarta";
 const ONE_MINUTE = 60 * 1000;
@@ -161,14 +162,30 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
            TO_CHAR(updated.attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
            updated.check_out_at,
            s.user_id AS recipient_user_id,
+           s.tipe AS student_type,
            s.nim,
-           u.name AS student_name
+           u.name AS student_name,
+           EXISTS (
+             SELECT 1
+             FROM leave_requests lr
+             WHERE lr.student_id = updated.student_id
+               AND lr.status = 'Disetujui'
+               AND updated.attendance_date BETWEEN lr.periode_start AND lr.periode_end
+           ) AS has_approved_leave
     FROM updated
     JOIN students s ON s.id = updated.student_id
     JOIN users u ON u.id = s.user_id
     `,
     [targetDate, checkoutTime, AUTO_REASON]
   );
+
+  const missingCheckoutMagangIds = result.rows
+    .filter((row) => row.student_type === "Magang" && row.has_approved_leave !== true)
+    .map((row) => row.student_id);
+  const accessLockIds = await createCheckoutMissing22Locks({
+    studentIds: missingCheckoutMagangIds,
+    date: targetDate
+  });
 
   const notifications = await notifyAutoCheckout({
     rows: result.rows,
@@ -178,6 +195,11 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
   return {
     processed: result.rowCount,
     rows: result.rows,
+    accessLocks: {
+      reason: "CHECKOUT_MISSING_22",
+      studentIds: missingCheckoutMagangIds,
+      ids: accessLockIds
+    },
     notifications
   };
 }

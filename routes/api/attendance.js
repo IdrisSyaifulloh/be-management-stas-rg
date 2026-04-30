@@ -18,7 +18,11 @@ const {
   maxIsoDate,
   minIsoDate
 } = require("../../utils/attendanceHistory");
-const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks");
+const {
+  createAttendanceAbsentLocks,
+  createCheckoutMissing22Locks,
+  createWorkHoursUnder8Locks
+} = require("../../utils/studentAccessLocks");
 const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
@@ -35,6 +39,8 @@ router.param("id", (req, res, next, value) => {
 const ATTENDANCE_TIMEZONE = "Asia/Jakarta";
 const ATTENDANCE_ABSENT_LOCK_AFTER = "10:00";
 const ATTENDANCE_CHECKIN_CUTOFF = "22:00";
+const ATTENDANCE_MISSING_CHECKOUT_LOCK_AFTER = "22:00";
+const ATTENDANCE_AUTO_CHECKOUT_REASON_22 = "AUTO_CHECKOUT_22_00";
 
 function getJakartaTimeHm(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -261,6 +267,22 @@ async function ensureStudentExists(studentId) {
 
   const result = await query("SELECT id FROM students WHERE id = $1 LIMIT 1", [resolvedStudentId]);
   return result.rows[0]?.id || null;
+}
+
+async function hasApprovedLeaveOnDate(studentId, dateIso) {
+  const result = await query(
+    `
+    SELECT id
+    FROM leave_requests
+    WHERE student_id = $1
+      AND status = 'Disetujui'
+      AND $2::date BETWEEN periode_start AND periode_end
+    LIMIT 1
+    `,
+    [studentId, dateIso]
+  );
+
+  return result.rowCount > 0;
 }
 
 function parseGpsNumber(value) {
@@ -629,10 +651,12 @@ router.post(
     const durationHours = roundHours(durationHoursValue);
     const requiredHours = attendanceRules.magangMinCheckoutHours;
 
-    const isEarlyMagangCheckout =
+    const isUnderMinMagangCheckout =
       student.tipe === "Magang" &&
-      attendanceRules.earlyCheckoutWarning === true &&
       durationHoursValue < requiredHours;
+    const isEarlyMagangCheckout =
+      isUnderMinMagangCheckout &&
+      attendanceRules.earlyCheckoutWarning === true;
 
     if (isEarlyMagangCheckout && !(forceEarlyCheckout === true && earlyCheckoutAcknowledged === true)) {
       return res.status(409).json({
@@ -662,6 +686,7 @@ router.post(
     );
 
     let operatorNotified = false;
+    let accessLockCreated = false;
 
     if (isEarlyMagangCheckout) {
       const notifiedCount = await notifyOperatorsAboutEarlyCheckout({
@@ -674,8 +699,22 @@ router.post(
       operatorNotified = notifiedCount > 0;
     }
 
+    if (isUnderMinMagangCheckout && !(await hasApprovedLeaveOnDate(resolvedStudentId, todayIso))) {
+      const createdLockIds = await createWorkHoursUnder8Locks({
+        studentIds: [resolvedStudentId],
+        date: todayIso
+      });
+      accessLockCreated = createdLockIds.length > 0;
+    }
+
     res.json({
       message: "Check-out berhasil.",
+      ...(isUnderMinMagangCheckout
+        ? {
+            accessLockCreated,
+            accessLockReason: "WORK_HOURS_UNDER_8"
+          }
+        : {}),
       ...(isEarlyMagangCheckout
         ? {
             earlyCheckoutWarning: true,
@@ -1009,10 +1048,14 @@ router.get(
     const todayIso = getJakartaDateIso();
     const currentTime = getJakartaTimeHm();
     const lockWindowOpen = canCreateAttendanceAbsentLock();
+    const missingCheckoutWindowOpen = currentTime >= ATTENDANCE_MISSING_CHECKOUT_LOCK_AFTER;
+    const settings = await getSettingsAsync();
+    const attendanceRules = getAttendanceRules(settings);
+    const magangMinCheckoutHours = attendanceRules.magangMinCheckoutHours;
 
     const studentsResult = await query(
       `
-      SELECT s.id
+      SELECT s.id, s.tipe
       FROM students s
       JOIN users u ON u.id = s.user_id
       WHERE u.is_active = TRUE
@@ -1021,7 +1064,12 @@ router.get(
 
     const attendanceResult = await query(
       `
-      SELECT student_id, status
+      SELECT student_id, status, check_in_at, check_out_at, auto_checkout_reason,
+             CASE
+               WHEN check_in_at IS NOT NULL AND check_out_at IS NOT NULL
+               THEN EXTRACT(EPOCH FROM (check_out_at - check_in_at)) / 3600.0
+               ELSE NULL
+             END AS duration_hours
       FROM attendance_records
       WHERE attendance_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date
       `
@@ -1040,6 +1088,7 @@ router.get(
     );
 
     const allStudentIds = studentsResult.rows.map((row) => row.id);
+    const studentsById = new Map(studentsResult.rows.map((row) => [row.id, row]));
     const leaveSet = new Set(leavesResult.rows.map((row) => row.student_id));
 
     const leaveTypesByStudentId = {};
@@ -1047,19 +1096,47 @@ router.get(
       leaveTypesByStudentId[row.student_id] = normalizeLeaveType(row.jenis_pengajuan);
     }
 
-    const attendanceMap = new Map(attendanceResult.rows.map((row) => [row.student_id, row.status]));
+    const attendanceMap = new Map(attendanceResult.rows.map((row) => [row.student_id, row]));
 
     const presentIds = [];
     const leaveIds = [];
     const absentIds = [];
     const noInformationIds = [];
     const reportedAbsentIds = [];
+    const magangUnderHoursIds = [];
+    const magangMissingCheckoutIds = [];
 
     allStudentIds.forEach((studentId) => {
-      const status = attendanceMap.get(studentId);
+      const student = studentsById.get(studentId);
+      const attendance = attendanceMap.get(studentId);
+      const status = attendance?.status;
 
       if (status === "Hadir") {
         presentIds.push(studentId);
+
+        if (student?.tipe === "Magang" && !leaveSet.has(studentId)) {
+          const durationHours =
+            attendance.duration_hours == null ? null : Number(attendance.duration_hours);
+
+          if (
+            attendance.check_in_at &&
+            attendance.check_out_at &&
+            attendance.auto_checkout_reason !== ATTENDANCE_AUTO_CHECKOUT_REASON_22 &&
+            Number.isFinite(durationHours) &&
+            durationHours < magangMinCheckoutHours
+          ) {
+            magangUnderHoursIds.push(studentId);
+          }
+
+          if (
+            missingCheckoutWindowOpen &&
+            attendance.check_in_at &&
+            (!attendance.check_out_at || attendance.auto_checkout_reason === ATTENDANCE_AUTO_CHECKOUT_REASON_22)
+          ) {
+            magangMissingCheckoutIds.push(studentId);
+          }
+        }
+
         return;
       }
 
@@ -1106,18 +1183,42 @@ router.get(
       });
     }
 
+    const magangUnderHoursLockIds =
+      magangUnderHoursIds.length > 0
+        ? await createWorkHoursUnder8Locks({
+            studentIds: magangUnderHoursIds,
+            date: todayIso
+          })
+        : [];
+    const magangMissingCheckoutLockIds =
+      magangMissingCheckoutIds.length > 0
+        ? await createCheckoutMissing22Locks({
+            studentIds: magangMissingCheckoutIds,
+            date: todayIso
+          })
+        : [];
+    const magangLockedIds = [...new Set([...magangUnderHoursIds, ...magangMissingCheckoutIds])];
+
     res.json({
       date: todayIso,
       timezone: ATTENDANCE_TIMEZONE,
       currentTime,
       lockVisibleAfter: ATTENDANCE_ABSENT_LOCK_AFTER,
+      magangMinCheckoutHours,
+      missingCheckoutLockAfter: ATTENDANCE_MISSING_CHECKOUT_LOCK_AFTER,
       lockWindowOpen,
+      missingCheckoutWindowOpen,
       presentIds,
       leaveIds,
       leaveTypesByStudentId,
       absentIds,
       reportedAbsentIds,
-      noInformationIds
+      noInformationIds,
+      magangUnderHoursIds,
+      magangMissingCheckoutIds,
+      magangLockedIds,
+      magangUnderHoursLockIds,
+      magangMissingCheckoutLockIds
     });
   })
 );

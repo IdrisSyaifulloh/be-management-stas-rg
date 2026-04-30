@@ -2,6 +2,23 @@ const { query } = require("../db/pool");
 const { resolveStudentRecord } = require("./studentResolver");
 
 const ACCESS_LOCK_REASON_ATTENDANCE_ABSENT = "ATTENDANCE_ABSENT";
+const ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8 = "WORK_HOURS_UNDER_8";
+const ACCESS_LOCK_REASON_CHECKOUT_MISSING_22 = "CHECKOUT_MISSING_22";
+
+const ACCESS_LOCK_REASON_DETAILS = {
+  [ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]: {
+    label: "Belum Ada Informasi Absensi",
+    message: "Akses dikunci karena belum ada informasi absensi setelah pukul 10.00 WIB."
+  },
+  [ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8]: {
+    label: "Jam Kerja Magang Kurang dari 8 Jam",
+    message: "Akses dikunci karena durasi kerja Magang hari ini kurang dari 8 jam."
+  },
+  [ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]: {
+    label: "Belum Checkout Sampai 22.00 WIB",
+    message: "Akses dikunci karena belum checkout sampai pukul 22.00 WIB."
+  }
+};
 
 let ensureTablePromise = null;
 
@@ -38,6 +55,13 @@ function buildLockId(studentId, date, reason) {
   return `SAL-${date}-${reason}-${studentId}`.replace(/[^a-zA-Z0-9-_]/g, "-");
 }
 
+function getLockReasonDetail(reason) {
+  return ACCESS_LOCK_REASON_DETAILS[reason] || {
+    label: reason || "Access Lock",
+    message: "Akses website dikunci. Hubungi operator."
+  };
+}
+
 function mapAccessLockRow(row) {
   if (!row) {
     return {
@@ -55,13 +79,22 @@ function mapAccessLockRow(row) {
       date: null,
       lock_reason: null,
       reason: null,
+      reason_label: null,
+      reasonLabel: null,
+      reason_detail: null,
+      reasonDetail: null,
       message: null,
       locked_at: null,
-      lockedAt: null
+      lockedAt: null,
+      unlocked_at: null,
+      unlockedAt: null,
+      unlocked_by: null,
+      unlockedBy: null
     };
   }
 
   const locked = row.locked === true && row.active === true && row.status === "LOCKED";
+  const reasonDetail = getLockReasonDetail(row.reason);
   return {
     id: row.id,
     student_id: row.student_id,
@@ -76,6 +109,10 @@ function mapAccessLockRow(row) {
     date: row.lock_date_text || row.lock_date,
     lock_reason: row.reason,
     reason: row.reason,
+    reason_label: reasonDetail.label,
+    reasonLabel: reasonDetail.label,
+    reason_detail: reasonDetail.message,
+    reasonDetail: reasonDetail.message,
     status: row.status,
     locked,
     active: row.active === true,
@@ -85,32 +122,65 @@ function mapAccessLockRow(row) {
     unlockedAt: row.unlocked_at || null,
     unlocked_by: row.unlocked_by || null,
     unlockedBy: row.unlocked_by || null,
-    message: locked ? "Akses dikunci karena terdeteksi tidak hadir. Hubungi operator." : null
+    message: locked ? reasonDetail.message : null
   };
 }
 
-async function createAttendanceAbsentLocks({ studentIds, date }) {
+async function createStudentAccessLocks({ studentIds, date, reason }) {
   await ensureStudentAccessLockTable();
   const uniqueStudentIds = [...new Set((studentIds || []).filter(Boolean))];
   const created = [];
 
   for (const studentId of uniqueStudentIds) {
-    const id = buildLockId(studentId, date, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT);
+    const id = buildLockId(studentId, date, reason);
     const result = await query(
       `
       INSERT INTO student_access_locks (
         id, student_id, lock_date, reason, status, locked, active, locked_at
       )
-      VALUES ($1, $2, $3::date, $4, 'LOCKED', TRUE, TRUE, NOW())
+      SELECT $1, $2, $3::date, $4, 'LOCKED', TRUE, TRUE, NOW()
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM student_access_locks existing
+        WHERE existing.student_id = $2
+          AND existing.lock_date = $3::date
+          AND existing.active = TRUE
+          AND existing.locked = TRUE
+          AND existing.status = 'LOCKED'
+      )
       ON CONFLICT (student_id, lock_date, reason) DO NOTHING
       RETURNING id
       `,
-      [id, studentId, date, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]
+      [id, studentId, date, reason]
     );
     if (result.rowCount > 0) created.push(result.rows[0].id);
   }
 
   return created;
+}
+
+async function createAttendanceAbsentLocks({ studentIds, date }) {
+  return createStudentAccessLocks({
+    studentIds,
+    date,
+    reason: ACCESS_LOCK_REASON_ATTENDANCE_ABSENT
+  });
+}
+
+async function createWorkHoursUnder8Locks({ studentIds, date }) {
+  return createStudentAccessLocks({
+    studentIds,
+    date,
+    reason: ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8
+  });
+}
+
+async function createCheckoutMissing22Locks({ studentIds, date }) {
+  return createStudentAccessLocks({
+    studentIds,
+    date,
+    reason: ACCESS_LOCK_REASON_CHECKOUT_MISSING_22
+  });
 }
 
 async function getActiveLockForStudent(studentIdOrUserId) {
@@ -205,12 +275,16 @@ async function studentAccessLockMiddleware(req, res, next) {
   try {
     const lock = await getActiveLockForStudent(req.authUser.id);
     if (!lock) return next();
+    const mappedLock = mapAccessLockRow(lock);
 
     return res.status(423).json({
-      message: "Akses dikunci karena terdeteksi tidak hadir. Hubungi operator.",
+      message: mappedLock.message,
       accessLocked: true,
-      reason: lock.reason,
-      date: lock.lock_date_text || lock.lock_date
+      reason: mappedLock.reason,
+      reasonLabel: mappedLock.reasonLabel,
+      reasonDetail: mappedLock.reasonDetail,
+      date: mappedLock.date,
+      lock: mappedLock
     });
   } catch (error) {
     return next(error);
@@ -219,9 +293,16 @@ async function studentAccessLockMiddleware(req, res, next) {
 
 module.exports = {
   ACCESS_LOCK_REASON_ATTENDANCE_ABSENT,
+  ACCESS_LOCK_REASON_CHECKOUT_MISSING_22,
+  ACCESS_LOCK_REASON_DETAILS,
+  ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
+  createCheckoutMissing22Locks,
   createAttendanceAbsentLocks,
+  createStudentAccessLocks,
+  createWorkHoursUnder8Locks,
   ensureStudentAccessLockTable,
   getActiveLockForStudent,
+  getLockReasonDetail,
   listAccessLocks,
   mapAccessLockRow,
   studentAccessLockMiddleware,
