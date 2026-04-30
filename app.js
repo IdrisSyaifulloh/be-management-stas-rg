@@ -187,24 +187,11 @@ app.use(async function (req, res, next) {
     }
   }
 
-  // Legacy header-based auth for backward compatibility
-  var role = req.headers["x-user-role"];
-  var id = req.headers["x-user-id"];
-
-  if (
-    hasControlChars(req.headers["x-user-id"]) ||
-    hasControlChars(req.headers["x-user-role"])
-  ) {
-    return res.status(400).json({ message: "Input tidak valid." });
-  }
-
-  if (role && id) {
-    req.authUser = {
-      id: String(id),
-      role: String(role)
-    };
-  }
-
+  // Tidak ada JWT cookie / Bearer token yang valid.
+  // Header `x-user-role` / `x-user-id` dari client TIDAK boleh dipercaya
+  // karena bisa dimanipulasi (privilege escalation).
+  // Lanjutkan tanpa req.authUser — route guard akan menolak request
+  // ke endpoint yang butuh autentikasi (403 dari requireRoleStrict).
   next();
 });
 

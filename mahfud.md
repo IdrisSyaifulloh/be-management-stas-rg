@@ -61,6 +61,34 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 }
 ```
 
+### GET `/auth/me`
+- Deskripsi: ambil identitas user saat ini berdasarkan JWT yang sudah diverifikasi.
+- Wajib autentikasi (cookie `accessToken` httpOnly atau header `Authorization: Bearer ...`).
+- Response sukses (`200`):
+```json
+{
+  "user": {
+    "id": "U001",
+    "name": "Nama User",
+    "initials": "NU",
+    "role": "mahasiswa",
+    "prodi": "Teknik Informatika",
+    "tipe": "Magang"
+  }
+}
+```
+- Response gagal:
+  - `401`: tidak terautentikasi / sesi tidak valid / akun tidak aktif.
+- Catatan: gunakan endpoint ini di frontend untuk memverifikasi sesi saat aplikasi dimuat.
+  **JANGAN** mempercayai role yang tersimpan di `localStorage` — selalu verifikasi via `/auth/me`.
+
+> **PENTING (Security):**
+> Mulai versi ini, backend **TIDAK lagi mempercayai** header `x-user-role` atau `x-user-id` dari client.
+> Role hanya diambil dari JWT yang sudah diverifikasi server. Tidak ada lagi fallback ke header / query / body.
+
+### POST `/auth/logout`
+- Deskripsi: revoke sesi & clear cookie.
+
 ## 3) Students
 
 ### GET `/students`

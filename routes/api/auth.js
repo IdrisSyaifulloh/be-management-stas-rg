@@ -136,6 +136,45 @@ router.post(
   })
 );
 
+router.get(
+  "/me",
+  asyncHandler(async (req, res) => {
+    if (!req.authUser?.id) {
+      return res.status(401).json({ message: "Tidak terautentikasi." });
+    }
+
+    const result = await query(
+      `
+      SELECT u.id, u.name, u.initials, u.role, u.prodi, u.is_active,
+             s.tipe AS student_tipe,
+             s.status AS student_status
+      FROM users u
+      LEFT JOIN students s ON s.user_id = u.id
+      WHERE u.id = $1
+      LIMIT 1
+      `,
+      [req.authUser.id]
+    );
+
+    if (result.rowCount === 0 || result.rows[0].is_active === false) {
+      return res.status(401).json({ message: "Sesi tidak valid." });
+    }
+
+    const user = result.rows[0];
+
+    return res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        initials: user.initials,
+        role: user.role,
+        prodi: user.prodi,
+        tipe: user.role === "mahasiswa" ? user.student_tipe : undefined
+      }
+    });
+  })
+);
+
 router.post(
   "/logout",
   asyncHandler(async (req, res) => {

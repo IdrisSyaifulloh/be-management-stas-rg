@@ -3,10 +3,12 @@ function normalizeRole(value) {
 }
 
 function extractRole(req) {
+  // Role HANYA boleh diambil dari JWT yang sudah diverifikasi (req.authUser).
+  // Tidak ada fallback ke header / query / body karena bisa dimanipulasi client.
   if (req?.authUser?.role) {
     return normalizeRole(req.authUser.role);
   }
-  return normalizeRole(req.headers["x-user-role"] || req.query.role || req.body?.role);
+  return "";
 }
 
 function requireRoleSoft(allowedRoles) {
