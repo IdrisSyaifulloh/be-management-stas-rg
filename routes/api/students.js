@@ -12,6 +12,7 @@ const {
 
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
+let ensureStudentPeriodsPromise = null;
 
 async function ensureStudentColumns() {
   if (!ensureStudentColumnsPromise) {
@@ -31,6 +32,26 @@ async function ensureStudentColumns() {
   }
 
   await ensureStudentColumnsPromise;
+}
+
+async function ensureStudentPeriodsTable() {
+  if (!ensureStudentPeriodsPromise) {
+    ensureStudentPeriodsPromise = query(`
+      CREATE TABLE IF NOT EXISTS student_periods (
+        id          TEXT PRIMARY KEY,
+        student_id  TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        tipe        TEXT NOT NULL CHECK (tipe IN ('Riset', 'Magang')),
+        mulai       DATE NOT NULL,
+        selesai     DATE,
+        keterangan  TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_student_periods_student
+        ON student_periods(student_id, mulai ASC);
+    `);
+  }
+  await ensureStudentPeriodsPromise;
 }
 
 function hasOwn(object, key) {
@@ -610,6 +631,179 @@ router.delete(
     }
 
     return res.json({ message: "Mahasiswa berhasil dihapus." });
+  })
+);
+
+// ──────────────────────────────────────────────────────────────
+// Student Periods (riwayat keanggotaan per tipe)
+// ──────────────────────────────────────────────────────────────
+
+router.get(
+  "/:id/periods",
+  asyncHandler(async (req, res) => {
+    const studentId = requireSafeId(req.params.id);
+    await ensureStudentPeriodsTable();
+
+    const check = await query("SELECT id FROM students WHERE id = $1", [studentId]);
+    if (check.rowCount === 0) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const result = await query(
+      `
+      SELECT
+        id,
+        student_id,
+        tipe,
+        TO_CHAR(mulai,   'YYYY-MM-DD') AS mulai,
+        TO_CHAR(selesai, 'YYYY-MM-DD') AS selesai,
+        keterangan,
+        created_at,
+        updated_at
+      FROM student_periods
+      WHERE student_id = $1
+      ORDER BY mulai ASC, created_at ASC
+      `,
+      [studentId]
+    );
+
+    res.json(result.rows);
+  })
+);
+
+router.post(
+  "/:id/periods",
+  asyncHandler(async (req, res) => {
+    const studentId = requireSafeId(req.params.id);
+    await ensureStudentPeriodsTable();
+
+    const { tipe, mulai, selesai, keterangan } = req.body;
+
+    if (!tipe || !mulai) {
+      return res.status(400).json({ message: "tipe dan mulai wajib diisi." });
+    }
+
+    if (!["Riset", "Magang"].includes(tipe)) {
+      return res.status(400).json({ message: "tipe harus 'Riset' atau 'Magang'." });
+    }
+
+    const normalizedMulai = normalizeOptionalDate(mulai);
+    const normalizedSelesai = selesai ? normalizeOptionalDate(selesai) : null;
+
+    const check = await query("SELECT id FROM students WHERE id = $1", [studentId]);
+    if (check.rowCount === 0) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const timestamp = Date.now();
+    const suffix = Math.floor(Math.random() * 1000).toString().padStart(3, "0");
+    const periodId = `per_${timestamp}${suffix}`;
+
+    const result = await query(
+      `
+      INSERT INTO student_periods (id, student_id, tipe, mulai, selesai, keterangan)
+      VALUES ($1, $2, $3, $4::date, $5::date, $6)
+      RETURNING
+        id, student_id, tipe,
+        TO_CHAR(mulai,   'YYYY-MM-DD') AS mulai,
+        TO_CHAR(selesai, 'YYYY-MM-DD') AS selesai,
+        keterangan, created_at
+      `,
+      [periodId, studentId, tipe, normalizedMulai, normalizedSelesai, keterangan || null]
+    );
+
+    res.status(201).json({
+      message: "Periode berhasil ditambahkan.",
+      data: result.rows[0]
+    });
+  })
+);
+
+router.patch(
+  "/:id/periods/:periodId",
+  asyncHandler(async (req, res) => {
+    const studentId = requireSafeId(req.params.id);
+    const periodId  = requireSafeId(req.params.periodId);
+    await ensureStudentPeriodsTable();
+
+    const { tipe, mulai, selesai, keterangan } = req.body;
+
+    if (tipe !== undefined && !["Riset", "Magang"].includes(tipe)) {
+      return res.status(400).json({ message: "tipe harus 'Riset' atau 'Magang'." });
+    }
+
+    const sets   = [];
+    const params = [periodId, studentId];
+
+    if (tipe !== undefined) {
+      params.push(tipe);
+      sets.push(`tipe = $${params.length}`);
+    }
+
+    if (hasOwn(req.body, "mulai")) {
+      if (!mulai) return res.status(400).json({ message: "mulai tidak boleh kosong." });
+      params.push(normalizeOptionalDate(mulai));
+      sets.push(`mulai = $${params.length}::date`);
+    }
+
+    if (hasOwn(req.body, "selesai")) {
+      params.push(selesai ? normalizeOptionalDate(selesai) : null);
+      sets.push(`selesai = $${params.length}::date`);
+    }
+
+    if (hasOwn(req.body, "keterangan")) {
+      params.push(keterangan || null);
+      sets.push(`keterangan = $${params.length}`);
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ message: "Tidak ada field yang diperbarui." });
+    }
+
+    sets.push("updated_at = NOW()");
+
+    const result = await query(
+      `
+      UPDATE student_periods
+      SET ${sets.join(", ")}
+      WHERE id = $1 AND student_id = $2
+      RETURNING
+        id, student_id, tipe,
+        TO_CHAR(mulai,   'YYYY-MM-DD') AS mulai,
+        TO_CHAR(selesai, 'YYYY-MM-DD') AS selesai,
+        keterangan, updated_at
+      `,
+      params
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Periode tidak ditemukan." });
+    }
+
+    res.json({
+      message: "Periode berhasil diperbarui.",
+      data: result.rows[0]
+    });
+  })
+);
+
+router.delete(
+  "/:id/periods/:periodId",
+  asyncHandler(async (req, res) => {
+    const studentId = requireSafeId(req.params.id);
+    const periodId  = requireSafeId(req.params.periodId);
+    await ensureStudentPeriodsTable();
+
+    const result = await query(
+      "DELETE FROM student_periods WHERE id = $1 AND student_id = $2 RETURNING id",
+      [periodId, studentId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Periode tidak ditemukan." });
+    }
+
+    res.json({ message: "Periode berhasil dihapus." });
   })
 );
 

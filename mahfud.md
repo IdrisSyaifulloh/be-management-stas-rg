@@ -82,6 +82,52 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 ### DELETE `/students/:id`
 - Deskripsi: hapus mahasiswa (dan data user terkait).
 
+### GET `/students/:id/periods`
+- Deskripsi: ambil semua periode keanggotaan mahasiswa (Riset / Magang).
+- Response: array periode, diurutkan dari yang paling awal.
+- Contoh item:
+```json
+{
+  "id": "per_1234567890123001",
+  "student_id": "stu_...",
+  "tipe": "Magang",
+  "mulai": "2025-01-01",
+  "selesai": "2025-06-30",
+  "keterangan": "Batch 2025 Genap",
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+### POST `/students/:id/periods`
+- Deskripsi: tambah periode keanggotaan baru untuk mahasiswa.
+- Body wajib:
+  - `tipe`: `"Riset"` | `"Magang"`
+  - `mulai`: tanggal mulai format `YYYY-MM-DD`
+- Body opsional:
+  - `selesai`: tanggal selesai format `YYYY-MM-DD` (kosong = masih aktif)
+  - `keterangan`: catatan bebas
+- Response `201`:
+```json
+{
+  "message": "Periode berhasil ditambahkan.",
+  "data": { ... }
+}
+```
+
+### PATCH `/students/:id/periods/:periodId`
+- Deskripsi: update periode (misal: isi tanggal selesai saat periode berakhir).
+- Body opsional (minimal 1 field):
+  - `tipe`, `mulai`, `selesai`, `keterangan`
+  - Kirim `"selesai": null` untuk menghapus tanggal selesai (jadikan aktif lagi).
+
+### DELETE `/students/:id/periods/:periodId`
+- Deskripsi: hapus satu periode keanggotaan.
+
+> **Auto-alumni:** Scheduler harian (`autoAlumniScheduler`) secara otomatis mengubah
+> `students.status` menjadi `'Alumni'` jika semua periode mahasiswa sudah memiliki
+> `selesai` dan tanggal tersebut sudah terlewati.
+
 ## 4) Lecturers
 
 ### GET `/lecturers`

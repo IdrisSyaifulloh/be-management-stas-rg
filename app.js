@@ -185,6 +185,9 @@ notificationReminderJob.startMonitoring();
 var autoCheckoutJob = require("./jobs/autoCheckoutScheduler");
 autoCheckoutJob.startMonitoring();
 
+var autoAlumniJob = require("./jobs/autoAlumniScheduler");
+autoAlumniJob.startMonitoring();
+
 // ======================================================
 // ROUTES
 // ======================================================
