@@ -34,6 +34,7 @@ router.param("id", (req, res, next, value) => {
 
 const ATTENDANCE_TIMEZONE = "Asia/Jakarta";
 const ATTENDANCE_ABSENT_LOCK_AFTER = "10:00";
+const ATTENDANCE_CHECKIN_CUTOFF = "22:00";
 
 function getJakartaTimeHm(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -49,11 +50,17 @@ function getJakartaTimeHm(date = new Date()) {
     return acc;
   }, {});
 
-  return `${parts.hour}:${parts.minute}`;
+  const hour = parts.hour === "24" ? "00" : parts.hour;
+
+  return `${hour}:${parts.minute}`;
 }
 
 function canCreateAttendanceAbsentLock(date = new Date()) {
   return getJakartaTimeHm(date) >= ATTENDANCE_ABSENT_LOCK_AFTER;
+}
+
+function isCheckInAfterCutoff(date = new Date()) {
+  return getJakartaTimeHm(date) >= ATTENDANCE_CHECKIN_CUTOFF;
 }
 
 let ensureAttendanceColumnsPromise = null;
@@ -370,6 +377,13 @@ router.post(
 
     if (!["mahasiswa", "operator"].includes(role)) {
       return res.status(403).json({ message: "Role tidak diizinkan melakukan check-in." });
+    }
+
+    if (isCheckInAfterCutoff()) {
+      return res.status(400).json({
+        message: "Check-in tidak diizinkan setelah pukul 22.00 WIB.",
+        code: "CHECKIN_AFTER_CUTOFF"
+      });
     }
 
     const { studentId, latitude, longitude, accuracy } = req.body || {};

@@ -13,6 +13,29 @@ const loginSchema = z.object({
   password: z.string().min(6).max(200)
 });
 
+function getAuthCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: env.nodeEnv === "production",
+    sameSite: "strict",
+    path: "/"
+  };
+}
+
+function clearAuthCookies(res) {
+  const cookieOptions = getAuthCookieOptions();
+
+  res.cookie("accessToken", "", {
+    ...cookieOptions,
+    maxAge: 0
+  });
+
+  res.cookie("sessionId", "", {
+    ...cookieOptions,
+    maxAge: 0
+  });
+}
+
 router.post(
   "/login",
   asyncHandler(async (req, res) => {
@@ -78,9 +101,7 @@ router.post(
 
     // Set httpOnly cookie (secure, not accessible via JavaScript/console)
     res.cookie("accessToken", token, {
-      httpOnly: true,
-      secure: env.nodeEnv === "production",  // HTTPS only in production
-      sameSite: "strict",
+      ...getAuthCookieOptions(),
       maxAge: 7 * 24 * 60 * 60 * 1000  // 7 days in milliseconds
     });
 
@@ -100,14 +121,9 @@ router.post(
 router.post(
   "/logout",
   asyncHandler(async (req, res) => {
-    // Clear httpOnly cookie
-    res.clearCookie("accessToken", {
-      httpOnly: true,
-      secure: env.nodeEnv === "production",
-      sameSite: "strict"
-    });
+    clearAuthCookies(res);
 
-    return res.json({ message: "Logout berhasil." });
+    return res.json({ message: "Logged out" });
   })
 );
 
