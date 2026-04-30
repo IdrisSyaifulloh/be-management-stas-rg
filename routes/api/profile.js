@@ -431,24 +431,41 @@ router.put(
     const userId = requireSafeId(req.params.userId, "userId");
     const { newPassword } = req.body || {};
 
-    if (!newPassword) {
+    const requester = req.authUser;
+    if (!requester) {
+      return res.status(401).json({ message: "Autentikasi diperlukan." });
+    }
+
+    const isOperator = requester.role === "operator";
+    const isSelf = requester.id === userId;
+
+    if (!isOperator && !isSelf) {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
+
+    if (!newPassword || String(newPassword).length < 6) {
       return res.status(400).json({
-        message: "Password baru wajib diisi."
+        message: "Password baru wajib diisi dan minimal 6 karakter."
       });
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
 
-    await query(
+    const result = await query(
       `
       UPDATE users
-      SET 
+      SET
         password_hash = $2,
         updated_at = NOW()
       WHERE id = $1
+      RETURNING id
       `,
       [userId, passwordHash]
     );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Pengguna tidak ditemukan." });
+    }
 
     res.json({
       message: "Password berhasil diperbarui."

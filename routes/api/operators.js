@@ -115,7 +115,6 @@ router.post(
   asyncHandler(async (req, res) => {
     if (!requireOperator(req, res)) return;
     await ensureOperatorColumns();
-    const operatorId = requireSafeId(req.params.id, "id");
 
     const {
       name,
@@ -171,6 +170,7 @@ router.put(
   asyncHandler(async (req, res) => {
     if (!requireOperator(req, res)) return;
     await ensureOperatorColumns();
+    const operatorId = requireSafeId(req.params.id, "id");
 
     const body = req.body || {};
     const normalizedStatus = Object.prototype.hasOwnProperty.call(body, "status")
