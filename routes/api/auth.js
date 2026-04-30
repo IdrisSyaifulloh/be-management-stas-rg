@@ -5,6 +5,12 @@ const { z } = require("zod");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const env = require("../../config/env");
+const {
+  createJwtSession,
+  generateSessionId,
+  getJwtSessionExpiresAt,
+  revokeJwtSession
+} = require("../../utils/jwtSessionStore");
 
 const router = express.Router();
 
@@ -89,15 +95,27 @@ router.post(
       return res.status(401).json({ message: "Password salah." });
     }
 
+    const sessionId = generateSessionId();
+    const expiresAt = getJwtSessionExpiresAt();
     const token = jwt.sign(
       {
         id: user.id,
         role: user.role,
-        name: user.name
+        name: user.name,
+        jti: sessionId
       },
       env.jwtSecret,
       { expiresIn: "7d" }
     );
+
+    await createJwtSession({
+      id: sessionId,
+      userId: user.id,
+      token,
+      expiresAt,
+      userAgent: req.get("user-agent") || null,
+      ip: req.ip || null
+    });
 
     // Set httpOnly cookie (secure, not accessible via JavaScript/console)
     res.cookie("accessToken", token, {
@@ -121,6 +139,18 @@ router.post(
 router.post(
   "/logout",
   asyncHandler(async (req, res) => {
+    const token =
+      (req.cookies && req.cookies.accessToken) ||
+      (String(req.headers.authorization || "").startsWith("Bearer ")
+        ? String(req.headers.authorization).slice(7)
+        : null);
+
+    await revokeJwtSession({
+      id: req.authSessionId || null,
+      userId: req.authUser?.id || null,
+      token
+    });
+
     clearAuthCookies(res);
 
     return res.json({ message: "Logged out" });

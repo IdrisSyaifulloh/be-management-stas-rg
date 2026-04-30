@@ -15,6 +15,18 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS jwt_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  user_agent TEXT,
+  ip TEXT,
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ,
+  last_seen_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS students (
   id TEXT PRIMARY KEY,
   user_id TEXT UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -433,5 +445,7 @@ CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_student ON withdrawal_request
 CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_advisor ON withdrawal_requests(advisor_id);
 CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_final_status ON withdrawal_requests(final_status);
 CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_submitted ON withdrawal_requests(submitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jwt_sessions_user_active ON jwt_sessions(user_id, expires_at DESC) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_at);
 
 COMMIT;

@@ -13,6 +13,7 @@ var usersRouter = require("./routes/users");
 var apiRouter = require("./routes/api");
 var { studentAccessLockMiddleware } = require("./utils/studentAccessLocks");
 var { hasControlChars } = require("./utils/securityValidation");
+var { verifyJwtSession } = require("./utils/jwtSessionStore");
 
 var envValidationResult = validateEnv();
 
@@ -76,9 +77,34 @@ app.use(express.static(path.join(__dirname, "public")));
 // ======================================================
 // JWT AUTH MIDDLEWARE
 // ======================================================
-app.use(function (req, res, next) {
+function clearAuthCookieResponse(res) {
+  res.cookie("accessToken", "", {
+    httpOnly: true,
+    secure: env.nodeEnv === "production",
+    sameSite: "strict",
+    path: "/",
+    maxAge: 0
+  });
+}
+
+function isAuthPublicEndpoint(req) {
+  if (req.method !== "POST") return false;
+
+  return (
+    req.path === "/api/auth/login" ||
+    req.path === "/api/v1/auth/login" ||
+    req.path === "/api/auth/logout" ||
+    req.path === "/api/v1/auth/logout"
+  );
+}
+
+app.use(async function (req, res, next) {
   if (hasControlChars(req.query) || hasControlChars(req.body)) {
     return res.status(400).json({ message: "Input tidak valid." });
+  }
+
+  if (isAuthPublicEndpoint(req)) {
+    return next();
   }
 
   // Try to extract JWT from httpOnly cookie first (primary method)
@@ -87,18 +113,38 @@ app.use(function (req, res, next) {
   if (token) {
     try {
       var decoded = jwt.verify(token, env.jwtSecret);
+      var sessionIsActive = await verifyJwtSession({
+        id: decoded.jti,
+        userId: decoded.id,
+        token: token
+      });
+
+      if (!sessionIsActive) {
+        clearAuthCookieResponse(res);
+
+        return res.status(401).json({
+          message: "Sesi tidak valid atau sudah berakhir."
+        });
+      }
 
       req.authUser = {
         id: decoded.id,
         role: decoded.role,
         name: decoded.name
       };
+      req.authSessionId = decoded.jti;
 
       return next();
     } catch (error) {
-      return res.status(401).json({
-        message: "Token tidak valid atau sudah expired."
-      });
+      if (error && (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError")) {
+        clearAuthCookieResponse(res);
+
+        return res.status(401).json({
+          message: "Token tidak valid atau sudah expired."
+        });
+      }
+
+      return next(error);
     }
   }
 
@@ -110,18 +156,34 @@ app.use(function (req, res, next) {
 
     try {
       var decodedHeader = jwt.verify(headerToken, env.jwtSecret);
+      var headerSessionIsActive = await verifyJwtSession({
+        id: decodedHeader.jti,
+        userId: decodedHeader.id,
+        token: headerToken
+      });
+
+      if (!headerSessionIsActive) {
+        return res.status(401).json({
+          message: "Sesi tidak valid atau sudah berakhir."
+        });
+      }
 
       req.authUser = {
         id: decodedHeader.id,
         role: decodedHeader.role,
         name: decodedHeader.name
       };
+      req.authSessionId = decodedHeader.jti;
 
       return next();
     } catch (error) {
-      return res.status(401).json({
-        message: "Token tidak valid atau sudah expired."
-      });
+      if (error && (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError")) {
+        return res.status(401).json({
+          message: "Token tidak valid atau sudah expired."
+        });
+      }
+
+      return next(error);
     }
   }
 
