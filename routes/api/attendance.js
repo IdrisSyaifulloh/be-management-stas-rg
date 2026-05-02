@@ -24,6 +24,10 @@ const {
   createWorkHoursUnder8Locks
 } = require("../../utils/studentAccessLocks");
 const { requireSafeId } = require("../../utils/securityValidation");
+const {
+  findNonWorkingDayForDate,
+  getHolidayRules
+} = require("../../utils/holidays");
 
 const router = express.Router();
 
@@ -102,11 +106,15 @@ function roundHours(value) {
 }
 
 function getAttendanceRules(settings) {
+  const holidayRules = getHolidayRules(settings);
+
   return {
     magangMinCheckoutHours: Number(settings.attendanceRules?.magangMinCheckoutHours || 8),
     earlyCheckoutWarning: Boolean(settings.attendanceRules?.earlyCheckoutWarning ?? true),
     autoCheckoutEnabled: Boolean(settings.attendanceRules?.autoCheckoutEnabled ?? true),
-    autoCheckoutTime: String(settings.attendanceRules?.autoCheckoutTime || "22:00")
+    autoCheckoutTime: String(settings.attendanceRules?.autoCheckoutTime || "22:00"),
+    excludeHolidaysFromWorkdays: holidayRules.excludeHolidaysFromWorkdays,
+    holidays: holidayRules.holidays
   };
 }
 
@@ -436,6 +444,18 @@ router.post(
     }
 
     const settings = await getSettingsAsync();
+    const todayIso = getJakartaDateIso();
+    const todayHoliday = findNonWorkingDayForDate(settings, todayIso);
+
+    if (todayHoliday) {
+      return res.status(409).json({
+        message: `Hari ini libur (${todayHoliday.name}). Absensi tidak wajib dan tidak dihitung tidak hadir.`,
+        code: "HOLIDAY_CHECKIN_BLOCKED",
+        holidayToday: todayHoliday,
+        date: todayIso
+      });
+    }
+
     const gpsPolicy = buildGpsPolicy(settings);
 
     const refLat = gpsPolicy.targetLatitude;
@@ -1052,6 +1072,8 @@ router.get(
     const settings = await getSettingsAsync();
     const attendanceRules = getAttendanceRules(settings);
     const magangMinCheckoutHours = attendanceRules.magangMinCheckoutHours;
+    const todayHoliday = findNonWorkingDayForDate(settings, todayIso);
+    const shouldCreateAbsentLocks = lockWindowOpen && !todayHoliday;
 
     const studentsResult = await query(
       `
@@ -1114,7 +1136,7 @@ router.get(
       if (status === "Hadir") {
         presentIds.push(studentId);
 
-        if (student?.tipe === "Magang" && !leaveSet.has(studentId)) {
+        if (student?.tipe === "Magang" && !leaveSet.has(studentId) && !todayHoliday) {
           const durationHours =
             attendance.duration_hours == null ? null : Number(attendance.duration_hours);
 
@@ -1171,12 +1193,12 @@ router.get(
 
       noInformationIds.push(studentId);
 
-      if (lockWindowOpen) {
+      if (shouldCreateAbsentLocks) {
         absentIds.push(studentId);
       }
     });
 
-    if (lockWindowOpen && absentIds.length > 0) {
+    if (shouldCreateAbsentLocks && absentIds.length > 0) {
       await createAttendanceAbsentLocks({
         studentIds: absentIds,
         date: todayIso
@@ -1203,6 +1225,10 @@ router.get(
       date: todayIso,
       timezone: ATTENDANCE_TIMEZONE,
       currentTime,
+      isHoliday: Boolean(todayHoliday),
+      holidayToday: todayHoliday,
+      holidays: attendanceRules.holidays,
+      excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays,
       lockVisibleAfter: ATTENDANCE_ABSENT_LOCK_AFTER,
       magangMinCheckoutHours,
       missingCheckoutLockAfter: ATTENDANCE_MISSING_CHECKOUT_LOCK_AFTER,
@@ -1305,28 +1331,33 @@ router.get(
       [resolvedStudentId, monthValue, effectiveStartDate, effectiveEndDate]
     );
 
+    const settings = await getSettingsAsync();
+    const gps = settings.gps || {};
+    const attendanceRules = getAttendanceRules(settings);
+    const gpsPolicy = buildGpsPolicy(settings);
+    const todayHoliday = findNonWorkingDayForDate(settings, todayIso);
+
     const { attendanceMap, leaveSet, leaveMap, history, summary } = buildAttendanceHistory({
       startDate: effectiveStartDate,
       endDate: effectiveEndDate,
       attendanceRows: attendanceRows.rows,
       leaveRows: leaves.rows,
-      activeStartDate
+      activeStartDate,
+      holidays: attendanceRules.holidays,
+      excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays
     });
 
     const todayAttendance = attendanceMap.get(todayIso);
 
-    const todayStatus = leaveSet.has(todayIso)
+    const todayStatus = todayHoliday && !todayAttendance
+      ? "Libur"
+      : leaveSet.has(todayIso)
       ? leaveMap.get(todayIso) || "Cuti"
       : todayAttendance?.check_out_at
         ? "Selesai"
         : todayAttendance?.check_in_at
           ? "Berlangsung"
           : "Belum Check-in";
-
-    const settings = await getSettingsAsync();
-    const gps = settings.gps || {};
-    const attendanceRules = getAttendanceRules(settings);
-    const gpsPolicy = buildGpsPolicy(settings);
 
     res.json({
       month: monthValue,
@@ -1338,6 +1369,9 @@ router.get(
         tipe: student.tipe
       },
       attendanceRules,
+      isHoliday: Boolean(todayHoliday),
+      todayHoliday,
+      holidays: attendanceRules.holidays,
       chartData: [
         { name: "Hadir", value: summary.hadir, color: "#0AB600" },
         { name: "Tidak Hadir", value: summary.tidakHadir, color: "#EF4444" },

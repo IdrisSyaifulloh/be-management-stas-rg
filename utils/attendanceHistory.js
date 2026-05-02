@@ -1,3 +1,5 @@
+const { findHolidayForDate, isWeekendIsoDate, normalizeHolidays } = require("./holidays");
+
 function getJakartaDateIso() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Jakarta",
@@ -172,7 +174,15 @@ function buildLeaveDateMap(leaveRows, rangeStart, rangeEnd) {
   return leaveMap;
 }
 
-function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows, activeStartDate }) {
+function buildAttendanceHistory({
+  startDate,
+  endDate,
+  attendanceRows,
+  leaveRows,
+  activeStartDate,
+  holidays,
+  excludeHolidaysFromWorkdays = true
+}) {
   const effectiveStartDate = activeStartDate ? maxIsoDate(startDate, activeStartDate) : startDate;
 
   const attendanceMap = new Map(
@@ -184,6 +194,7 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows,
 
   const leaveMap = buildLeaveDateMap(leaveRows || [], effectiveStartDate, endDate);
   const leaveSet = new Set(leaveMap.keys());
+  const holidayItems = normalizeHolidays(holidays);
 
   const history = [];
   const summary = {
@@ -216,7 +227,8 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows,
   ) {
     const isoDate = formatIsoDate(current);
     const attendanceItem = attendanceMap.get(isoDate);
-    const isWeekend = current.getUTCDay() === 0 || current.getUTCDay() === 6;
+    const holiday = excludeHolidaysFromWorkdays ? findHolidayForDate(holidayItems, isoDate) : null;
+    const isWeekend = isWeekendIsoDate(isoDate);
 
     let status = "Tidak Hadir";
     let statusColor = "red";
@@ -238,7 +250,7 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows,
       } else {
         summary.tidakHadir += 1;
       }
-    } else if (isWeekend) {
+    } else if (holiday || isWeekend) {
       status = "Libur";
       statusColor = "gray";
       summary.libur += 1;
@@ -272,6 +284,7 @@ function buildAttendanceHistory({ startDate, endDate, attendanceRows, leaveRows,
       checkoutSource: attendanceItem?.checkout_source || null,
       autoCheckoutReason: attendanceItem?.auto_checkout_reason || null,
       note: attendanceItem?.note || null,
+      holiday,
       attendanceItem
     });
   }

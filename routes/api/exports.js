@@ -1,6 +1,7 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
+const { getSettingsAsync } = require("../../config/systemSettingsStore");
 const { buildAttendanceHistory, resolveAttendanceRange } = require("../../utils/attendanceHistory");
 const { resolveStudentRecord } = require("../../utils/studentResolver");
 const {
@@ -403,7 +404,8 @@ const EXPORT_DEFINITIONS = {
         SELECT
           lr.student_id,
           TO_CHAR(lr.periode_start, 'YYYY-MM-DD') AS periode_start,
-          TO_CHAR(lr.periode_end, 'YYYY-MM-DD') AS periode_end
+          TO_CHAR(lr.periode_end, 'YYYY-MM-DD') AS periode_end,
+          COALESCE(lr.jenis_pengajuan, 'cuti') AS jenis_pengajuan
         FROM leave_requests lr
         WHERE lr.student_id = ANY($1::text[])
           AND lr.status = 'Disetujui'
@@ -426,6 +428,8 @@ const EXPORT_DEFINITIONS = {
         leaveByStudentId.set(row.student_id, items);
       }
 
+      const settings = await getSettingsAsync();
+      const attendanceRules = settings?.attendanceRules || {};
       const rows = [];
       for (const student of studentsResult.rows) {
         const { history } = buildAttendanceHistory({
@@ -433,7 +437,9 @@ const EXPORT_DEFINITIONS = {
           endDate: request.endDate,
           attendanceRows: attendanceByStudentId.get(student.id) || [],
           leaveRows: leaveByStudentId.get(student.id) || [],
-          activeStartDate: student.active_start_date
+          activeStartDate: student.active_start_date,
+          holidays: attendanceRules.holidays,
+          excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays !== false
         });
 
         history.forEach((item) => {

@@ -1,4 +1,5 @@
 const { query } = require("../db/pool");
+const { normalizeHolidays } = require("../utils/holidays");
 
 const DEFAULT_SETTINGS = {
   umum: {
@@ -46,7 +47,9 @@ const DEFAULT_SETTINGS = {
     magangWorkDays: "5",
     earlyCheckoutWarning: true,
     autoCheckoutEnabled: true,
-    autoCheckoutTime: "22:00"
+    autoCheckoutTime: "22:00",
+    excludeHolidaysFromWorkdays: true,
+    holidays: []
   }
 };
 
@@ -59,6 +62,12 @@ function normalize(patch) {
 
 function mergeSettings(current, patch) {
   const source = normalize(patch);
+  const sourceAttendanceRules = normalize(source.attendanceRules);
+  const currentAttendanceRules = normalize(current.attendanceRules);
+  const sourceHolidays = Array.isArray(sourceAttendanceRules.holidays)
+    ? sourceAttendanceRules.holidays
+    : source.holidays;
+
   return {
     ...current,
     ...source,
@@ -77,8 +86,11 @@ function mergeSettings(current, patch) {
         : (current.notif || {}).events || []
     },
     attendanceRules: {
-      ...(current.attendanceRules || {}),
-      ...(source.attendanceRules || {})
+      ...currentAttendanceRules,
+      ...sourceAttendanceRules,
+      holidays: Array.isArray(sourceHolidays)
+        ? normalizeHolidays(sourceHolidays)
+        : normalizeHolidays(currentAttendanceRules.holidays)
     }
   };
 }
