@@ -268,6 +268,8 @@ async function studentAccessLockMiddleware(req, res, next) {
     path.startsWith("/api/v1/health") ||
     path.startsWith("/api/profile") ||
     path.startsWith("/api/v1/profile") ||
+    path.startsWith("/api/user-ui-state") ||
+    path.startsWith("/api/v1/user-ui-state") ||
     (method === "GET" && (path === "/api/student-access-locks/me" || path === "/api/v1/student-access-locks/me"));
 
   if (allowed) return next();

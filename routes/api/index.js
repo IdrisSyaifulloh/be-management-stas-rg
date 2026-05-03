@@ -26,6 +26,7 @@ const cleanupRouter = require("./cleanup");
 const monitoringRouter = require("./monitoring");
 const withdrawalRequestsRouter = require("./withdrawalRequests");
 const studentAccessLocksRouter = require("./studentAccessLocks");
+const userUiStateRouter = require("./userUiState");
 const { requireRoleStrict } = require("../../utils/roleGuard");
 
 const router = express.Router();
@@ -54,6 +55,7 @@ router.use("/notifications", notificationsRouter);
 router.use("/system-settings", systemSettingsRouter);
 router.use("/wfh-settings", requireRoleStrict(["operator"]), wfhSettingsRouter);
 router.use("/student-access-locks", studentAccessLocksRouter);
+router.use("/user-ui-state", userUiStateRouter);
 router.use("/exports", requireRoleStrict(["operator"]), exportsRouter);
 router.use("/cleanup", requireRoleStrict(["operator"]), cleanupRouter);
 router.use("/monitoring", requireRoleStrict(["operator"]), monitoringRouter);
