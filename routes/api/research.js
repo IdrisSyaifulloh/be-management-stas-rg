@@ -90,6 +90,56 @@ async function hasProjectAccess({ userId, role, projectId }) {
   return result.rowCount > 0;
 }
 
+function isBoardManagerRole(role) {
+  return role === "operator" || role === "dosen";
+}
+
+function isAllowedBoardFillField(key) {
+  return ["status", "progress", "sortOrder"].includes(key);
+}
+
+function getUnexpectedBoardFillFields(body) {
+  return Object.keys(body || {}).filter((key) => !isAllowedBoardFillField(key));
+}
+
+async function isProjectLeaderMember({ userId, projectId }) {
+  if (!userId || !projectId) return false;
+
+  const result = await query(
+    `
+    SELECT 1
+    FROM research_memberships
+    WHERE project_id = $1
+      AND user_id = $2
+      AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
+      AND COALESCE(status, 'Aktif') = 'Aktif'
+    LIMIT 1
+    `,
+    [projectId, userId]
+  );
+
+  return result.rowCount > 0;
+}
+
+async function getBoardAccessContext({ req, projectId }) {
+  const role = extractRole(req);
+  const userId = resolveRequesterUserId(req);
+  const hasAccess = await hasProjectAccess({ userId, role, projectId });
+  const isLeaderMember =
+    hasAccess && role === "mahasiswa"
+      ? await isProjectLeaderMember({ userId, projectId })
+      : false;
+
+  return {
+    role,
+    userId,
+    hasAccess,
+    isLeaderMember,
+    isManager: hasAccess && (isBoardManagerRole(role) || isLeaderMember),
+    canFillExistingCards: hasAccess && (isBoardManagerRole(role) || role === "mahasiswa")
+  };
+}
+
 function buildEntityId(prefix) {
   return `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -384,13 +434,21 @@ router.get(
   "/:id/board",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
-    if (!allowed) {
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.hasAccess) {
       return res.status(403).json({ message: "Akses ditolak untuk melihat board riset ini." });
     }
 
     const snapshot = await fetchBoardSnapshot(req.params.id);
-    res.json(snapshot);
+    res.json({
+      ...snapshot,
+      permissions: {
+        role: access.role,
+        isLeaderMember: access.isLeaderMember,
+        canManageCards: access.isManager,
+        canFillExistingCards: access.canFillExistingCards
+      }
+    });
   })
 );
 
@@ -422,9 +480,11 @@ router.post(
   "/:id/board/cards",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak untuk menambah card di board ini." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa hanya dapat mengisi card progress yang sudah tersedia."
+      });
     }
 
     const { title, date, description, output, kendala, studentId } = req.body;
@@ -497,9 +557,20 @@ router.post(
 router.put(
   "/:id/board/cards/:cardId",
   asyncHandler(async (req, res) => {
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
-    if (!allowed) {
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.canFillExistingCards) {
       return res.status(403).json({ message: "Akses ditolak untuk mengedit card di board ini." });
+    }
+
+    if (!access.isManager) {
+      const allowedFields = ["description", "output", "kendala"];
+      const forbiddenFields = Object.keys(req.body || {}).filter((key) => !allowedFields.includes(key));
+      if (forbiddenFields.length > 0) {
+        return res.status(403).json({
+          message: "Anggota biasa hanya dapat mengisi deskripsi, output, atau kendala pada card yang sudah tersedia.",
+          forbiddenFields
+        });
+      }
     }
 
     const { title, date, description, output, kendala } = req.body;
@@ -604,10 +675,11 @@ router.post(
   "/:id/board/tasks",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak menambah task di board riset ini." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa hanya dapat mengisi progress card yang sudah tersedia."
+      });
     }
 
     const {
@@ -653,7 +725,7 @@ router.post(
         toNullableText(tag),
         normalizeProgress(progress, 0),
         nextSortOrder,
-        resolveRequesterUserId(req) || null
+        access.userId || null
       ]
     );
 
@@ -686,10 +758,19 @@ router.patch(
   "/:id/board/tasks/:taskId",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.canFillExistingCards) {
       return res.status(403).json({ message: "Akses ditolak mengubah task board." });
+    }
+
+    if (!access.isManager) {
+      const unexpectedFields = getUnexpectedBoardFillFields(req.body || {});
+      if (unexpectedFields.length > 0) {
+        return res.status(403).json({
+          message: "Anggota biasa hanya dapat mengubah progress atau status card yang sudah tersedia.",
+          forbiddenFields: unexpectedFields
+        });
+      }
     }
 
     const existingTask = await ensureTaskExists(req.params.id, req.params.taskId);
@@ -717,7 +798,7 @@ router.patch(
     const nextSortOrder = sortOrder !== undefined
       ? Number(sortOrder)
       : (nextStatus !== detail.status ? await getNextTaskSortOrder(req.params.id, nextStatus) : detail.sortOrder);
-    const nextAssigneeIds = (assignee_ids !== undefined || assigneeIds !== undefined)
+    const nextAssigneeIds = access.isManager && (assignee_ids !== undefined || assigneeIds !== undefined)
       ? await validateAssigneeIds(assignee_ids ?? assigneeIds)
       : detail.assignee_ids;
 
@@ -760,9 +841,8 @@ router.patch(
   "/:id/board/tasks/:taskId/status",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.canFillExistingCards) {
       return res.status(403).json({ message: "Akses ditolak memindahkan status task board." });
     }
 
@@ -797,9 +877,11 @@ router.delete(
 
   "/:id/board/cards/:cardId",
   asyncHandler(async (req, res) => {
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role: extractRole(req), projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak untuk menghapus card di board ini." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa tidak dapat menghapus card progress."
+      });
     }
 
     // Delete associated comments first
@@ -822,10 +904,11 @@ router.delete(
   "/:id/board/tasks/:taskId",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak menghapus task board." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa tidak dapat menghapus card progress."
+      });
     }
 
     const attachmentRows = await query(
@@ -866,10 +949,11 @@ router.post(
   "/:id/board/tasks/:taskId/subtasks",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak menambah subtask." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa hanya dapat mencentang checklist yang sudah tersedia."
+      });
     }
 
     const task = await ensureTaskExists(req.params.id, req.params.taskId);
@@ -917,10 +1001,20 @@ router.patch(
   "/:id/board/tasks/:taskId/subtasks/:subtaskId",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.canFillExistingCards) {
       return res.status(403).json({ message: "Akses ditolak mengubah subtask." });
+    }
+
+    if (!access.isManager) {
+      const allowedFields = ["done"];
+      const forbiddenFields = Object.keys(req.body || {}).filter((key) => !allowedFields.includes(key));
+      if (forbiddenFields.length > 0) {
+        return res.status(403).json({
+          message: "Anggota biasa hanya dapat mencentang checklist yang sudah tersedia.",
+          forbiddenFields
+        });
+      }
     }
 
     const result = await query(
@@ -959,10 +1053,11 @@ router.delete(
   "/:id/board/tasks/:taskId/subtasks/:subtaskId",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak menghapus subtask." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa tidak dapat menghapus checklist."
+      });
     }
 
     const result = await query(
@@ -987,9 +1082,8 @@ router.post(
   "/:id/board/tasks/:taskId/attachments",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.canFillExistingCards) {
       return res.status(403).json({ message: "Akses ditolak menambah lampiran task." });
     }
 
@@ -1027,7 +1121,7 @@ router.post(
         uploadedAttachment.fileName,
         uploadedAttachment.fileSize,
         uploadedAttachment.mimeType,
-        resolveRequesterUserId(req) || null
+        access.userId || null
       ]
     );
 
@@ -1044,10 +1138,11 @@ router.delete(
   "/:id/board/tasks/:taskId/attachments/:attachmentId",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak menghapus lampiran task." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa tidak dapat menghapus lampiran card."
+      });
     }
 
     const result = await query(
@@ -1096,9 +1191,8 @@ router.post(
   "/:id/board/tasks/:taskId/comments",
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
-    const role = extractRole(req);
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.canFillExistingCards) {
       return res.status(403).json({ message: "Akses ditolak menambah komentar task." });
     }
 
@@ -1107,7 +1201,7 @@ router.post(
       return res.status(404).json({ message: "Task board tidak ditemukan." });
     }
 
-    const authorId = String(req.body?.authorId || resolveRequesterUserId(req) || "").trim();
+    const authorId = String(req.body?.authorId || access.userId || "").trim();
     const text = String(req.body?.text || "").trim();
     if (!authorId || !text) {
       return res.status(400).json({ message: "authorId dan text wajib diisi." });
@@ -1289,7 +1383,7 @@ router.post(
       return res.status(400).json({ message: "userId dan memberType wajib diisi." });
     }
 
-    // Validate that only one "Ketua" is allowed per project AND must be Dosen
+    // Validate that only one "Ketua" is allowed per project.
     if (peran && peran.toLowerCase().includes("ketua")) {
       const existingKetua = await query(
         `SELECT user_id, peran, member_type FROM research_memberships WHERE project_id = $1 AND LOWER(peran) LIKE '%ketua%'`,
@@ -1298,12 +1392,6 @@ router.post(
       if (existingKetua.rowCount > 0) {
         return res.status(400).json({
           message: `Hanya boleh ada 1 Ketua per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
-        });
-      }
-      // Ketua must be Dosen, not Mahasiswa
-      if (memberType !== "Dosen") {
-        return res.status(400).json({
-          message: "Ketua tim wajib Dosen. Mahasiswa tidak bisa menjadi Ketua."
         });
       }
     }
@@ -1351,7 +1439,7 @@ router.patch(
 
     const { memberType, peran, status, bergabung } = req.body;
 
-    // Validate that only one "Ketua" is allowed per project AND must be Dosen
+    // Validate that only one "Ketua" is allowed per project.
     if (peran && peran.toLowerCase().includes("ketua")) {
       const existingKetua = await query(
         `SELECT user_id, peran, member_type FROM research_memberships WHERE project_id = $1 AND LOWER(peran) LIKE '%ketua%' AND user_id != $2`,
@@ -1360,12 +1448,6 @@ router.patch(
       if (existingKetua.rowCount > 0) {
         return res.status(400).json({
           message: `Hanya boleh ada 1 Ketua per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
-        });
-      }
-      // Ketua must be Dosen, not Mahasiswa
-      if (memberType !== "Dosen") {
-        return res.status(400).json({
-          message: "Ketua tim wajib Dosen. Mahasiswa tidak bisa menjadi Ketua."
         });
       }
     }
@@ -1475,11 +1557,12 @@ router.delete(
 router.post(
   "/:id/milestones",
   asyncHandler(async (req, res) => {
-    const role = extractRole(req);
-    const actorUserId = resolveRequesterUserId(req) || null;
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak menambah milestone di riset ini." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    const actorUserId = access.userId || null;
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa hanya dapat mengisi card progress yang sudah tersedia."
+      });
     }
 
     const { label, done = false, targetDate, sortOrder = 0 } = req.body;
@@ -1506,11 +1589,12 @@ router.post(
 router.patch(
   "/:id/milestones/:milestoneId",
   asyncHandler(async (req, res) => {
-    const role = extractRole(req);
-    const actorUserId = resolveRequesterUserId(req) || null;
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak memperbarui milestone di riset ini." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    const actorUserId = access.userId || null;
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa tidak dapat mengubah milestone."
+      });
     }
 
     const { label, done, targetDate, sortOrder } = req.body;
@@ -1555,11 +1639,12 @@ router.patch(
 router.delete(
   "/:id/milestones/:milestoneId",
   asyncHandler(async (req, res) => {
-    const role = extractRole(req);
-    const actorUserId = resolveRequesterUserId(req) || null;
-    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
-    if (!allowed) {
-      return res.status(403).json({ message: "Akses ditolak menghapus milestone di riset ini." });
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    const actorUserId = access.userId || null;
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Anggota biasa tidak dapat menghapus milestone."
+      });
     }
 
     const existingMilestone = await query(
