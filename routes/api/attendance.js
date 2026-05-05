@@ -120,14 +120,27 @@ function getAttendanceRules(settings) {
 
 async function ensureAttendanceColumns() {
   if (!ensureAttendanceColumnsPromise) {
-    ensureAttendanceColumnsPromise = query(`
-      ALTER TABLE attendance_records
-      ADD COLUMN IF NOT EXISTS check_out_accuracy_meters DOUBLE PRECISION,
-      ADD COLUMN IF NOT EXISTS checkout_source TEXT,
-      ADD COLUMN IF NOT EXISTS auto_checkout BOOLEAN NOT NULL DEFAULT FALSE,
-      ADD COLUMN IF NOT EXISTS auto_checkout_reason TEXT,
-      ADD COLUMN IF NOT EXISTS note TEXT
-    `);
+    ensureAttendanceColumnsPromise = (async () => {
+      await query(`
+        ALTER TABLE attendance_records
+        ADD COLUMN IF NOT EXISTS check_out_accuracy_meters DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS checkout_source TEXT,
+        ADD COLUMN IF NOT EXISTS auto_checkout BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS auto_checkout_reason TEXT,
+        ADD COLUMN IF NOT EXISTS note TEXT
+      `);
+
+      // Extend status constraint to include WFH, Izin, Sakit, Libur
+      await query(`
+        ALTER TABLE attendance_records
+          DROP CONSTRAINT IF EXISTS attendance_records_status_check
+      `);
+      await query(`
+        ALTER TABLE attendance_records
+          ADD CONSTRAINT attendance_records_status_check
+            CHECK (status IN ('Hadir', 'Tidak Hadir', 'Cuti', 'WFH', 'Izin', 'Sakit', 'Libur'))
+      `);
+    })();
   }
 
   await ensureAttendanceColumnsPromise;
@@ -340,6 +353,28 @@ function buildGpsValidationError({
   };
 }
 
+/**
+ * Check if student has approved WFH (work-from-home) leave on today's date.
+ * WFH students can skip GPS radius validation.
+ */
+async function hasApprovedWfhToday(studentId, dateIso) {
+  const result = await query(
+    `
+    SELECT 1
+    FROM leave_requests
+    WHERE student_id = $1
+      AND jenis_pengajuan = 'wfh'
+      AND status = 'Disetujui'
+      AND counts_against_wfh_quota IS NOT FALSE
+      AND periode_start <= $2::date
+      AND periode_end >= $2::date
+    LIMIT 1
+    `,
+    [studentId, dateIso]
+  );
+  return result.rowCount > 0;
+}
+
 async function notifyOperatorsAboutEarlyCheckout({
   attendanceRecordId,
   student,
@@ -443,6 +478,9 @@ router.post(
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
+    // Run migrations first so WFH/Izin/Sakit/Libur status values are accepted
+    await ensureAttendanceColumns();
+
     const settings = await getSettingsAsync();
     const todayIso = getJakartaDateIso();
     const todayHoliday = findNonWorkingDayForDate(settings, todayIso);
@@ -477,33 +515,37 @@ router.post(
 
     const distanceMeters = haversineDistanceMeters(userLatitude, userLongitude, refLat, refLng);
 
-    if (accuracyMetersValue != null && Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
-      return res.status(400).json(
-        buildGpsValidationError({
-          message: "Akurasi GPS terlalu rendah. Coba pindah ke area terbuka atau aktifkan mode akurasi tinggi.",
-          reason: "GPS_ACCURACY_TOO_LOW",
-          accuracyMeters: Math.round(accuracyMetersValue),
-          maxAccuracyMeters,
-          distanceMeters: Math.round(distanceMeters),
-          allowedRadiusMeters: refRadius
-        })
-      );
-    }
+    // Check if student has approved WFH for today; if so, bypass GPS radius validation
+    const hasWfhToday = await hasApprovedWfhToday(resolvedStudentId, todayIso);
 
-    if (distanceMeters > refRadius) {
-      return res.status(400).json(
-        buildGpsValidationError({
-          message: "Lokasi di luar radius absensi.",
-          reason: "OUTSIDE_RADIUS",
-          accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
-          maxAccuracyMeters,
-          distanceMeters: Math.round(distanceMeters),
-          allowedRadiusMeters: refRadius
-        })
-      );
-    }
+    if (!hasWfhToday) {
+      // WFH not approved: enforce GPS accuracy and radius checks
+      if (accuracyMetersValue != null && Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
+        return res.status(400).json(
+          buildGpsValidationError({
+            message: "Akurasi GPS terlalu rendah. Coba pindah ke area terbuka atau aktifkan mode akurasi tinggi.",
+            reason: "GPS_ACCURACY_TOO_LOW",
+            accuracyMeters: Math.round(accuracyMetersValue),
+            maxAccuracyMeters,
+            distanceMeters: Math.round(distanceMeters),
+            allowedRadiusMeters: refRadius
+          })
+        );
+      }
 
-    await ensureAttendanceColumns();
+      if (distanceMeters > refRadius) {
+        return res.status(400).json(
+          buildGpsValidationError({
+            message: "Lokasi di luar radius absensi.",
+            reason: "OUTSIDE_RADIUS",
+            accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
+            maxAccuracyMeters,
+            distanceMeters: Math.round(distanceMeters),
+            allowedRadiusMeters: refRadius
+          })
+        );
+      }
+    }
 
     const todayRecord = await query(
       `
@@ -524,12 +566,13 @@ router.post(
     }
 
     const recordId = `ATD-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    const attendanceStatus = hasWfhToday ? "WFH" : "Hadir";
 
     if (todayRecord.rowCount > 0) {
       await query(
         `
         UPDATE attendance_records
-        SET status = 'Hadir',
+        SET status = $6,
             check_in_at = NOW(),
             check_out_at = NULL,
             check_in_lat = $2,
@@ -546,7 +589,7 @@ router.post(
             updated_at = NOW()
         WHERE id = $1
         `,
-        [todayRecord.rows[0].id, userLatitude, userLongitude, accuracyMetersValue, distanceMeters]
+        [todayRecord.rows[0].id, userLatitude, userLongitude, accuracyMetersValue, distanceMeters, attendanceStatus]
       );
     } else {
       await query(
@@ -554,15 +597,16 @@ router.post(
         INSERT INTO attendance_records (
           id, student_id, attendance_date, status, check_in_at,
           check_in_lat, check_in_lng, accuracy_meters, distance_meters, within_radius
-        ) VALUES ($1, $2, (NOW() AT TIME ZONE 'Asia/Jakarta')::date, 'Hadir', NOW(), $3, $4, $5, $6, TRUE)
+        ) VALUES ($1, $2, (NOW() AT TIME ZONE 'Asia/Jakarta')::date, $7, NOW(), $3, $4, $5, $6, TRUE)
         `,
-        [recordId, resolvedStudentId, userLatitude, userLongitude, accuracyMetersValue, distanceMeters]
+        [recordId, resolvedStudentId, userLatitude, userLongitude, accuracyMetersValue, distanceMeters, attendanceStatus]
       );
     }
 
     res.status(201).json({
-      message: "Check-in berhasil.",
+      message: hasWfhToday ? "Check-in WFH berhasil." : "Check-in berhasil.",
       accepted: true,
+      isWfh: hasWfhToday,
       accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
       maxAccuracyMeters,
       distanceMeters: Math.round(distanceMeters),
@@ -607,6 +651,9 @@ router.post(
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
+    // Run migrations first so status constraint is up to date
+    await ensureAttendanceColumns();
+
     const studentResult = await query(
       `
       SELECT s.id, s.user_id, s.nim, s.tipe, u.name,
@@ -645,22 +692,24 @@ router.post(
     }
 
     if (role === "mahasiswa") {
+      // Use Jakarta date explicitly to avoid UTC midnight mismatch
+      const jakartaTodayIso = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta" }).format(new Date());
       const logbookToday = await query(
         `
         SELECT id
         FROM logbook_entries
         WHERE student_id = $1
-          AND date = $2::date
+          AND date::date = $2::date
         LIMIT 1
         `,
-        [resolvedStudentId, todayIso]
+        [resolvedStudentId, jakartaTodayIso]
       );
 
       if (logbookToday.rowCount === 0) {
         return res.status(409).json({
           message: "Isi logbook hari ini terlebih dahulu sebelum check-out.",
           logbookRequired: true,
-          date: todayIso
+          date: jakartaTodayIso
         });
       }
     }
@@ -686,8 +735,6 @@ router.post(
         requiredHours
       });
     }
-
-    await ensureAttendanceColumns();
 
     await query(
       `
@@ -1349,15 +1396,17 @@ router.get(
 
     const todayAttendance = attendanceMap.get(todayIso);
 
-    const todayStatus = todayHoliday && !todayAttendance
-      ? "Libur"
-      : leaveSet.has(todayIso)
-      ? leaveMap.get(todayIso) || "Cuti"
+    // Priority: active attendance record beats leave status
+    // so WFH students who checked in show "Berlangsung" (not "WFH" from leaveSet)
+    const todayStatus = todayAttendance?.check_in_at && !todayAttendance?.check_out_at
+      ? "Berlangsung"
       : todayAttendance?.check_out_at
         ? "Selesai"
-        : todayAttendance?.check_in_at
-          ? "Berlangsung"
-          : "Belum Check-in";
+        : todayHoliday
+          ? "Libur"
+          : leaveSet.has(todayIso)
+            ? leaveMap.get(todayIso) || "Cuti"
+            : "Belum Check-in";
 
     res.json({
       month: monthValue,
@@ -1386,14 +1435,16 @@ router.get(
           ? new Date(todayAttendance.check_in_at).toLocaleTimeString("id-ID", {
               hour: "2-digit",
               minute: "2-digit",
-              hour12: false
+              hour12: false,
+              timeZone: "Asia/Jakarta"
             })
           : "--:--",
         checkOut: todayAttendance?.check_out_at
           ? new Date(todayAttendance.check_out_at).toLocaleTimeString("id-ID", {
               hour: "2-digit",
               minute: "2-digit",
-              hour12: false
+              hour12: false,
+              timeZone: "Asia/Jakarta"
             })
           : "--:--",
         status: todayStatus,

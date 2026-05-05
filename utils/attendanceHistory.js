@@ -235,6 +235,13 @@ function buildAttendanceHistory({
 
     if (attendanceItem) {
       status = attendanceItem.status || "Hadir";
+
+      // Auto-correct: if record says "Hadir" but there's an approved WFH leave
+      // for this date, display as "WFH" (handles legacy records saved before the fix)
+      if (status === "Hadir" && leaveSet.has(isoDate) && leaveMap.get(isoDate) === "WFH") {
+        status = "WFH";
+      }
+
       statusColor = getStatusColor(status);
 
       if (status === "Hadir") {

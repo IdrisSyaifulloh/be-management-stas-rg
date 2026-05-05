@@ -11,9 +11,10 @@ var validateEnv = require("./config/validateEnv");
 var indexRouter = require("./routes/index");
 var usersRouter = require("./routes/users");
 var apiRouter = require("./routes/api");
+var { query } = require("./db/pool");
 var { studentAccessLockMiddleware } = require("./utils/studentAccessLocks");
 var { hasControlChars } = require("./utils/securityValidation");
-var { verifyJwtSession } = require("./utils/jwtSessionStore");
+var { revokeJwtSession, verifyJwtSession } = require("./utils/jwtSessionStore");
 
 var envValidationResult = validateEnv();
 
@@ -127,6 +128,24 @@ app.use(async function (req, res, next) {
         });
       }
 
+      var activeUserResult = await query(
+        "SELECT id, is_active FROM users WHERE id = $1 LIMIT 1",
+        [decoded.id]
+      );
+
+      if (activeUserResult.rowCount === 0 || activeUserResult.rows[0].is_active === false) {
+        await revokeJwtSession({
+          id: decoded.jti,
+          userId: decoded.id,
+          token: token
+        });
+        clearAuthCookieResponse(res);
+
+        return res.status(403).json({
+          message: "Akun Anda tidak aktif. Hubungi administrator untuk bantuan."
+        });
+      }
+
       req.authUser = {
         id: decoded.id,
         role: decoded.role,
@@ -236,6 +255,9 @@ autoCheckoutJob.startMonitoring();
 
 var autoAlumniJob = require("./jobs/autoAlumniScheduler");
 autoAlumniJob.startMonitoring();
+
+var weeklyResearchAttendanceSuspensionJob = require("./jobs/weeklyResearchAttendanceSuspension");
+weeklyResearchAttendanceSuspensionJob.startMonitoring();
 
 // ======================================================
 // ROUTES

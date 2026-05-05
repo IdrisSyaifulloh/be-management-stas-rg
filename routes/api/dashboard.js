@@ -14,6 +14,7 @@ const {
 } = require("../../utils/dashboardReminders");
 const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks");
 const { requireSafeId } = require("../../utils/securityValidation");
+const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 
 const router = express.Router();
 
@@ -577,12 +578,15 @@ router.get(
     const sisaCuti = Math.max(0, totalCuti - approvedLeaveCount);
 
     const wfhQuota = Number(studentRow.wfh_quota || 0);
+    const weekBounds = getJakartaWeekBounds(new Date());
 
     const wfhUsed = leaveRows.rows.filter(
       (item) =>
         item.status === "Disetujui" &&
         item.jenis_pengajuan === "wfh" &&
-        item.counts_against_wfh_quota !== false
+        item.counts_against_wfh_quota !== false &&
+        new Date(item.periode_start) >= new Date(weekBounds.startDate) &&
+        new Date(item.periode_start) <= new Date(weekBounds.endDate)
     ).length;
 
     const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);

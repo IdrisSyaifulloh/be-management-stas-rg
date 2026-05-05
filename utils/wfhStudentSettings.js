@@ -2,13 +2,14 @@ const db = require("../db/pool");
 
 async function getWfhStudentSettings() {
   const result = await db.query(`
-    SELECT 
+    SELECT
       s.nim,
       u.name AS "studentName",
       COALESCE(s.wfh_quota, 0) AS "wfhQuota",
       true AS "hasSetting"
     FROM students s
     JOIN users u ON u.id = s.user_id
+    WHERE s.tipe = 'Magang'
     ORDER BY u.name ASC
   `);
 
@@ -17,11 +18,12 @@ async function getWfhStudentSettings() {
 
 async function getDistinctStudents() {
   const result = await db.query(`
-    SELECT 
+    SELECT
       s.nim,
       u.name AS "studentName"
     FROM students s
     JOIN users u ON u.id = s.user_id
+    WHERE s.tipe = 'Magang'
     ORDER BY u.name ASC
   `);
 

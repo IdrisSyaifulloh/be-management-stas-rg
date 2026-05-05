@@ -9,6 +9,7 @@ const {
   resolveSortColumn,
   resolveSortDirection
 } = require("../../utils/securityValidation");
+const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
@@ -173,6 +174,12 @@ router.get(
 
     const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
+    const weekBounds = getJakartaWeekBounds(new Date());
+    params.push(weekBounds.startDate);
+    const weekStartPlaceholder = `$${params.length}`;
+    params.push(weekBounds.endDate);
+    const weekEndPlaceholder = `$${params.length}`;
+
     params.push(rowLimit);
     const limitPlaceholder = `$${params.length}`;
 
@@ -212,7 +219,7 @@ router.get(
       JOIN users u ON u.id = s.user_id
       LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
-      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui'
+      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN ${weekStartPlaceholder}::date AND ${weekEndPlaceholder}::date
       ${whereClause}
       GROUP BY 
         s.id,
@@ -251,6 +258,7 @@ router.get(
     await ensureStudentColumns();
 
     const studentId = requireSafeId(req.params.id);
+    const weekBounds = getJakartaWeekBounds(new Date());
 
     const result = await query(
       `
@@ -285,7 +293,7 @@ router.get(
       JOIN users u ON u.id = s.user_id
       LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
-      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui'
+      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN $2::date AND $3::date
       WHERE s.id = $1
       GROUP BY 
         s.id,
@@ -308,7 +316,7 @@ router.get(
         s.jam_minggu_target,
         s.wfh_quota
       `,
-      [studentId]
+      [studentId, weekBounds.startDate, weekBounds.endDate]
     );
 
     if (result.rowCount === 0) {

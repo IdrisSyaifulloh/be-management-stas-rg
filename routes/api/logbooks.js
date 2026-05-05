@@ -178,7 +178,7 @@ router.get(
       `
       SELECT le.id, le.student_id, su.name AS student_name, su.initials AS student_initials,
              le.project_id, COALESCE(rp.short_title, rp.title, 'Logbook Umum') AS project_name,
-             le.date, le.title, le.description, le.output, le.kendala, le.has_attachment,
+             TO_CHAR(le.date, 'YYYY-MM-DD') AS date, le.title, le.description, le.output, le.kendala, le.has_attachment,
              le.file_url, le.file_name, le.file_size,
              le.created_at, le.updated_at,
              COALESCE(lc.comments, '[]'::json) AS comments,

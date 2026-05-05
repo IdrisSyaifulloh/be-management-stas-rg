@@ -556,8 +556,8 @@ VALUES
         }
       },
       "attendanceRules": {
-        "risetMinWeeklyHours": 4,
-        "risetTargetWeeklyHours": 6,
+        "risetMinWeeklyHours": 8,
+        "risetTargetWeeklyHours": 8,
         "magangDailyHours": 9,
         "magangMinCheckoutHours": 8,
         "magangWorkDays": "5",

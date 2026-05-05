@@ -3,6 +3,7 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const bcrypt = require("bcrypt");
 const { requireSafeId } = require("../../utils/securityValidation");
+const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
@@ -280,7 +281,7 @@ router.delete(
           updated_at = NOW()
       WHERE id = $1
       `,
-      [userId]
+      [userId, weekBounds.startDate, weekBounds.endDate]
     );
 
     try {
@@ -301,6 +302,7 @@ router.get(
     await ensureProfileColumns();
 
     const userId = requireSafeId(req.params.userId, "userId");
+    const weekBounds = getJakartaWeekBounds(new Date());
 
     const result = await query(
       `
@@ -328,6 +330,7 @@ router.get(
        AND lr.jenis_pengajuan = 'wfh' 
        AND lr.status = 'Disetujui'
        AND lr.counts_against_wfh_quota IS NOT FALSE
+       AND lr.periode_start BETWEEN $2::date AND $3::date
       WHERE u.id = $1
       GROUP BY 
         u.id,
@@ -346,7 +349,7 @@ router.get(
         s.bergabung,
         s.wfh_quota
       `,
-      [userId]
+        [userId, weekBounds.startDate, weekBounds.endDate]
     );
 
     if (result.rowCount === 0) {

@@ -944,10 +944,101 @@ const EXPORT_DEFINITIONS = {
         ])
       };
     }
+  },
+  "kegiatan-stas": {
+    title: "Kegiatan STAS-RG",
+    description: "Rekap kegiatan harian CoE STAS-RG (riset, abdimas, internal) beserta peserta, output, dan berkas dokumentasi.",
+    fileBaseName: "kegiatan-stas-rg",
+    sheetName: "Kegiatan STAS-RG",
+    filters: { student: false, project: false, dateRange: true },
+    async getDataset(request) {
+      const clauses = [];
+      const params = [];
+
+      if (request.startDate) {
+        params.push(request.startDate);
+        clauses.push(`activity_date >= $${params.length}::date`);
+      }
+      if (request.endDate) {
+        params.push(request.endDate);
+        clauses.push(`activity_date <= $${params.length}::date`);
+      }
+
+      const whereClause = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+      const FORM_LABELS = {
+        meeting: "Rapat",
+        visit_internal: "Kunjungan Internal/Lab Visit",
+        visit_external: "Kunjungan Eksternal",
+        lab_test: "Pengujian Lab",
+        lab: "Lab",
+        visit: "Visit",
+        other: "Lainnya"
+      };
+
+      const TYPE_LABELS = {
+        riset: "Riset/Penelitian/Proyek",
+        abdimas: "Pengabdian Masyarakat",
+        internal: "Internal CoE STAS-RG"
+      };
+
+      const result = await query(
+        `
+        SELECT
+          TO_CHAR(activity_date, 'DD/MM/YYYY') AS tanggal,
+          activity_type,
+          activity_form,
+          activity_name,
+          COALESCE(goal, '-') AS tujuan,
+          COALESCE(description_summary, '-') AS deskripsi,
+          COALESCE(activity_time::text, '-') AS waktu,
+          COALESCE(location, '-') AS lokasi,
+          COALESCE(participants_count::text, '-') AS jumlah_peserta,
+          COALESCE(participants_list, '-') AS daftar_peserta,
+          COALESCE(output, '-') AS output,
+          COALESCE(folder_bergkas_url, '-') AS link_folder,
+          COALESCE(pic_name, '-') AS pic,
+          CASE WHEN notulensi_url IS NOT NULL THEN 'Ada' ELSE '-' END AS notulensi,
+          CASE WHEN surat_url IS NOT NULL THEN 'Ada' ELSE '-' END AS surat,
+          CASE WHEN photo_url IS NOT NULL THEN 'Ada' ELSE '-' END AS foto
+        FROM stas_activities
+        ${whereClause}
+        ORDER BY activity_date DESC, created_at DESC
+        `,
+        params
+      );
+
+      return {
+        headers: [
+          "Tanggal", "Jenis Kegiatan", "Bentuk Kegiatan", "Nama Kegiatan",
+          "Tujuan", "Deskripsi", "Waktu", "Lokasi",
+          "Jml Peserta", "Daftar Peserta", "Output/Hasil",
+          "Link Folder", "PIC", "Notulensi", "Surat", "Foto"
+        ],
+        rows: result.rows.map((row) => [
+          row.tanggal,
+          TYPE_LABELS[row.activity_type] || row.activity_type,
+          FORM_LABELS[row.activity_form] || row.activity_form,
+          row.activity_name,
+          row.tujuan,
+          row.deskripsi,
+          row.waktu,
+          row.lokasi,
+          row.jumlah_peserta,
+          row.daftar_peserta,
+          row.output,
+          row.link_folder,
+          row.pic,
+          row.notulensi,
+          row.surat,
+          row.foto
+        ])
+      };
+    }
   }
 };
 
-const TEMPLATE_TYPES = ["kehadiran", "logbook", "riset", "cuti", "database-mahasiswa", "layanan-surat"];
+const TEMPLATE_TYPES = ["kehadiran", "logbook", "riset", "cuti", "database-mahasiswa", "layanan-surat", "kegiatan-stas"];
 
 router.get("/templates", (req, res) => {
   res.json(

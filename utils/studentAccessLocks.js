@@ -4,6 +4,7 @@ const { resolveStudentRecord } = require("./studentResolver");
 const ACCESS_LOCK_REASON_ATTENDANCE_ABSENT = "ATTENDANCE_ABSENT";
 const ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8 = "WORK_HOURS_UNDER_8";
 const ACCESS_LOCK_REASON_CHECKOUT_MISSING_22 = "CHECKOUT_MISSING_22";
+const ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS = "RESEARCH_WEEKLY_LOW_HOURS";
 
 const ACCESS_LOCK_REASON_DETAILS = {
   [ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]: {
@@ -17,6 +18,10 @@ const ACCESS_LOCK_REASON_DETAILS = {
   [ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]: {
     label: "Belum Checkout Sampai 22.00 WIB",
     message: "Akses dikunci karena belum checkout sampai pukul 22.00 WIB."
+  },
+  [ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS]: {
+    label: "Jam Mingguan Riset Tidak Terpenuhi",
+    message: "Akses dikunci karena jam kerja riset mingguan belum memenuhi target."
   }
 };
 
@@ -297,6 +302,7 @@ module.exports = {
   ACCESS_LOCK_REASON_ATTENDANCE_ABSENT,
   ACCESS_LOCK_REASON_CHECKOUT_MISSING_22,
   ACCESS_LOCK_REASON_DETAILS,
+  ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS,
   ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
   createCheckoutMissing22Locks,
   createAttendanceAbsentLocks,
