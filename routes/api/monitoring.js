@@ -22,13 +22,14 @@ router.get(
     // 1. Find students with Low Attendance (Hours < Target)
     // We rely on the cached 'jam_minggu_ini' and 'jam_minggu_target' in students table
     const lowAttendanceQuery = `
-      SELECT s.id, s.user_id, u.name, s.nim, u.initials,
+      SELECT s.id, s.user_id, u.name, s.nim, u.initials, s.tipe,
              s.jam_minggu_ini as hours_logged, 
              s.jam_minggu_target as hours_target,
              s.status
       FROM students s
       JOIN users u ON u.id = s.user_id
       WHERE s.status = 'Aktif'
+        AND s.tipe = 'Riset'
         AND s.jam_minggu_ini < s.jam_minggu_target
       ORDER BY s.jam_minggu_ini ASC
     `;

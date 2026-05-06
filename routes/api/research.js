@@ -51,6 +51,36 @@ router.use(
   });
 });
 
+function buildResearchListFilters({ search, status }, params) {
+  const filters = [];
+  const statusValue = String(status || "").trim();
+  const searchValue = String(search || "").trim();
+
+  if (statusValue) {
+    params.push(statusValue);
+    filters.push(`rp.status = $${params.length}`);
+  }
+
+  if (searchValue) {
+    params.push(`%${searchValue}%`);
+    filters.push(`(
+      rp.title ILIKE $${params.length}
+      OR rp.short_title ILIKE $${params.length}
+      OR rp.mitra ILIKE $${params.length}
+      OR rp.status ILIKE $${params.length}
+      OR rp.category ILIKE $${params.length}
+      OR u.name ILIKE $${params.length}
+    )`);
+  }
+
+  return filters;
+}
+
+function appendWhere(baseFilters, extraFilters) {
+  const filters = [...baseFilters, ...extraFilters];
+  return filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+}
+
 function resolveRequesterUserId(req) {
   return String(req?.authUser?.id || req.headers["x-user-id"] || req.query.userId || req.body?.userId || "").trim();
 }
@@ -310,6 +340,11 @@ router.get(
     await ensureMeetingNotesTables();
     const role = extractRole(req);
     const userId = resolveRequesterUserId(req);
+    const listParams = [];
+    const listFilters = buildResearchListFilters(
+      { search: req.query.search || req.query.q, status: req.query.status },
+      listParams
+    );
     let result;
 
     const meetingSub = `
@@ -336,10 +371,17 @@ router.get(
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
         LEFT JOIN users u ON u.id = l.user_id
         ${meetingSub}
+        ${appendWhere(listFilters, [])}
         ORDER BY rp.id ASC
-        `
+        `,
+        listParams
       );
     } else if (role === "dosen") {
+      const params = [userId];
+      const shiftedListFilters = buildResearchListFilters(
+        { search: req.query.search || req.query.q, status: req.query.status },
+        params
+      );
       result = await query(
         `
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
@@ -352,12 +394,17 @@ router.get(
         LEFT JOIN research_memberships rm ON rm.project_id = rp.id
         LEFT JOIN lecturers own_l ON own_l.id = rp.supervisor_lecturer_id
         ${meetingSub}
-        WHERE rm.user_id = $1 OR own_l.user_id = $1
+        ${appendWhere(["(rm.user_id = $1 OR own_l.user_id = $1)"], shiftedListFilters)}
         ORDER BY rp.id ASC
         `,
-        [userId]
+        params
       );
     } else {
+      const params = [userId];
+      const shiftedListFilters = buildResearchListFilters(
+        { search: req.query.search || req.query.q, status: req.query.status },
+        params
+      );
       result = await query(
         `
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
@@ -370,10 +417,10 @@ router.get(
         LEFT JOIN research_memberships rm ON rm.project_id = rp.id
         LEFT JOIN board_access ba ON ba.project_id = rp.id
         ${meetingSub}
-        WHERE rm.user_id = $1 OR ba.user_id = $1
+        ${appendWhere(["(rm.user_id = $1 OR ba.user_id = $1)"], shiftedListFilters)}
         ORDER BY rp.id ASC
         `,
-        [userId]
+        params
       );
     }
 

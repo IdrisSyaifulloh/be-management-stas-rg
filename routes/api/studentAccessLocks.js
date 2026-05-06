@@ -65,7 +65,7 @@ router.get(
       return res.status(403).json({ message: "Daftar access lock hanya untuk operator." });
     }
 
-    res.json(await listAccessLocks({ status: req.query.status }));
+    res.json(await listAccessLocks({ status: req.query.status, search: req.query.search || req.query.q }));
   })
 );
 

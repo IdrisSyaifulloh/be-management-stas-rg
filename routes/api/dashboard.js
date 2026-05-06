@@ -48,6 +48,28 @@ function isAfterAttendanceCutoff(time) {
   return String(time || "") >= ATTENDANCE_ABSENT_VISIBLE_AFTER;
 }
 
+function normalizeSearchValue(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function itemMatchesSearch(item, searchValue) {
+  if (!searchValue) return true;
+
+  return [
+    item.student_name,
+    item.studentName,
+    item.student_initials,
+    item.studentInitials,
+    item.nim,
+    item.attendance_status,
+    item.attendanceStatus,
+    item.reference_date,
+    item.referenceDate
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(searchValue));
+}
+
 router.get(
   "/summary",
   asyncHandler(async (req, res) => {
@@ -112,6 +134,9 @@ router.get(
 
     const nowParts = getJakartaNowParts();
     const attendanceSectionActive = isAfterAttendanceCutoff(nowParts.time);
+    const attendanceAbsentSearch = normalizeSearchValue(
+      req.query.attendanceAbsentSearch || req.query.absentSearch || req.query.tidakHadirSearch
+    );
 
     const calendarResult = await query(
       `
@@ -213,6 +238,7 @@ router.get(
         FROM students s
         JOIN users u ON u.id = s.user_id
         WHERE s.status = 'Aktif'
+          AND s.tipe = 'Riset'
           AND COALESCE(s.jam_minggu_target, 0) > 0
           AND COALESCE(s.jam_minggu_ini, 0) < COALESCE(s.jam_minggu_target, 0)
           AND NOT EXISTS (
@@ -263,17 +289,19 @@ router.get(
       targetHours: row.target_hours != null ? Number(row.target_hours) : null
     });
 
+    const attendanceAbsentWarnings = attendanceSectionActive
+      ? attendanceAbsentRows.rows.map((row) => mapWarningItem(row, "attendance_absent"))
+      : [];
+
     const warnings = {
       logbookMissing: logbookMissingRows.rows.map((row) => mapWarningItem(row, "logbook_missing")),
-      attendanceAbsent: attendanceSectionActive
-        ? attendanceAbsentRows.rows.map((row) => mapWarningItem(row, "attendance_absent"))
-        : [],
+      attendanceAbsent: attendanceAbsentWarnings.filter((item) => itemMatchesSearch(item, attendanceAbsentSearch)),
       lowHours: lowHoursRows.rows.map((row) => mapWarningItem(row, "low_hours"))
     };
 
-    if (attendanceSectionActive && warnings.attendanceAbsent.length > 0) {
+    if (attendanceSectionActive && attendanceAbsentWarnings.length > 0) {
       await createAttendanceAbsentLocks({
-        studentIds: warnings.attendanceAbsent.map((item) => item.studentId),
+        studentIds: attendanceAbsentWarnings.map((item) => item.studentId),
         date: today
       });
     }
@@ -287,7 +315,8 @@ router.get(
         attendanceAbsent: {
           visibleAfter: ATTENDANCE_ABSENT_VISIBLE_AFTER,
           active: attendanceSectionActive,
-          notificationEnabled: false
+          notificationEnabled: false,
+          search: attendanceAbsentSearch
         }
       },
       warnings,

@@ -4,6 +4,7 @@ const { resolveStudentRecord } = require("./studentResolver");
 const ACCESS_LOCK_REASON_ATTENDANCE_ABSENT = "ATTENDANCE_ABSENT";
 const ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8 = "WORK_HOURS_UNDER_8";
 const ACCESS_LOCK_REASON_CHECKOUT_MISSING_22 = "CHECKOUT_MISSING_22";
+const ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET = "RISET_WEEKLY_HOURS_UNDER_TARGET";
 const ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS = "RESEARCH_WEEKLY_LOW_HOURS";
 
 const ACCESS_LOCK_REASON_DETAILS = {
@@ -18,6 +19,10 @@ const ACCESS_LOCK_REASON_DETAILS = {
   [ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]: {
     label: "Belum Checkout Sampai 22.00 WIB",
     message: "Akses dikunci karena belum checkout sampai pukul 22.00 WIB."
+  },
+  [ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET]: {
+    label: "Jam Kerja Riset Mingguan Tidak Terpenuhi",
+    message: "Akses dikunci karena jam kerja Riset mingguan belum memenuhi target."
   },
   [ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS]: {
     label: "Jam Mingguan Riset Tidak Terpenuhi",
@@ -80,6 +85,8 @@ function mapAccessLockRow(row) {
       studentName: null,
       student_nim: null,
       nim: null,
+      student_tipe: null,
+      studentType: null,
       reference_date: null,
       date: null,
       lock_reason: null,
@@ -110,6 +117,8 @@ function mapAccessLockRow(row) {
     student_initials: row.student_initials || null,
     student_nim: row.nim || null,
     nim: row.nim || null,
+    student_tipe: row.tipe || null,
+    studentType: row.tipe || null,
     reference_date: row.lock_date_text || row.lock_date,
     date: row.lock_date_text || row.lock_date,
     lock_reason: row.reason,
@@ -188,6 +197,14 @@ async function createCheckoutMissing22Locks({ studentIds, date }) {
   });
 }
 
+async function createRisetWeeklyHoursUnderTargetLocks({ studentIds, date }) {
+  return createStudentAccessLocks({
+    studentIds,
+    date,
+    reason: ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET
+  });
+}
+
 async function getActiveLockForStudent(studentIdOrUserId) {
   await ensureStudentAccessLockTable();
   const student = await resolveStudentRecord(studentIdOrUserId);
@@ -198,7 +215,7 @@ async function getActiveLockForStudent(studentIdOrUserId) {
     SELECT sal.id, sal.student_id, TO_CHAR(sal.lock_date, 'YYYY-MM-DD') AS lock_date_text,
            sal.reason, sal.status, sal.locked, sal.active, sal.locked_at,
            sal.unlocked_at, sal.unlocked_by,
-           u.name AS student_name, u.initials AS student_initials, s.nim
+           u.name AS student_name, u.initials AS student_initials, s.nim, s.tipe
     FROM student_access_locks sal
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id
@@ -206,31 +223,50 @@ async function getActiveLockForStudent(studentIdOrUserId) {
       AND sal.active = TRUE
       AND sal.locked = TRUE
       AND sal.status = 'LOCKED'
+      AND NOT (sal.reason = $2 AND s.tipe = 'Riset')
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
     LIMIT 1
     `,
-    [student.id]
+    [student.id, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]
   );
 
   return result.rows[0] || null;
 }
 
-async function listAccessLocks({ status = null } = {}) {
+async function listAccessLocks({ status = null, search = null } = {}) {
   await ensureStudentAccessLockTable();
   const activeOnly = String(status || "").toLowerCase() === "active";
+  const searchValue = String(search || "").trim();
+  const params = [activeOnly, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT];
+  const searchClause = searchValue
+    ? (() => {
+        params.push(`%${searchValue}%`);
+        return `
+          AND (
+            u.name ILIKE $${params.length}
+            OR s.nim ILIKE $${params.length}
+            OR u.email ILIKE $${params.length}
+            OR s.tipe ILIKE $${params.length}
+            OR sal.reason ILIKE $${params.length}
+          )
+        `;
+      })()
+    : "";
   const result = await query(
     `
     SELECT sal.id, sal.student_id, TO_CHAR(sal.lock_date, 'YYYY-MM-DD') AS lock_date_text,
            sal.reason, sal.status, sal.locked, sal.active, sal.locked_at,
            sal.unlocked_at, sal.unlocked_by,
-           u.name AS student_name, u.initials AS student_initials, s.nim
+           u.name AS student_name, u.initials AS student_initials, s.nim, s.tipe
     FROM student_access_locks sal
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id
     WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED'))
+      AND NOT (sal.reason = $2 AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
+      ${searchClause}
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
     `,
-    [activeOnly]
+    params
   );
 
   return result.rows.map(mapAccessLockRow);
@@ -302,10 +338,12 @@ module.exports = {
   ACCESS_LOCK_REASON_ATTENDANCE_ABSENT,
   ACCESS_LOCK_REASON_CHECKOUT_MISSING_22,
   ACCESS_LOCK_REASON_DETAILS,
+  ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET,
   ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS,
   ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
   createCheckoutMissing22Locks,
   createAttendanceAbsentLocks,
+  createRisetWeeklyHoursUnderTargetLocks,
   createStudentAccessLocks,
   createWorkHoursUnder8Locks,
   ensureStudentAccessLockTable,

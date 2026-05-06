@@ -21,6 +21,7 @@ const {
 const {
   createAttendanceAbsentLocks,
   createCheckoutMissing22Locks,
+  createRisetWeeklyHoursUnderTargetLocks,
   createWorkHoursUnder8Locks
 } = require("../../utils/studentAccessLocks");
 const { requireSafeId } = require("../../utils/securityValidation");
@@ -45,6 +46,8 @@ const ATTENDANCE_ABSENT_LOCK_AFTER = "10:00";
 const ATTENDANCE_CHECKIN_CUTOFF = "22:00";
 const ATTENDANCE_MISSING_CHECKOUT_LOCK_AFTER = "22:00";
 const ATTENDANCE_AUTO_CHECKOUT_REASON_22 = "AUTO_CHECKOUT_22_00";
+const RISET_WEEKLY_HOURS_LOCK_AFTER = "23:59";
+const RISET_WEEKLY_HOURS_LOCK_WEEKDAY = 0;
 
 function getJakartaTimeHm(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -67,6 +70,29 @@ function getJakartaTimeHm(date = new Date()) {
 
 function canCreateAttendanceAbsentLock(date = new Date()) {
   return getJakartaTimeHm(date) >= ATTENDANCE_ABSENT_LOCK_AFTER;
+}
+
+function getJakartaWeekday(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: ATTENDANCE_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const parts = formatter.formatToParts(date).reduce((acc, item) => {
+    acc[item.type] = item.value;
+    return acc;
+  }, {});
+  const jakartaDate = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)));
+
+  return jakartaDate.getUTCDay();
+}
+
+function canCreateRisetWeeklyHoursLock(date = new Date()) {
+  return (
+    getJakartaWeekday(date) === RISET_WEEKLY_HOURS_LOCK_WEEKDAY &&
+    getJakartaTimeHm(date) >= RISET_WEEKLY_HOURS_LOCK_AFTER
+  );
 }
 
 function isCheckInAfterCutoff(date = new Date()) {
@@ -1115,6 +1141,7 @@ router.get(
     const todayIso = getJakartaDateIso();
     const currentTime = getJakartaTimeHm();
     const lockWindowOpen = canCreateAttendanceAbsentLock();
+    const risetWeeklyHoursLockWindowOpen = canCreateRisetWeeklyHoursLock();
     const missingCheckoutWindowOpen = currentTime >= ATTENDANCE_MISSING_CHECKOUT_LOCK_AFTER;
     const settings = await getSettingsAsync();
     const attendanceRules = getAttendanceRules(settings);
@@ -1124,7 +1151,9 @@ router.get(
 
     const studentsResult = await query(
       `
-      SELECT s.id, s.tipe
+      SELECT s.id, s.tipe, s.status,
+             COALESCE(s.jam_minggu_ini, 0) AS current_hours,
+             COALESCE(s.jam_minggu_target, 0) AS target_hours
       FROM students s
       JOIN users u ON u.id = s.user_id
       WHERE u.is_active = TRUE
@@ -1174,11 +1203,24 @@ router.get(
     const reportedAbsentIds = [];
     const magangUnderHoursIds = [];
     const magangMissingCheckoutIds = [];
+    const risetWeeklyUnderHoursIds = [];
 
     allStudentIds.forEach((studentId) => {
       const student = studentsById.get(studentId);
       const attendance = attendanceMap.get(studentId);
       const status = attendance?.status;
+      const currentHours = Number(student?.current_hours || 0);
+      const targetHours = Number(student?.target_hours || 0);
+
+      if (
+        risetWeeklyHoursLockWindowOpen &&
+        student?.tipe === "Riset" &&
+        student?.status === "Aktif" &&
+        targetHours > 0 &&
+        currentHours < targetHours
+      ) {
+        risetWeeklyUnderHoursIds.push(studentId);
+      }
 
       if (status === "Hadir") {
         presentIds.push(studentId);
@@ -1240,7 +1282,7 @@ router.get(
 
       noInformationIds.push(studentId);
 
-      if (shouldCreateAbsentLocks) {
+      if (shouldCreateAbsentLocks && student?.tipe !== "Riset") {
         absentIds.push(studentId);
       }
     });
@@ -1256,6 +1298,14 @@ router.get(
       magangUnderHoursIds.length > 0
         ? await createWorkHoursUnder8Locks({
             studentIds: magangUnderHoursIds,
+            date: todayIso
+          })
+        : [];
+
+    const risetWeeklyUnderHoursLockIds =
+      risetWeeklyUnderHoursIds.length > 0
+        ? await createRisetWeeklyHoursUnderTargetLocks({
+            studentIds: risetWeeklyUnderHoursIds,
             date: todayIso
           })
         : [];
@@ -1277,9 +1327,11 @@ router.get(
       holidays: attendanceRules.holidays,
       excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays,
       lockVisibleAfter: ATTENDANCE_ABSENT_LOCK_AFTER,
+      risetWeeklyHoursLockAfter: RISET_WEEKLY_HOURS_LOCK_AFTER,
       magangMinCheckoutHours,
       missingCheckoutLockAfter: ATTENDANCE_MISSING_CHECKOUT_LOCK_AFTER,
       lockWindowOpen,
+      risetWeeklyHoursLockWindowOpen,
       missingCheckoutWindowOpen,
       presentIds,
       leaveIds,
@@ -1289,9 +1341,11 @@ router.get(
       noInformationIds,
       magangUnderHoursIds,
       magangMissingCheckoutIds,
+      risetWeeklyUnderHoursIds,
       magangLockedIds,
       magangUnderHoursLockIds,
-      magangMissingCheckoutLockIds
+      magangMissingCheckoutLockIds,
+      risetWeeklyUnderHoursLockIds
     });
   })
 );

@@ -6,9 +6,12 @@ const {
   recordNotificationDispatch
 } = require("../utils/notificationService");
 const { getIsoWeekKey, recordDashboardReminder } = require("../utils/dashboardReminders");
+const { createRisetWeeklyHoursUnderTargetLocks } = require("../utils/studentAccessLocks");
 
 const TIMEZONE = "Asia/Jakarta";
 const ONE_MINUTE = 60 * 1000;
+const RISET_WEEKLY_HOURS_LOCK_AFTER = "23:59";
+const RISET_WEEKLY_HOURS_LOCK_WEEKDAY = 0;
 
 function getJakartaNowParts(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -37,6 +40,20 @@ function normalizeTimeValue(value, fallback) {
   const normalized = String(value || "").trim();
   if (/^\d{2}:\d{2}$/.test(normalized)) return normalized;
   return fallback;
+}
+
+function getWeekdayFromIsoDate(isoDate) {
+  const [year, month, day] = String(isoDate || "").split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  return date.getUTCDay();
+}
+
+function isRisetWeeklyHoursLockDue(dateIso, timeHm) {
+  return (
+    getWeekdayFromIsoDate(dateIso) === RISET_WEEKLY_HOURS_LOCK_WEEKDAY &&
+    String(timeHm || "") >= RISET_WEEKLY_HOURS_LOCK_AFTER
+  );
 }
 
 function resolveDueSlots(reminderSettings, nowParts) {
@@ -201,22 +218,21 @@ async function dispatchOperatorLogbookMissing({ slot, referenceDate, toleranceDa
   return { sent, skipped };
 }
 
-async function dispatchOperatorLowAttendance({ slot, referencePeriod }) {
+async function dispatchOperatorLowAttendance({ slot, referenceDate, referencePeriod, currentTime }) {
   if (slot !== "deadline") {
-    return { sent: 0, skipped: 0 };
+    return { sent: 0, skipped: 0, risetWeeklyUnderHoursLockIds: [] };
   }
-
-  const operatorsResult = await query("SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE");
-  if (operatorsResult.rowCount === 0) return { sent: 0, skipped: 0 };
 
   const lowHoursResult = await query(
     `
     SELECT s.id AS student_id, s.user_id AS recipient_user_id, u.name AS student_name,
+           s.tipe,
            COALESCE(s.jam_minggu_ini, 0) AS current_hours,
            COALESCE(s.jam_minggu_target, 0) AS target_hours
     FROM students s
     JOIN users u ON u.id = s.user_id
     WHERE s.status = 'Aktif'
+      AND s.tipe = 'Riset'
       AND COALESCE(s.jam_minggu_target, 0) > 0
       AND COALESCE(s.jam_minggu_ini, 0) < COALESCE(s.jam_minggu_target, 0)
     `
@@ -224,6 +240,7 @@ async function dispatchOperatorLowAttendance({ slot, referencePeriod }) {
 
   let sent = 0;
   let skipped = 0;
+  const operatorsResult = await query("SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE");
 
   for (const student of lowHoursResult.rows) {
     for (const operator of operatorsResult.rows) {
@@ -276,7 +293,20 @@ async function dispatchOperatorLowAttendance({ slot, referencePeriod }) {
     }
   }
 
-  return { sent, skipped };
+  const risetWeeklyUnderHoursStudentIds = isRisetWeeklyHoursLockDue(referenceDate, currentTime)
+    ? lowHoursResult.rows
+        .filter((student) => student.tipe === "Riset")
+        .map((student) => student.student_id)
+    : [];
+  const risetWeeklyUnderHoursLockIds =
+    risetWeeklyUnderHoursStudentIds.length > 0
+      ? await createRisetWeeklyHoursUnderTargetLocks({
+          studentIds: risetWeeklyUnderHoursStudentIds,
+          date: referenceDate
+        })
+      : [];
+
+  return { sent, skipped, risetWeeklyUnderHoursLockIds };
 }
 
 async function runReminderCycle(now = new Date()) {
@@ -305,7 +335,9 @@ async function runReminderCycle(now = new Date()) {
     });
     const operatorLowAttendance = await dispatchOperatorLowAttendance({
       slot,
-      referencePeriod: getIsoWeekKey(now)
+      referenceDate: nowParts.date,
+      referencePeriod: getIsoWeekKey(now),
+      currentTime: nowParts.time
     });
 
     summary.push({
