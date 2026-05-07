@@ -22,7 +22,11 @@ const env = {
   dbName: process.env.DB_NAME || "stasrg",
   dbUser: process.env.DB_USER || "postgres",
   dbPassword: process.env.DB_PASSWORD || "postgres",
-  jwtSecret: process.env.JWT_SECRET || null
+  jwtSecret: process.env.JWT_SECRET || null,
+  cookieSameSite: String(
+    process.env.COOKIE_SAMESITE || (runtimeEnv === "production" ? "none" : "strict")
+  ).trim().toLowerCase(),
+  cookieDomain: process.env.COOKIE_DOMAIN || null
 };
 
 module.exports = env;

@@ -29,6 +29,10 @@ function validateEnv() {
     errors.push("JWT_SECRET wajib diisi untuk keamanan token.");
   }
 
+  if (!["strict", "lax", "none"].includes(env.cookieSameSite)) {
+    errors.push("COOKIE_SAMESITE harus bernilai strict, lax, atau none.");
+  }
+
   return {
     isValid: errors.length === 0,
     errors

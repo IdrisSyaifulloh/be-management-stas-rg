@@ -5,6 +5,7 @@ const { z } = require("zod");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const env = require("../../config/env");
+const { getAuthCookieOptions } = require("../../utils/authCookieOptions");
 const {
   createJwtSession,
   generateSessionId,
@@ -18,15 +19,6 @@ const loginSchema = z.object({
   identifier: z.string().min(1).max(160),
   password: z.string().min(6).max(200)
 });
-
-function getAuthCookieOptions() {
-  return {
-    httpOnly: true,
-    secure: env.nodeEnv === "production",
-    sameSite: "strict",
-    path: "/"
-  };
-}
 
 function clearAuthCookies(res) {
   const cookieOptions = getAuthCookieOptions();

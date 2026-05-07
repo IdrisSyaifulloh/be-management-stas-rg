@@ -94,6 +94,8 @@ Perintah bantu:
 2. Isi nilai production:
    - `CORS_ORIGIN` => domain frontend production (contoh: `https://app.stasrg.ac.id`)
    - `DATABASE_URL` => koneksi PostgreSQL production
+   - `COOKIE_SAMESITE` => gunakan `none` jika frontend dan API beda site/domain; browser membutuhkan HTTPS untuk mode ini
+   - `COOKIE_DOMAIN` => opsional, hanya jika cookie perlu berlaku untuk beberapa subdomain dalam satu parent domain
 3. Jalankan backend dengan mode production:
    - `NODE_ENV=production npm start`
 

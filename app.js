@@ -15,6 +15,7 @@ var { query } = require("./db/pool");
 var { studentAccessLockMiddleware } = require("./utils/studentAccessLocks");
 var { hasControlChars } = require("./utils/securityValidation");
 var { revokeJwtSession, verifyJwtSession } = require("./utils/jwtSessionStore");
+var { getAuthCookieOptions } = require("./utils/authCookieOptions");
 
 var envValidationResult = validateEnv();
 
@@ -80,10 +81,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // ======================================================
 function clearAuthCookieResponse(res) {
   res.cookie("accessToken", "", {
-    httpOnly: true,
-    secure: env.nodeEnv === "production",
-    sameSite: "strict",
-    path: "/",
+    ...getAuthCookieOptions(),
     maxAge: 0
   });
 }
