@@ -132,6 +132,39 @@ function getUnexpectedBoardFillFields(body) {
   return Object.keys(body || {}).filter((key) => !isAllowedBoardFillField(key));
 }
 
+function normalizeMemberType(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isKetuaPeran(value) {
+  return String(value || "").trim().toLowerCase().includes("ketua");
+}
+
+async function ensureSingleKetuaPerScope({ projectId, userIdToExclude, memberType, peran }) {
+  if (!isKetuaPeran(peran)) return null;
+
+  const normalizedMemberType = normalizeMemberType(memberType);
+  const isMahasiswaKetua = normalizedMemberType === "mahasiswa";
+  const existingKetua = await query(
+    `
+    SELECT user_id, peran, member_type
+    FROM research_memberships
+    WHERE project_id = $1
+      AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
+      AND LOWER(COALESCE(member_type, '')) ${isMahasiswaKetua ? "=" : "<>"} 'mahasiswa'
+      ${userIdToExclude ? "AND user_id != $2" : ""}
+    LIMIT 1
+    `,
+    userIdToExclude ? [projectId, userIdToExclude] : [projectId]
+  );
+
+  if (existingKetua.rowCount === 0) return null;
+
+  return isMahasiswaKetua
+    ? `Hanya boleh ada 1 Mahasiswa Ketua Riset per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
+    : `Hanya boleh ada 1 Ketua Peneliti/Pembimbing per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`;
+}
+
 async function isProjectLeaderMember({ userId, projectId }) {
   if (!userId || !projectId) return false;
 
@@ -141,6 +174,7 @@ async function isProjectLeaderMember({ userId, projectId }) {
     FROM research_memberships
     WHERE project_id = $1
       AND user_id = $2
+      AND LOWER(COALESCE(member_type, '')) = 'mahasiswa'
       AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
       AND COALESCE(status, 'Aktif') = 'Aktif'
     LIMIT 1
@@ -1430,17 +1464,13 @@ router.post(
       return res.status(400).json({ message: "userId dan memberType wajib diisi." });
     }
 
-    // Validate that only one "Ketua" is allowed per project.
-    if (peran && peran.toLowerCase().includes("ketua")) {
-      const existingKetua = await query(
-        `SELECT user_id, peran, member_type FROM research_memberships WHERE project_id = $1 AND LOWER(peran) LIKE '%ketua%'`,
-        [req.params.id]
-      );
-      if (existingKetua.rowCount > 0) {
-        return res.status(400).json({
-          message: `Hanya boleh ada 1 Ketua per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
-        });
-      }
+    const ketuaConflictMessage = await ensureSingleKetuaPerScope({
+      projectId: req.params.id,
+      memberType,
+      peran
+    });
+    if (ketuaConflictMessage) {
+      return res.status(400).json({ message: ketuaConflictMessage });
     }
 
     console.log('[POST /research/:id/members] Payload:', {
@@ -1486,16 +1516,25 @@ router.patch(
 
     const { memberType, peran, status, bergabung } = req.body;
 
-    // Validate that only one "Ketua" is allowed per project.
-    if (peran && peran.toLowerCase().includes("ketua")) {
-      const existingKetua = await query(
-        `SELECT user_id, peran, member_type FROM research_memberships WHERE project_id = $1 AND LOWER(peran) LIKE '%ketua%' AND user_id != $2`,
+    if (peran !== undefined || memberType !== undefined) {
+      const existingMember = await query(
+        "SELECT member_type, peran FROM research_memberships WHERE project_id = $1 AND user_id = $2 LIMIT 1",
         [req.params.id, req.params.userId]
       );
-      if (existingKetua.rowCount > 0) {
-        return res.status(400).json({
-          message: `Hanya boleh ada 1 Ketua per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
-        });
+      const effectiveMemberType = memberType !== undefined
+        ? memberType
+        : existingMember.rows[0]?.member_type;
+      const effectivePeran = peran !== undefined
+        ? peran
+        : existingMember.rows[0]?.peran;
+      const ketuaConflictMessage = await ensureSingleKetuaPerScope({
+        projectId: req.params.id,
+        userIdToExclude: req.params.userId,
+        memberType: effectiveMemberType,
+        peran: effectivePeran
+      });
+      if (ketuaConflictMessage) {
+        return res.status(400).json({ message: ketuaConflictMessage });
       }
     }
 
