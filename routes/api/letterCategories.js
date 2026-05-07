@@ -25,6 +25,28 @@ function requireOperator(req, res) {
   return true;
 }
 
+const ROMAN_MONTHS = ['I','II','III','IV','V','VI','VII','VIII','IX','X','XI','XII'];
+
+const SEED_CATEGORIES = [
+  { id: 'lcat-01', name: 'Surat Keputusan',                 kode: '01', singkatan: 'SK'    },
+  { id: 'lcat-02', name: 'Surat Undangan',                  kode: '02', singkatan: 'SU'    },
+  { id: 'lcat-03', name: 'Surat Permohonan',                kode: '03', singkatan: 'SPM'   },
+  { id: 'lcat-04', name: 'Surat Pemberitahuan',             kode: '04', singkatan: 'SPb'   },
+  { id: 'lcat-05', name: 'Surat Peminjaman',                kode: '05', singkatan: 'SPP'   },
+  { id: 'lcat-06', name: 'Surat Pernyataan',                kode: '06', singkatan: 'SPn'   },
+  { id: 'lcat-07', name: 'Surat Mandat',                    kode: '07', singkatan: 'SM'    },
+  { id: 'lcat-08', name: 'Surat Tugas',                     kode: '08', singkatan: 'ST'    },
+  { id: 'lcat-09', name: 'Surat Keterangan',                kode: '09', singkatan: 'Sket'  },
+  { id: 'lcat-10', name: 'Surat Rekomendasi',               kode: '10', singkatan: 'SR'    },
+  { id: 'lcat-11', name: 'Surat Balasan',                   kode: '11', singkatan: 'SB'    },
+  { id: 'lcat-12', name: 'Surat Perintah Perjalanan Dinas', kode: '12', singkatan: 'SPPD'  },
+  { id: 'lcat-13', name: 'Sertifikat',                      kode: '13', singkatan: 'SRT'   },
+  { id: 'lcat-14', name: 'Perjanjian Kerja',                kode: '14', singkatan: 'PK'    },
+  { id: 'lcat-15', name: 'Surat Pengantar',                 kode: '15', singkatan: 'SPeng' },
+  { id: 'lcat-16', name: 'Nota',                            kode: '16', singkatan: null    },
+  { id: 'lcat-17', name: 'Surat Berita Acara Serah Terima', kode: '17', singkatan: null    },
+];
+
 async function ensureLetterCategoriesTable() {
   if (!ensureTablePromise) {
     ensureTablePromise = (async () => {
@@ -40,6 +62,17 @@ async function ensureLetterCategoriesTable() {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_letter_categories_name_lower
         ON letter_categories (LOWER(name))
       `);
+      await query(`ALTER TABLE letter_categories ADD COLUMN IF NOT EXISTS kode      TEXT`);
+      await query(`ALTER TABLE letter_categories ADD COLUMN IF NOT EXISTS singkatan TEXT`);
+
+      for (const cat of SEED_CATEGORIES) {
+        await query(
+          `INSERT INTO letter_categories (id, name, kode, singkatan)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (id) DO NOTHING`,
+          [cat.id, cat.name, cat.kode, cat.singkatan]
+        );
+      }
     })();
   }
   await ensureTablePromise;
@@ -55,9 +88,9 @@ router.get(
   asyncHandler(async (_req, res) => {
     await ensureLetterCategoriesTable();
     const result = await query(`
-      SELECT id, name, created_at, updated_at
+      SELECT id, name, kode, singkatan, created_at, updated_at
       FROM letter_categories
-      ORDER BY name ASC
+      ORDER BY kode ASC NULLS LAST, name ASC
     `);
 
     return res.json(result.rows);
@@ -93,6 +126,43 @@ router.post(
       }
       throw error;
     }
+  })
+);
+
+router.get(
+  "/:id/next-nomor",
+  asyncHandler(async (req, res) => {
+    await ensureLetterCategoriesTable();
+    if (!requireOperator(req, res)) return;
+
+    const catResult = await query(
+      "SELECT id, name, kode FROM letter_categories WHERE id = $1 LIMIT 1",
+      [req.params.id]
+    );
+    if (catResult.rowCount === 0) {
+      return res.status(404).json({ message: "Kategori surat tidak ditemukan." });
+    }
+
+    const { name, kode } = catResult.rows[0];
+    if (!kode) {
+      return res.json({ nomor: null, message: "Kategori ini tidak memiliki kode nomor." });
+    }
+
+    const now = new Date();
+    const tahun = now.getFullYear();
+    const bulan = ROMAN_MONTHS[now.getMonth()];
+
+    const seqResult = await query(
+      `SELECT COUNT(*)::int AS cnt
+       FROM letter_database
+       WHERE LOWER(category) = LOWER($1)
+         AND EXTRACT(YEAR FROM COALESCE(date::date, created_at)) = $2`,
+      [name, tahun]
+    );
+    const seq = String(seqResult.rows[0].cnt + 1).padStart(3, "0");
+    const nomor = `${kode}.${seq}/STASRG/${bulan}/${tahun}`;
+
+    return res.json({ nomor });
   })
 );
 
