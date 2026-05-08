@@ -197,6 +197,8 @@ router.get(
         s.tipe,
         TO_CHAR(s.bergabung, 'YYYY-MM-DD') AS bergabung,
         s.pembimbing,
+        s.pembimbing_lapangan,
+        s.pembimbing_akademik,
         s.kehadiran,
         s.total_hari,
         s.logbook_count,
@@ -214,7 +216,7 @@ router.get(
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui'
       ${whereClause}
-      GROUP BY 
+      GROUP BY
         s.id,
         u.name,
         u.initials,
@@ -228,6 +230,8 @@ router.get(
         s.tipe,
         s.bergabung,
         s.pembimbing,
+        s.pembimbing_lapangan,
+        s.pembimbing_akademik,
         s.kehadiran,
         s.total_hari,
         s.logbook_count,
@@ -270,6 +274,8 @@ router.get(
         s.tipe,
         TO_CHAR(s.bergabung, 'YYYY-MM-DD') AS bergabung,
         s.pembimbing,
+        s.pembimbing_lapangan,
+        s.pembimbing_akademik,
         s.kehadiran,
         s.total_hari,
         s.logbook_count,
@@ -287,7 +293,7 @@ router.get(
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui'
       WHERE s.id = $1
-      GROUP BY 
+      GROUP BY
         s.id,
         u.name,
         u.initials,
@@ -301,6 +307,8 @@ router.get(
         s.tipe,
         s.bergabung,
         s.pembimbing,
+        s.pembimbing_lapangan,
+        s.pembimbing_akademik,
         s.kehadiran,
         s.total_hari,
         s.logbook_count,
@@ -335,6 +343,8 @@ router.post(
       tipe,
       bergabung,
       pembimbing,
+      pembimbing_lapangan,
+      pembimbing_akademik,
       wfhQuota,
       wfh_quota: wfhQuotaSnake,
       password
@@ -388,6 +398,8 @@ router.post(
           tipe,
           bergabung,
           pembimbing,
+          pembimbing_lapangan,
+          pembimbing_akademik,
           wfh_quota
         )
         VALUES (
@@ -401,7 +413,9 @@ router.post(
           $8,
           COALESCE($9::date, CURRENT_DATE),
           $10,
-          COALESCE($11, 0)
+          $11,
+          $12,
+          COALESCE($13, 0)
         )
         `,
         [
@@ -415,6 +429,8 @@ router.post(
           tipe,
           normalizedBergabung,
           pembimbing || null,
+          pembimbing_lapangan || null,
+          pembimbing_akademik || null,
           normalizedWfhQuota
         ]
       );
@@ -450,6 +466,8 @@ router.put(
       tipe,
       bergabung,
       pembimbing,
+      pembimbing_lapangan,
+      pembimbing_akademik,
       wfhQuota,
       wfh_quota: wfhQuotaSnake,
       password
@@ -534,9 +552,11 @@ router.put(
           tipe = COALESCE($8, tipe),
           bergabung = CASE WHEN $9::boolean THEN $10::date ELSE bergabung END,
           pembimbing = COALESCE($11, pembimbing),
-          withdrawal_at = CASE WHEN $12 THEN NOW() ELSE withdrawal_at END,
-          scheduled_deletion_at = CASE WHEN $12 THEN NOW() + INTERVAL '30 days' ELSE scheduled_deletion_at END,
-          wfh_quota = CASE WHEN $13::boolean THEN $14 ELSE wfh_quota END,
+          pembimbing_lapangan = COALESCE($12, pembimbing_lapangan),
+          pembimbing_akademik = COALESCE($13, pembimbing_akademik),
+          withdrawal_at = CASE WHEN $14 THEN NOW() ELSE withdrawal_at END,
+          scheduled_deletion_at = CASE WHEN $14 THEN NOW() + INTERVAL '30 days' ELSE scheduled_deletion_at END,
+          wfh_quota = CASE WHEN $15::boolean THEN $16 ELSE wfh_quota END,
           updated_at = NOW()
         WHERE id = $1
         `,
@@ -552,6 +572,8 @@ router.put(
           hasOwn(req.body || {}, "bergabung"),
           normalizedBergabung,
           pembimbing,
+          pembimbing_lapangan || null,
+          pembimbing_akademik || null,
           isWithdrawing,
           hasWfhQuota,
           normalizedWfhQuota

@@ -318,18 +318,20 @@ router.get(
         s.status,
         s.tipe,
         s.pembimbing,
+        s.pembimbing_lapangan,
+        s.pembimbing_akademik,
         s.bergabung,
         COALESCE(s.wfh_quota, 0)::int AS wfh_quota,
         COUNT(lr.id)::int AS wfh_used
       FROM users u
       LEFT JOIN students s ON s.user_id = u.id
-      LEFT JOIN leave_requests lr 
-        ON lr.student_id = s.id 
-       AND lr.jenis_pengajuan = 'wfh' 
+      LEFT JOIN leave_requests lr
+        ON lr.student_id = s.id
+       AND lr.jenis_pengajuan = 'wfh'
        AND lr.status = 'Disetujui'
        AND lr.counts_against_wfh_quota IS NOT FALSE
       WHERE u.id = $1
-      GROUP BY 
+      GROUP BY
         u.id,
         u.name,
         u.email,
@@ -343,6 +345,8 @@ router.get(
         s.status,
         s.tipe,
         s.pembimbing,
+        s.pembimbing_lapangan,
+        s.pembimbing_akademik,
         s.bergabung,
         s.wfh_quota
       `,

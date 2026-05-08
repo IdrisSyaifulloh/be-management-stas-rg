@@ -440,6 +440,8 @@ router.get(
         id,
         nim,
         pembimbing,
+        pembimbing_lapangan,
+        pembimbing_akademik,
         COALESCE(wfh_quota, 0)::int AS wfh_quota,
         TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
       FROM students

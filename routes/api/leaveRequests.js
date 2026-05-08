@@ -403,7 +403,7 @@ router.post(
 
     const studentResult = await query(
       `
-      SELECT tipe, wfh_quota, pembimbing
+      SELECT tipe, wfh_quota, pembimbing, pembimbing_lapangan, pembimbing_akademik
       FROM students
       WHERE id = $1
       LIMIT 1

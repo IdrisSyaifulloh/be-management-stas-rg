@@ -141,7 +141,7 @@ router.post(
 
     // Ambil data mahasiswa
     const studentRow = await query(
-      `SELECT s.id, s.status, s.pembimbing, s.user_id, u.name AS student_name
+      `SELECT s.id, s.status, s.pembimbing_akademik, s.user_id, u.name AS student_name
        FROM students s JOIN users u ON u.id = s.user_id
        WHERE s.id = $1 LIMIT 1`,
       [resolvedStudentId]
@@ -175,10 +175,10 @@ router.post(
       });
     }
 
-    // Cari advisor berdasarkan nama pembimbing di tabel users (role = dosen)
+    // Cari advisor berdasarkan nama pembimbing_akademik di tabel users (role = dosen)
     const advisorRow = await query(
       `SELECT u.id FROM users u WHERE u.name = $1 AND u.role = 'dosen' LIMIT 1`,
-      [student.pembimbing]
+      [student.pembimbing_akademik]
     );
     const advisorId = advisorRow.rows[0]?.id || null;
 
