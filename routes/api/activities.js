@@ -118,7 +118,6 @@ async function ensureActivitiesTable() {
         CREATE INDEX IF NOT EXISTS idx_stas_activities_input_by ON stas_activities(input_by);
       `);
 
-      // Add new columns if upgrading from old schema
       await query(`
         ALTER TABLE stas_activities
           ADD COLUMN IF NOT EXISTS participants_count INTEGER,
@@ -126,13 +125,19 @@ async function ensureActivitiesTable() {
           ADD COLUMN IF NOT EXISTS notulensi_name TEXT,
           ADD COLUMN IF NOT EXISTS surat_url TEXT,
           ADD COLUMN IF NOT EXISTS surat_name TEXT,
-          ADD COLUMN IF NOT EXISTS pic_name TEXT
+          ADD COLUMN IF NOT EXISTS pic_name TEXT,
+          ADD COLUMN IF NOT EXISTS research_project_id TEXT REFERENCES research_projects(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS daftar_hadir_url TEXT,
+          ADD COLUMN IF NOT EXISTS daftar_hadir_name TEXT
       `);
 
-      // Migrate activity_form constraint to include new values
       await query(`
         ALTER TABLE stas_activities
           DROP CONSTRAINT IF EXISTS stas_activities_activity_form_check
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_stas_activities_project ON stas_activities(research_project_id)
       `);
     })();
   }
@@ -161,6 +166,9 @@ const SELECT_FIELDS = `
   surat_url,
   surat_name,
   pic_name,
+  research_project_id,
+  daftar_hadir_url,
+  daftar_hadir_name,
   input_by,
   created_at,
   updated_at
@@ -181,7 +189,7 @@ router.get(
 
     await ensureActivitiesTable();
 
-    const { startDate, endDate, type } = req.query;
+    const { startDate, endDate, type, projectId } = req.query;
     const params = [];
     const where = [];
 
@@ -200,6 +208,11 @@ router.get(
       params.push(type);
     }
 
+    if (projectId) {
+      where.push(`research_project_id = $${params.length + 1}`);
+      params.push(String(projectId));
+    }
+
     const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
     const parsedLimit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
@@ -210,6 +223,29 @@ router.get(
     const result = await query(
       `SELECT ${SELECT_FIELDS} FROM stas_activities ${whereClause} ORDER BY activity_date DESC, created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
+    );
+
+    res.json(result.rows);
+  })
+);
+
+/**
+ * GET /api/activities/projects
+ * List research projects for dropdown (operator only)
+ */
+router.get(
+  "/projects",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat mengakses." });
+    }
+
+    const result = await query(
+      `SELECT id, COALESCE(short_title, title) AS title
+       FROM research_projects
+       ORDER BY title ASC
+       LIMIT 200`
     );
 
     res.json(result.rows);
@@ -287,7 +323,10 @@ router.post(
       notulensiFileName,
       suratDataUrl,
       suratFileName,
-      picName
+      daftarHadirDataUrl,
+      daftarHadirFileName,
+      picName,
+      researchProjectId
     } = req.body || {};
 
     if (!activityDate || !activityType || !activityForm || !activityName) {
@@ -333,6 +372,15 @@ router.post(
       }
     }
 
+    let daftarHadirUrl = null;
+    if (daftarHadirDataUrl && typeof daftarHadirDataUrl === "string" && daftarHadirDataUrl.trim()) {
+      try {
+        daftarHadirUrl = await saveActivityFile(daftarHadirDataUrl.trim(), daftarHadirFileName || "daftar-hadir", ALLOWED_DOC_TYPES, 10);
+      } catch (error) {
+        return res.status(error.statusCode || 400).json({ message: error.message });
+      }
+    }
+
     const activityId = `ACT-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
     await query(
@@ -341,14 +389,16 @@ router.post(
         id, activity_date, activity_type, activity_form, activity_name,
         agenda, goal, description_summary, activity_time, location,
         participants_count, participants_list, output, folder_bergkas_url,
-        photo_url, notulensi_url, notulensi_name, surat_url, surat_name, pic_name,
+        photo_url, notulensi_url, notulensi_name, surat_url, surat_name,
+        daftar_hadir_url, daftar_hadir_name, pic_name, research_project_id,
         input_by
       ) VALUES (
         $1, $2::date, $3, $4, $5,
         $6, $7, $8, $9::time, $10,
         $11, $12, $13, $14,
-        $15, $16, $17, $18, $19, $20,
-        $21
+        $15, $16, $17, $18, $19,
+        $20, $21, $22, $23,
+        $24
       )
       `,
       [
@@ -371,7 +421,10 @@ router.post(
         notulensiFileName || null,
         suratUrl,
         suratFileName || null,
+        daftarHadirUrl,
+        daftarHadirFileName || null,
         picName || null,
+        researchProjectId || null,
         userId
       ]
     );
@@ -381,7 +434,8 @@ router.post(
       id: activityId,
       photoUrl,
       notulensiUrl,
-      suratUrl
+      suratUrl,
+      daftarHadirUrl
     });
   })
 );
@@ -406,7 +460,7 @@ router.put(
     await ensureActivitiesTable();
 
     const existing = await query(
-      "SELECT id, photo_url, notulensi_url, notulensi_name, surat_url, surat_name FROM stas_activities WHERE id = $1",
+      "SELECT id, photo_url, notulensi_url, notulensi_name, surat_url, surat_name, daftar_hadir_url, daftar_hadir_name FROM stas_activities WHERE id = $1",
       [activityId]
     );
     if (existing.rowCount === 0) {
@@ -435,7 +489,10 @@ router.put(
       notulensiFileName,
       suratDataUrl,
       suratFileName,
-      picName
+      daftarHadirDataUrl,
+      daftarHadirFileName,
+      picName,
+      researchProjectId
     } = req.body || {};
 
     if (activityType && !["riset", "abdimas", "internal"].includes(activityType)) {
@@ -477,6 +534,17 @@ router.put(
       }
     }
 
+    let daftarHadirUrl = existingRow.daftar_hadir_url;
+    let resolvedDaftarHadirName = existingRow.daftar_hadir_name;
+    if (daftarHadirDataUrl && typeof daftarHadirDataUrl === "string" && daftarHadirDataUrl.trim()) {
+      try {
+        daftarHadirUrl = await saveActivityFile(daftarHadirDataUrl.trim(), daftarHadirFileName || "daftar-hadir", ALLOWED_DOC_TYPES, 10);
+        resolvedDaftarHadirName = daftarHadirFileName || resolvedDaftarHadirName;
+      } catch (error) {
+        return res.status(error.statusCode || 400).json({ message: error.message });
+      }
+    }
+
     await query(
       `
       UPDATE stas_activities
@@ -499,7 +567,10 @@ router.put(
         notulensi_name = CASE WHEN $17::text IS NOT NULL THEN $17 ELSE notulensi_name END,
         surat_url = CASE WHEN $18::text IS NOT NULL THEN $18 ELSE surat_url END,
         surat_name = CASE WHEN $19::text IS NOT NULL THEN $19 ELSE surat_name END,
-        pic_name = COALESCE($20, pic_name),
+        daftar_hadir_url = CASE WHEN $20::text IS NOT NULL THEN $20 ELSE daftar_hadir_url END,
+        daftar_hadir_name = CASE WHEN $21::text IS NOT NULL THEN $21 ELSE daftar_hadir_name END,
+        pic_name = COALESCE($22, pic_name),
+        research_project_id = COALESCE($23, research_project_id),
         updated_at = NOW()
       WHERE id = $1
       `,
@@ -523,7 +594,10 @@ router.put(
         resolvedNotulensiName || null,
         suratUrl || null,
         resolvedSuratName || null,
-        picName || null
+        daftarHadirUrl || null,
+        resolvedDaftarHadirName || null,
+        picName || null,
+        researchProjectId || null
       ]
     );
 
@@ -531,7 +605,8 @@ router.put(
       message: "Kegiatan berhasil diubah.",
       photoUrl,
       notulensiUrl,
-      suratUrl
+      suratUrl,
+      daftarHadirUrl
     });
   })
 );

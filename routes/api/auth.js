@@ -71,8 +71,6 @@ router.post(
       if (daysSinceWithdrawal < 30) {
         return res.status(403).json({
           message: "Akun Anda dalam status Temporary HOLD karena telah mengundurkan diri. Akun akan dihapus setelah 30 hari.",
-          withdrawal_at: user.withdrawal_at,
-          scheduled_deletion_at: user.scheduled_deletion_at,
           days_remaining: 30 - daysSinceWithdrawal
         });
       }

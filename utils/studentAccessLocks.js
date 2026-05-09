@@ -327,8 +327,7 @@ async function studentAccessLockMiddleware(req, res, next) {
       reason: mappedLock.reason,
       reasonLabel: mappedLock.reasonLabel,
       reasonDetail: mappedLock.reasonDetail,
-      date: mappedLock.date,
-      lock: mappedLock
+      date: mappedLock.date
     });
   } catch (error) {
     return next(error);

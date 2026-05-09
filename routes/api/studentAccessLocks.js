@@ -23,37 +23,25 @@ router.get(
     const userId = req.authUser?.id;
     const lock = await getActiveLockForStudent(userId);
     if (!lock) {
-      const student = await resolveStudentRecord(userId);
       return res.json({
-        id: null,
         locked: false,
-        active: false,
-        status: "UNLOCKED",
-        student_id: student?.id || null,
-        studentId: student?.id || null,
-        student_name: student?.name || null,
-        studentName: student?.name || null,
-        student_nim: student?.nim || null,
-        nim: student?.nim || null,
-        reference_date: null,
-        date: null,
-        lock_reason: null,
         reason: null,
-        reason_label: null,
         reasonLabel: null,
-        reason_detail: null,
         reasonDetail: null,
         message: null,
-        locked_at: null,
-        lockedAt: null,
-        unlocked_at: null,
-        unlockedAt: null,
-        unlocked_by: null,
-        unlockedBy: null
+        date: null
       });
     }
 
-    res.json(mapAccessLockRow(lock));
+    const mapped = mapAccessLockRow(lock);
+    res.json({
+      locked: true,
+      reason: mapped.reason,
+      reasonLabel: mapped.reasonLabel,
+      reasonDetail: mapped.reasonDetail,
+      message: mapped.message,
+      date: mapped.date
+    });
   })
 );
 
