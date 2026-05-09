@@ -53,7 +53,7 @@ router.use("/draft-reports", draftReportsRouter);
 router.use("/draft-report-types", requireRoleStrict(["operator", "mahasiswa", "dosen"]), draftReportTypesRouter);
 router.use("/profile", profileRouter);
 router.use("/notifications", notificationsRouter);
-router.use("/system-settings", requireRoleStrict(["operator"]), systemSettingsRouter);
+router.use("/system-settings", systemSettingsRouter);
 router.use("/wfh-settings", requireRoleStrict(["operator"]), wfhSettingsRouter);
 router.use("/student-access-locks", studentAccessLocksRouter);
 router.use("/user-ui-state", userUiStateRouter);

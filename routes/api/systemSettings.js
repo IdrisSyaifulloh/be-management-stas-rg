@@ -9,11 +9,22 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     const role = extractRole(req);
-    if (role !== "operator") {
-      return res.status(403).json({ message: "Akses ditolak." });
-    }
     const settings = await getSettingsAsync();
-    res.json(settings);
+
+    // Operator dapat semua settings
+    if (role === "operator") {
+      return res.json(settings);
+    }
+
+    // Publik (termasuk halaman login) hanya dapat data branding
+    const umum = settings?.umum || {};
+    return res.json({
+      umum: {
+        appName: umum.appName || null,
+        universityName: umum.universityName || null,
+        logoDataUrl: umum.logoDataUrl || null
+      }
+    });
   })
 );
 
