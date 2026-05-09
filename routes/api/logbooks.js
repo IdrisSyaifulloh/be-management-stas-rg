@@ -46,10 +46,6 @@ function getTodayDateInJakarta() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta" }).format(new Date());
 }
 
-function resolveLogbookSource(req) {
-  return String(req.headers["x-logbook-source"] || req.query.source || req.body?.source || "").trim().toLowerCase();
-}
-
 async function ensureProjectCanBeUsed(projectId, studentId) {
   const normalizedProjectId = normalizeOptionalProjectId(projectId);
   if (!normalizedProjectId) return null;
@@ -331,15 +327,17 @@ router.patch(
       return res.status(403).json({ message: "Hanya dosen/operator yang dapat memverifikasi logbook." });
     }
 
-    const { verificationStatus, verificationNote, verifiedBy, verifiedByName } = req.body;
+    const verifiedBy = req.authUser?.id;
+    if (!verifiedBy) {
+      return res.status(401).json({ message: "Autentikasi diperlukan." });
+    }
+
+    const { verificationStatus, verificationNote } = req.body;
 
     if (!verificationStatus || !["Terverifikasi", "Perlu Revisi"].includes(verificationStatus)) {
       return res.status(400).json({ message: "verificationStatus harus Terverifikasi/Perlu Revisi." });
     }
 
-    if (!verifiedBy) {
-      return res.status(400).json({ message: "verifiedBy wajib diisi." });
-    }
     const logbookId = requireSafeId(req.params.id, "id");
 
     const exists = await query("SELECT id FROM logbook_entries WHERE id = $1", [logbookId]);
@@ -347,7 +345,7 @@ router.patch(
       return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
     }
 
-    const auditId = `AL-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const auditId = `AL-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
     const roleLabel = role === "dosen" ? "Dosen" : "Operator";
     await query(
       `
@@ -362,8 +360,7 @@ router.patch(
         {
           logbookId,
           verificationStatus,
-          verificationNote: verificationNote || null,
-          verifiedByName: verifiedByName || null
+          verificationNote: verificationNote || null
         }
       ]
     );
@@ -377,7 +374,12 @@ router.put(
   asyncHandler(async (req, res) => {
     await ensureLogbookAttachmentColumns();
     const role = extractRole(req);
-    const source = resolveLogbookSource(req);
+    if (!role) {
+      return res.status(403).json({ message: "Autentikasi diperlukan." });
+    }
+    if (!["mahasiswa", "operator", "dosen"].includes(role)) {
+      return res.status(403).json({ message: "Role tidak diizinkan." });
+    }
     const logbookId = requireSafeId(req.params.id, "id");
     const body = req.body || {};
     const { projectId, date, title, description, output, kendala, hasAttachment, fileDataUrl, fileName, clearAttachment } = body;
@@ -390,23 +392,35 @@ router.put(
         return res.status(400).json({ message: "Format tanggal logbook harus YYYY-MM-DD." });
       }
 
-      if (role === "mahasiswa" && source !== "logbook-page") {
+      // Mahasiswa hanya boleh edit logbook hari ini — header source tidak bisa bypass ini
+      if (role === "mahasiswa") {
         const todayDate = getTodayDateInJakarta();
         if (normalizedUpdateDate !== todayDate) {
           return res.status(400).json({
-            message: "Untuk role mahasiswa, tanggal logbook hanya boleh hari ini pada flow checkout/absen."
+            message: "Mahasiswa hanya dapat mengubah logbook untuk tanggal hari ini."
           });
         }
       }
     }
 
     const existingEntry = await query(
-      "SELECT id, student_id, project_id, file_url, file_name, file_size, has_attachment FROM logbook_entries WHERE id = $1 LIMIT 1",
+      `SELECT le.id, le.student_id, le.project_id, le.file_url, le.file_name, le.file_size, le.has_attachment,
+              s.user_id
+       FROM logbook_entries le
+       JOIN students s ON s.id = le.student_id
+       WHERE le.id = $1 LIMIT 1`,
       [logbookId]
     );
 
     if (existingEntry.rowCount === 0) {
       return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
+    }
+
+    if (role === "mahasiswa") {
+      const requesterUserId = req.authUser?.id;
+      if (!requesterUserId || String(existingEntry.rows[0].user_id) !== String(requesterUserId)) {
+        return res.status(403).json({ message: "Logbook bukan milik akun login." });
+      }
     }
 
     const hasProjectIdInput = Object.prototype.hasOwnProperty.call(body, "projectId");
@@ -510,7 +524,7 @@ router.delete(
     }
 
     if (role === "mahasiswa") {
-      const requesterUserId = String(req.authUser?.id || req.headers["x-user-id"] || req.query.userId || "").trim();
+      const requesterUserId = String(req.authUser?.id || "").trim();
       const requesterStudentId = requesterUserId ? await resolveStudentId(requesterUserId) : null;
       if (!requesterStudentId || requesterStudentId !== existing.rows[0].student_id) {
         return res.status(403).json({ message: "Mahasiswa hanya boleh menghapus logbook miliknya sendiri." });
@@ -532,18 +546,43 @@ router.delete(
 router.post(
   "/:id/comments",
   asyncHandler(async (req, res) => {
-    const { id, logbookId, authorId, authorName, text } = req.body;
-
-    if (!id || !logbookId || !authorId || !text) {
-      return res.status(400).json({ message: "id, logbookId, authorId, text wajib diisi." });
+    const role = extractRole(req);
+    if (!["mahasiswa", "dosen", "operator"].includes(role)) {
+      return res.status(403).json({ message: "Autentikasi diperlukan untuk menambah komentar." });
     }
+
+    const authorId = req.authUser?.id;
+    if (!authorId) {
+      return res.status(401).json({ message: "Autentikasi diperlukan." });
+    }
+
+    const { id, text } = req.body;
+    const resolvedLogbookId = requireSafeId(req.params.id, "id");
+
+    if (!id || !text) {
+      return res.status(400).json({ message: "id dan text wajib diisi." });
+    }
+
+    const exists = await query(
+      "SELECT id FROM logbook_entries WHERE id = $1 LIMIT 1",
+      [resolvedLogbookId]
+    );
+    if (exists.rowCount === 0) {
+      return res.status(404).json({ message: "Entri logbook tidak ditemukan." });
+    }
+
+    const authorResult = await query(
+      "SELECT name FROM users WHERE id = $1 LIMIT 1",
+      [authorId]
+    );
+    const authorName = authorResult.rows[0]?.name || null;
 
     await query(
       `
       INSERT INTO logbook_comments (id, logbook_entry_id, author_id, author_name, text)
       VALUES ($1, $2, $3, $4, $5)
       `,
-      [id, logbookId, authorId, authorName || null, text]
+      [id, resolvedLogbookId, authorId, authorName, text]
     );
 
     res.status(201).json({ message: "Komentar berhasil ditambahkan." });

@@ -1,5 +1,6 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
+const { extractRole } = require("../../utils/roleGuard");
 const {
   getWfhStudentSettings,
   saveWfhStudentSettings,
@@ -10,17 +11,22 @@ const router = express.Router();
 router.get(
   "/students",
   asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
     const items = await getWfhStudentSettings();
-
-    res.json({
-      items,
-    });
+    res.json({ items });
   })
 );
 
-router.patch("/students", async (req, res) => {
-  try {
-    console.log("[WFH SETTINGS] PATCH body:", JSON.stringify(req.body, null, 2));
+router.patch(
+  "/students",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
 
     const payload = Array.isArray(req.body)
       ? req.body
@@ -32,13 +38,7 @@ router.patch("/students", async (req, res) => {
       message: "Pengaturan WFH per mahasiswa berhasil diperbarui.",
       items,
     });
-  } catch (err) {
-    console.error("[WFH SETTINGS] PATCH ERROR:", err);
-
-    res.status(500).json({
-      message: err.message || "Terjadi kesalahan pada server.",
-    });
-  }
-});
+  })
+);
 
 module.exports = router;

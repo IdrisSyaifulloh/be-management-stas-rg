@@ -20,8 +20,7 @@ router.post(
     const result = await runCleanup();
     return res.json({
       message: "Cleanup job completed successfully.",
-      deleted_count: result.deleted,
-      deleted_accounts: result.accounts
+      deleted_count: result.deleted
     });
   })
 );

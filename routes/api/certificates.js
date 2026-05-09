@@ -16,7 +16,7 @@ const ALLOWED_CERT_FILE_TYPES = {
 };
 
 function resolveRequesterUserId(req) {
-  return String(req.headers["x-user-id"] || req.query.userId || req.body?.userId || "").trim();
+  return String(req.authUser?.id || "").trim();
 }
 
 async function canDosenAccessProject(userId, projectId) {
@@ -183,6 +183,7 @@ router.get(
       LEFT JOIN research_memberships rm_dosen ON rm_dosen.project_id = rp.id
       ${whereClause}
       ORDER BY rp.id ASC, su.name ASC
+      LIMIT 500
       `,
       params
     );

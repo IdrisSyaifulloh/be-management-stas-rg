@@ -182,6 +182,7 @@ router.get(
               AND dwr.reference_date = $1::date
           )
         ORDER BY u.name ASC
+        LIMIT 500
         `,
         [today]
       ),
@@ -220,6 +221,7 @@ router.get(
                   AND dwr.reference_date = $1::date
               )
             ORDER BY u.name ASC
+            LIMIT 500
             `,
             [today]
           )
@@ -256,6 +258,7 @@ router.get(
               AND dwr.reference_period = $1::text
           )
         ORDER BY COALESCE(s.jam_minggu_ini, 0) ASC, u.name ASC
+        LIMIT 500
         `,
         [weekKey]
       )
@@ -400,8 +403,7 @@ router.post(
       });
     }
 
-    const reviewerUserId =
-      req.authUser?.id || String(req.headers["x-user-id"] || "").trim() || null;
+    const reviewerUserId = req.authUser?.id || null;
 
     const reviewResult = await recordDashboardWarningReview({
       studentId: resolvedStudentId,
@@ -506,6 +508,7 @@ router.get(
         JOIN research_memberships rm ON rm.project_id = rp.id
         WHERE rm.user_id = $1
         ORDER BY rp.id
+        LIMIT 100
         `,
         [userId]
       ),
@@ -516,6 +519,7 @@ router.get(
         JOIN research_milestones m ON m.project_id = rm.project_id
         WHERE rm.user_id = $1
         ORDER BY rm.project_id ASC, m.sort_order ASC, m.id ASC
+        LIMIT 500
         `,
         [userId]
       ),
@@ -536,6 +540,7 @@ router.get(
         FROM leave_requests
         WHERE student_id = $1
         ORDER BY tanggal_pengajuan DESC
+        LIMIT 200
         `,
         [studentId]
       ),
@@ -546,6 +551,7 @@ router.get(
         WHERE student_id = $1
           AND date_trunc('month', attendance_date) = date_trunc('month', CURRENT_DATE)
           AND attendance_date >= $2::date
+        LIMIT 31
         `,
         [studentId, studentRow.active_start_date]
       ),
@@ -574,6 +580,7 @@ router.get(
         FROM certificate_requests
         WHERE student_id = $1
         ORDER BY updated_at DESC, id DESC
+        LIMIT 100
         `,
         [studentId]
       ),
@@ -738,6 +745,7 @@ router.get(
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
         WHERE l.user_id = $1
         ORDER BY rp.id
+        LIMIT 100
         `,
         [userId]
       ),

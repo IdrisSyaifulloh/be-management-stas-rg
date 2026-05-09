@@ -52,6 +52,7 @@ router.get(
       FROM lecturers l
       JOIN users u ON u.id = l.user_id
       ORDER BY u.name ASC
+      LIMIT 500
       `
     );
 

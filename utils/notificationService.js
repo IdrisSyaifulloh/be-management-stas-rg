@@ -160,7 +160,7 @@ async function createNotification({
     };
   }
 
-  const notificationId = id || `NTF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const notificationId = id || `NTF-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
   await query(
     `
     INSERT INTO notifications (id, recipient_user_id, sender_user_id, type, title, body)
@@ -207,7 +207,7 @@ async function recordNotificationDispatch({
   payload = null
 }) {
   await ensureNotificationDispatchTable();
-  const dispatchId = `NDL-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const dispatchId = `NDL-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
   await query(
     `
     INSERT INTO notification_dispatch_logs (

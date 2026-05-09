@@ -11,6 +11,7 @@ async function getWfhStudentSettings() {
     JOIN users u ON u.id = s.user_id
     WHERE s.tipe = 'Magang'
     ORDER BY u.name ASC
+    LIMIT 1000
   `);
 
   return result.rows;
@@ -25,6 +26,7 @@ async function getDistinctStudents() {
     JOIN users u ON u.id = s.user_id
     WHERE s.tipe = 'Magang'
     ORDER BY u.name ASC
+    LIMIT 1000
   `);
 
   return result.rows;

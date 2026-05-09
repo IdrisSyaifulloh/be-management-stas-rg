@@ -24,7 +24,7 @@ async function sendNotification(recipientUserId, title, body, senderUserId = nul
 
 async function writeAuditLog(userId, userRole, action, target, detail) {
   try {
-    const auditId = `AL-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const auditId = `AL-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
     await query(
       `INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -73,22 +73,41 @@ const SELECT_WITHDRAWAL = `
 router.get(
   "/",
   asyncHandler(async (req, res) => {
+    const role = extractRole(req);
     const { studentId, advisorId, finalStatus, statusOperator } = req.query;
 
-    const resolvedStudentId = studentId ? await resolveStudentId(String(studentId)) : null;
+    const VALID_FINAL_STATUSES = ["Menunggu", "Menunggu Dosen", "Disetujui", "Ditolak Operator", "Ditolak Dosen"];
+    const VALID_STATUS_OPERATOR = ["Menunggu", "Diteruskan", "Ditolak"];
+
+    const normalizedFinalStatus = finalStatus && VALID_FINAL_STATUSES.includes(finalStatus) ? finalStatus : null;
+    const normalizedStatusOperator = statusOperator && VALID_STATUS_OPERATOR.includes(statusOperator) ? statusOperator : null;
+
+    let resolvedStudentId = studentId ? await resolveStudentId(String(studentId)) : null;
     if (studentId && !resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
+    // Mahasiswa hanya boleh lihat miliknya sendiri
+    if (role === "mahasiswa") {
+      const myStudentId = await resolveStudentId(req.authUser.id);
+      if (!myStudentId) {
+        return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
+      }
+      resolvedStudentId = myStudentId;
+    }
+
+    // Dosen hanya boleh lihat yang ditetapkan sebagai advisor
+    const resolvedAdvisorId = role === "dosen" ? req.authUser.id : (advisorId || null);
+
     const { whereClause, params } = buildWhereClause([
       { value: resolvedStudentId, sql: (i) => `wr.student_id = $${i}` },
-      { value: advisorId || null, sql: (i) => `wr.advisor_id = $${i}` },
-      { value: finalStatus || null, sql: (i) => `wr.final_status = $${i}` },
-      { value: statusOperator || null, sql: (i) => `wr.status_operator = $${i}` },
+      { value: resolvedAdvisorId, sql: (i) => `wr.advisor_id = $${i}` },
+      { value: normalizedFinalStatus, sql: (i) => `wr.final_status = $${i}` },
+      { value: normalizedStatusOperator, sql: (i) => `wr.status_operator = $${i}` },
     ]);
 
     const result = await query(
-      `${SELECT_WITHDRAWAL} ${whereClause} ORDER BY wr.submitted_at DESC`,
+      `${SELECT_WITHDRAWAL} ${whereClause} ORDER BY wr.submitted_at DESC LIMIT 200`,
       params
     );
 
@@ -102,6 +121,8 @@ router.get(
 router.get(
   "/:id",
   asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+
     const result = await query(
       `${SELECT_WITHDRAWAL} WHERE wr.id = $1`,
       [req.params.id]
@@ -111,7 +132,22 @@ router.get(
       return res.status(404).json({ message: "Pengajuan pengunduran diri tidak ditemukan." });
     }
 
-    res.json(result.rows[0]);
+    const wr = result.rows[0];
+
+    // Mahasiswa hanya boleh lihat miliknya sendiri
+    if (role === "mahasiswa") {
+      const myStudentId = await resolveStudentId(req.authUser.id);
+      if (!myStudentId || String(wr.student_id) !== String(myStudentId)) {
+        return res.status(403).json({ message: "Akses ditolak." });
+      }
+    }
+
+    // Dosen hanya boleh lihat yang mereka jadi advisor
+    if (role === "dosen" && String(wr.advisor_id) !== String(req.authUser.id)) {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
+
+    res.json(wr);
   })
 );
 
@@ -170,8 +206,7 @@ router.post(
 
     if (existingActive.rowCount > 0) {
       return res.status(409).json({
-        message: "Anda sudah memiliki pengajuan pengunduran diri yang sedang aktif.",
-        existingId: existingActive.rows[0].id,
+        message: "Anda sudah memiliki pengajuan pengunduran diri yang sedang aktif."
       });
     }
 
@@ -183,7 +218,7 @@ router.post(
     const advisorId = advisorRow.rows[0]?.id || null;
 
     // Generate ID
-    const wdrId = `WDR-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const wdrId = `WDR-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
 
     await query(
       `INSERT INTO withdrawal_requests (id, student_id, advisor_id, reason, submitted_at, status_operator, final_status)
@@ -237,27 +272,33 @@ router.patch(
       return res.status(400).json({ message: 'status harus "Diteruskan" atau "Ditolak".' });
     }
 
-    // Ambil data request beserta user_id mahasiswa untuk notifikasi
+    await query("BEGIN");
+    try {
+    // FOR UPDATE mencegah dua operator memproses request yang sama secara bersamaan
     const current = await query(
       `SELECT wr.id, wr.status_operator, wr.student_id, wr.advisor_id,
               s.user_id AS student_user_id, su.name AS student_name
        FROM withdrawal_requests wr
        JOIN students s ON s.id = wr.student_id
        JOIN users su ON su.id = s.user_id
-       WHERE wr.id = $1 LIMIT 1`,
+       WHERE wr.id = $1 LIMIT 1
+       FOR UPDATE`,
       [req.params.id]
     );
 
     if (current.rowCount === 0) {
+      await query("ROLLBACK");
       return res.status(404).json({ message: "Pengajuan pengunduran diri tidak ditemukan." });
     }
 
     const wr = current.rows[0];
 
     if (wr.status_operator !== "Menunggu") {
+      await query("ROLLBACK");
       return res.status(409).json({ message: "Pengajuan ini sudah pernah diproses oleh operator." });
     }
 
+    const operatorId = req.authUser?.id || null;
     const newFinalStatus = status === "Diteruskan" ? "Menunggu Dosen" : "Ditolak Operator";
     const newStatusDosen = status === "Diteruskan" ? "Menunggu" : null;
 
@@ -271,41 +312,40 @@ router.patch(
            final_status          = $6,
            updated_at            = NOW()
        WHERE id = $1`,
-      [req.params.id, status, newStatusDosen, reviewedById || null, note || null, newFinalStatus]
+      [req.params.id, status, newStatusDosen, operatorId, note || null, newFinalStatus]
     );
 
-    // Notifikasi
+    await query("COMMIT");
+
+    // Notifikasi (di luar transaksi)
     if (status === "Diteruskan") {
-      // Beritahu dosen pembimbing
       if (wr.advisor_id) {
         await sendNotification(
           wr.advisor_id,
           "Pengajuan Pengunduran Diri Perlu Ditinjau",
-          `Operator telah meneruskan pengajuan pengunduran diri dari ${wr.student_name} (ID: ${req.params.id}) untuk keputusan Anda.`,
-          reviewedById || null,
+          `Operator telah meneruskan pengajuan pengunduran diri dari ${wr.student_name} untuk keputusan Anda.`,
+          operatorId,
           "pengunduran_diri"
         );
       }
-      // Beritahu mahasiswa
       await sendNotification(
         wr.student_user_id,
         "Pengajuan Pengunduran Diri Diteruskan",
-        `Pengajuan Anda (ID: ${req.params.id}) telah diteruskan oleh operator ke dosen pembimbing untuk keputusan final.`,
-        reviewedById || null,
+        `Pengajuan Anda telah diteruskan oleh operator ke dosen pembimbing untuk keputusan final.`,
+        operatorId,
         "pengunduran_diri"
       );
     } else {
-      // Beritahu mahasiswa penolakan operator
       await sendNotification(
         wr.student_user_id,
         "Pengajuan Pengunduran Diri Ditolak Operator",
-        `Pengajuan pengunduran diri Anda (ID: ${req.params.id}) telah ditolak oleh operator.${note ? " Catatan: " + note : ""}`,
-        reviewedById || null,
+        `Pengajuan pengunduran diri Anda telah ditolak oleh operator.${note ? " Catatan: " + note : ""}`,
+        operatorId,
         "pengunduran_diri"
       );
     }
 
-    await writeAuditLog(reviewedById || null, "Operator", "Update", "withdrawal_request", {
+    await writeAuditLog(operatorId, "Operator", "Update", "withdrawal_request", {
       withdrawal_request_id: req.params.id,
       status_operator: status,
       final_status: newFinalStatus,
@@ -318,13 +358,17 @@ router.patch(
           ? "Pengajuan berhasil diteruskan ke dosen pembimbing."
           : "Pengajuan berhasil ditolak.",
     });
+    } catch (err) {
+      await query("ROLLBACK");
+      throw err;
+    }
   })
 );
 
 // ─────────────────────────────────────────────
 // PATCH /api/v1/withdrawal-requests/:id/advisor-review
 // Hanya dosen pembimbing yang TERDAFTAR pada pengajuan (advisor_id).
-// Sumber identitas: header x-user-id (req.authUser.id) — bukan body reviewedById.
+// Sumber identitas: req.authUser.id (JWT) — bukan body reviewedById.
 // Body: { status: 'Disetujui'|'Ditolak', reviewedById, note }
 //   - reviewedById dipakai sebagai metadata/logging saja, BUKAN untuk otorisasi.
 // Jika Disetujui → students.status = 'Mengundurkan Diri' + withdrawal_at + scheduled_deletion_at
@@ -337,7 +381,7 @@ router.patch(
       return res.status(403).json({ message: "Hanya dosen pembimbing yang dapat memproses tahap ini." });
     }
 
-    // Identitas pemanggil diambil dari header auth (x-user-id), bukan dari body.
+    // Identitas pemanggil diambil dari JWT (req.authUser.id), bukan dari body.
     // Body reviewedById hanya dipakai sebagai metadata logging.
     const callerId = req.authUser?.id || null;
 

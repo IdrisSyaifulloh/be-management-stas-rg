@@ -95,7 +95,8 @@ function handleUniqueError(error, res) {
 
 router.get(
   "/",
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    if (!requireOperator(req, res)) return;
     await ensureOperatorColumns();
     const result = await query(
       `

@@ -369,7 +369,7 @@ router.post(
 
     try {
       const timestamp = Date.now();
-      const randomSuffix = Math.floor(Math.random() * 1000).toString().padStart(3, "0");
+      const randomSuffix = require("crypto").randomUUID().slice(0, 8);
       const userId = `usr_mhs_${timestamp}${randomSuffix}`;
       const studentId = `stu_${timestamp}${randomSuffix}`;
 
@@ -704,7 +704,7 @@ router.post(
     }
 
     const timestamp = Date.now();
-    const suffix = Math.floor(Math.random() * 1000).toString().padStart(3, "0");
+    const suffix = require("crypto").randomUUID().slice(0, 8);
     const periodId = `per_${timestamp}${suffix}`;
 
     const result = await query(

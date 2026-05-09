@@ -202,8 +202,13 @@ router.get(
 
     const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
+    const parsedLimit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    const parsedOffset = Math.max(Number(req.query.offset) || 0, 0);
+    params.push(parsedLimit);
+    params.push(parsedOffset);
+
     const result = await query(
-      `SELECT ${SELECT_FIELDS} FROM stas_activities ${whereClause} ORDER BY activity_date DESC, created_at DESC`,
+      `SELECT ${SELECT_FIELDS} FROM stas_activities ${whereClause} ORDER BY activity_date DESC, created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
 

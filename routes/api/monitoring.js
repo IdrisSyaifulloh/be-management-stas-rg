@@ -23,7 +23,7 @@ router.get(
     // We rely on the cached 'jam_minggu_ini' and 'jam_minggu_target' in students table
     const lowAttendanceQuery = `
       SELECT s.id, s.user_id, u.name, s.nim, u.initials, s.tipe,
-             s.jam_minggu_ini as hours_logged, 
+             s.jam_minggu_ini as hours_logged,
              s.jam_minggu_target as hours_target,
              s.status
       FROM students s
@@ -32,6 +32,7 @@ router.get(
         AND s.tipe = 'Riset'
         AND s.jam_minggu_ini < s.jam_minggu_target
       ORDER BY s.jam_minggu_ini ASC
+      LIMIT 500
     `;
 
     // 2. Find students with Low Logbook (Count < Target)
@@ -42,12 +43,13 @@ router.get(
              COALESCE(s.logbook_count, 0) as total_logbook
       FROM students s
       JOIN users u ON u.id = s.user_id
-      LEFT JOIN logbook_entries le ON le.student_id = s.id 
+      LEFT JOIN logbook_entries le ON le.student_id = s.id
         AND le.date >= $1
       WHERE s.status = 'Aktif'
       GROUP BY s.id, u.name, s.nim, u.initials
-      HAVING COUNT(le.id) < 4 -- Target 4 logbooks per month
+      HAVING COUNT(le.id) < 4
       ORDER BY COUNT(le.id) ASC
+      LIMIT 500
     `;
 
     const [attendanceResult, logbookResult] = await Promise.all([

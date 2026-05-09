@@ -265,6 +265,7 @@ async function listAccessLocks({ status = null, search = null } = {}) {
       AND NOT (sal.reason = $2 AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
       ${searchClause}
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
+    LIMIT 500
     `,
     params
   );

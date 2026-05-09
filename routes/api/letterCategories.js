@@ -58,6 +58,7 @@ router.get(
       SELECT id, name, created_at, updated_at
       FROM letter_categories
       ORDER BY name ASC
+      LIMIT 500
     `);
 
     return res.json(result.rows);

@@ -82,7 +82,7 @@ function appendWhere(baseFilters, extraFilters) {
 }
 
 function resolveRequesterUserId(req) {
-  return String(req?.authUser?.id || req.headers["x-user-id"] || req.query.userId || req.body?.userId || "").trim();
+  return String(req?.authUser?.id || "").trim();
 }
 
 async function hasProjectAccess({ userId, role, projectId }) {
@@ -335,6 +335,7 @@ router.get(
         SELECT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text
         FROM research_projects rp
         ORDER BY rp.id ASC
+        LIMIT 500
         `
       );
     } else if (role === "dosen") {
@@ -348,6 +349,7 @@ router.get(
           ON l.id = rp.supervisor_lecturer_id AND l.user_id = $1
         WHERE rm.user_id IS NOT NULL OR l.user_id IS NOT NULL
         ORDER BY rp.id ASC
+        LIMIT 500
         `,
         [userId]
       );
@@ -359,6 +361,7 @@ router.get(
         JOIN research_memberships rm ON rm.project_id = rp.id
         WHERE rm.user_id = $1
         ORDER BY rp.id ASC
+        LIMIT 500
         `,
         [userId]
       );
@@ -407,6 +410,7 @@ router.get(
         ${meetingSub}
         ${appendWhere(listFilters, [])}
         ORDER BY rp.id ASC
+        LIMIT 500
         `,
         listParams
       );
@@ -430,6 +434,7 @@ router.get(
         ${meetingSub}
         ${appendWhere(["(rm.user_id = $1 OR own_l.user_id = $1)"], shiftedListFilters)}
         ORDER BY rp.id ASC
+        LIMIT 500
         `,
         params
       );
@@ -453,6 +458,7 @@ router.get(
         ${meetingSub}
         ${appendWhere(["(rm.user_id = $1 OR ba.user_id = $1)"], shiftedListFilters)}
         ORDER BY rp.id ASC
+        LIMIT 500
         `,
         params
       );
@@ -481,8 +487,6 @@ router.get(
       `,
       [req.params.id]
     );
-
-    console.log('[GET /research/:id/members] Result:', result.rows);
 
     res.json(result.rows);
   })
@@ -589,7 +593,7 @@ router.post(
     }
 
     // Generate a unique ID for the logbook entry
-    const entryId = `LE-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const entryId = `LE-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
 
     // Resolve student_id if provided, otherwise use a default
     let resolvedStudentId = null;
@@ -1473,15 +1477,6 @@ router.post(
       return res.status(400).json({ message: ketuaConflictMessage });
     }
 
-    console.log('[POST /research/:id/members] Payload:', {
-      projectId: req.params.id,
-      userId,
-      memberType,
-      peran,
-      status,
-      bergabung
-    });
-
     const insertResult = await query(
       `
       INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
@@ -1495,8 +1490,6 @@ router.post(
       `,
       [req.params.id, userId, memberType, peran || null, status, bergabung || null]
     );
-
-    console.log('[POST /research/:id/members] Insert Result:', insertResult.rows[0]);
 
     res.status(201).json({ message: "Anggota riset berhasil disimpan." });
   })

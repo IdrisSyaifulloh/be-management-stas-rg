@@ -5,6 +5,7 @@ var cookieParser = require("cookie-parser");
 var logger = require("morgan");
 var cors = require("cors");
 var jwt = require("jsonwebtoken");
+var rateLimit = require("express-rate-limit");
 var env = require("./config/env");
 var validateEnv = require("./config/validateEnv");
 
@@ -14,7 +15,7 @@ var apiRouter = require("./routes/api");
 var { query } = require("./db/pool");
 var { studentAccessLockMiddleware } = require("./utils/studentAccessLocks");
 var { hasControlChars } = require("./utils/securityValidation");
-var { revokeJwtSession, verifyJwtSession } = require("./utils/jwtSessionStore");
+var { revokeJwtSession, verifyJwtSession, extendJwtSessionIfNeeded, JWT_SESSION_TTL_MS } = require("./utils/jwtSessionStore");
 var { getAuthCookieOptions } = require("./utils/authCookieOptions");
 
 var envValidationResult = validateEnv();
@@ -27,54 +28,65 @@ if (!envValidationResult.isValid) {
 
 var app = express();
 
+// Percayai proxy pertama (Nginx) agar req.ip = IP asli client, bukan 127.0.0.1
+app.set("trust proxy", 1);
+
+app.set("views", path.join(__dirname, "views"));
+app.set("view engine", "pug");
+
 app.use(logger("dev"));
 
 // ======================================================
 // CORS
 // ======================================================
-// env.corsOrigin bisa berisi satu origin:
-// CORS_ORIGIN=https://ms.stas-rg.com
-//
-// atau banyak origin dipisah koma:
-// CORS_ORIGIN=https://ms.stas-rg.com,http://localhost:5173,http://localhost:3000
-
 var allowedOrigins = String(env.corsOrigin || "")
   .split(",")
-  .map(function (origin) {
-    return origin.trim();
-  })
+  .map(function (origin) { return origin.trim(); })
   .filter(Boolean);
 
 var corsOptions = {
   origin: function (origin, callback) {
-    // Allow non-browser requests seperti curl/postman yang tidak punya Origin
+    // Di production: wajib ada Origin dan harus ada di whitelist
     if (!origin) {
+      if (env.nodeEnv === "production") {
+        return callback(new Error("CORS: Origin header wajib ada."));
+      }
       return callback(null, true);
     }
-
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-
     return callback(new Error("CORS blocked for origin: " + origin));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-User-Id",
-    "X-User-Role"
-  ]
+  allowedHeaders: ["Content-Type", "Authorization"]
 };
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
+// ======================================================
+// RATE LIMITING
+// ======================================================
+var loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit." },
+  keyGenerator: function (req) {
+    return req.ip + ":" + String(req.body && req.body.identifier || "").slice(0, 80);
+  }
+});
+
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: false, limit: "15mb" }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "public")));
+
+app.use("/api/auth/login", loginRateLimiter);
+app.use("/api/v1/auth/login", loginRateLimiter);
 
 // ======================================================
 // JWT AUTH MIDDLEWARE
@@ -150,6 +162,20 @@ app.use(async function (req, res, next) {
         name: decoded.name
       };
       req.authSessionId = decoded.jti;
+
+      // Sliding session: perpanjang cookie jika sudah lewat setengah TTL
+      extendJwtSessionIfNeeded({
+        id: decoded.jti,
+        userId: decoded.id,
+        token: token
+      }).then((extended) => {
+        if (extended) {
+          res.cookie("accessToken", token, {
+            ...getAuthCookieOptions(),
+            maxAge: JWT_SESSION_TTL_MS
+          });
+        }
+      }).catch(() => {});
 
       return next();
     } catch (error) {

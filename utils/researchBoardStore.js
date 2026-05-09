@@ -15,9 +15,7 @@ const ALLOWED_BOARD_ATTACHMENT_TYPES = {
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
   "image/png": ".png",
   "image/jpeg": ".jpg",
-  "text/plain": ".txt",
-  "application/zip": ".zip",
-  "application/x-zip-compressed": ".zip"
+  "text/plain": ".txt"
 };
 const BOARD_TASK_STATUSES = ["TO DO", "DOING", "REVIEW", "DONE"];
 
@@ -149,7 +147,10 @@ function sanitizeFilenameBase(name) {
 function resolveBoardAttachmentPath(fileUrl) {
   const normalizedUrl = String(fileUrl || "").trim();
   if (!normalizedUrl.startsWith("/uploads/board-tasks/")) return null;
-  return path.join(BOARD_TASK_UPLOAD_DIR, normalizedUrl.replace("/uploads/board-tasks/", ""));
+  // Gunakan path.basename() untuk cegah path traversal (../ dll)
+  const filename = path.basename(normalizedUrl);
+  if (!filename || !/^[a-zA-Z0-9._-]+$/.test(filename)) return null;
+  return path.join(BOARD_TASK_UPLOAD_DIR, filename);
 }
 
 async function removeBoardAttachmentFile(fileUrl) {
@@ -311,6 +312,7 @@ async function fetchTaskCollection(projectId, { includeComments = false } = {}) 
     LEFT JOIN users u ON u.id = t.created_by
     WHERE t.project_id = $1
     ORDER BY t.status ASC, t.sort_order ASC, t.updated_at DESC, t.created_at DESC
+    LIMIT 500
     `,
     [projectId]
   );

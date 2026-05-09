@@ -30,7 +30,7 @@ async function ensureAppSettingsTable() {
 }
 
 function resolveRequesterUserId(req) {
-  return String(req.headers["x-user-id"] || req.query.userId || req.body?.userId || req.authUser?.id || "").trim();
+  return String(req.authUser?.id || "").trim();
 }
 
 async function resolveRecipientUserId(inputId) {

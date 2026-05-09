@@ -9,7 +9,7 @@ const {
 const router = express.Router();
 
 function buildDraftReportTypeId() {
-  return `DRT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  return `DRT-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
 }
 
 router.get(

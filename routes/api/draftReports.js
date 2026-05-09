@@ -25,13 +25,7 @@ const ALLOWED_DRAFT_FILE_TYPES = {
 let ensureDraftReportsPromise = null;
 
 function resolveRequesterUserId(req) {
-  return String(
-    req?.authUser?.id ||
-      req.headers["x-user-id"] ||
-      req.query.userId ||
-      req.body?.userId ||
-      ""
-  ).trim();
+  return String(req?.authUser?.id || "").trim();
 }
 
 async function ensureDraftReportsTable() {
@@ -441,6 +435,7 @@ router.get(
         AND ($2::text = 'Semua' OR dr.type = $2)
         AND ($3::text IS NULL OR dr.project_id = $3)
       ORDER BY dr.upload_date DESC, dr.updated_at DESC, dr.id DESC
+      LIMIT 200
       `,
       [student.id, type, projectId || null]
     );
@@ -466,7 +461,7 @@ router.post(
     await ensureDraftReportsTable();
     const role = extractRole(req);
     const requesterUserId = resolveRequesterUserId(req);
-    if (role && role !== "mahasiswa") {
+    if (!role || role !== "mahasiswa") {
       return res.status(403).json({ message: "Hanya mahasiswa yang dapat mengunggah draft." });
     }
 
@@ -539,7 +534,7 @@ router.put(
     await ensureDraftReportsTable();
     const role = extractRole(req);
     const requesterUserId = resolveRequesterUserId(req);
-    if (role && role !== "mahasiswa") {
+    if (!role || role !== "mahasiswa") {
       return res.status(403).json({ message: "Hanya mahasiswa yang dapat memperbarui draft." });
     }
 
@@ -652,14 +647,21 @@ router.patch(
   "/:id/review",
   asyncHandler(async (req, res) => {
     await ensureDraftReportsTable();
-    const { status, note, reviewedBy, reviewedByName, studentId } = req.body;
+
+    const role = extractRole(req);
+    if (!["dosen", "operator"].includes(role)) {
+      return res.status(403).json({ message: "Hanya dosen/operator yang dapat mereview draft." });
+    }
+
+    const reviewedBy = req.authUser?.id;
+    if (!reviewedBy) {
+      return res.status(401).json({ message: "Autentikasi diperlukan." });
+    }
+
+    const { status, note, studentId } = req.body;
 
     if (!status || !DRAFT_STATUSES.includes(status)) {
       return res.status(400).json({ message: "status review tidak valid." });
-    }
-
-    if (!reviewedBy) {
-      return res.status(400).json({ message: "reviewedBy wajib diisi." });
     }
 
     const persistedDraft = await query(
@@ -688,23 +690,24 @@ router.patch(
       );
     }
 
-    const auditId = `AL-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const auditId = `AL-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+    const roleLabel = role === "dosen" ? "Dosen" : "Operator";
 
     await query(
       `
       INSERT INTO audit_logs (id, user_id, user_role, action, target, ip, detail)
-      VALUES ($1, $2, 'Dosen', 'Update', 'DraftReport', $3, $4)
+      VALUES ($1, $2, $3, 'Update', 'DraftReport', $4, $5)
       `,
       [
         auditId,
         reviewedBy,
+        roleLabel,
         req.ip || null,
         {
           draftId: req.params.id,
           studentId: effectiveStudentId,
           status,
-          note: note || null,
-          reviewedByName: reviewedByName || null
+          note: note || null
         }
       ]
     );

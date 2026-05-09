@@ -59,7 +59,7 @@ router.post(
     );
 
     if (result.rowCount === 0) {
-      return res.status(401).json({ message: "User tidak ditemukan." });
+      return res.status(401).json({ message: "Identifier atau password salah." });
     }
 
     const user = result.rows[0];
@@ -84,7 +84,7 @@ router.post(
 
     const validPassword = user.password_hash ? await bcrypt.compare(password, user.password_hash) : false;
     if (!validPassword) {
-      return res.status(401).json({ message: "Password salah." });
+      return res.status(401).json({ message: "Identifier atau password salah." });
     }
 
     const sessionId = generateSessionId();
@@ -97,7 +97,7 @@ router.post(
         jti: sessionId
       },
       env.jwtSecret,
-      { expiresIn: "7d" }
+      { expiresIn: "15m" }
     );
 
     await createJwtSession({
@@ -112,7 +112,7 @@ router.post(
     // Set httpOnly cookie (secure, not accessible via JavaScript/console)
     res.cookie("accessToken", token, {
       ...getAuthCookieOptions(),
-      maxAge: 7 * 24 * 60 * 60 * 1000  // 7 days in milliseconds
+      maxAge: 15 * 60 * 1000  // 15 menit
     });
 
     return res.json({

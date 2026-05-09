@@ -281,7 +281,7 @@ router.delete(
           updated_at = NOW()
       WHERE id = $1
       `,
-      [userId, weekBounds.startDate, weekBounds.endDate]
+      [userId]
     );
 
     try {

@@ -30,7 +30,7 @@ const ALLOWED_LETTER_FILE_TYPES = {
 let ensureColumnsPromise = null;
 
 function resolveRequesterUserId(req) {
-  return String(req.authUser?.id || req.headers["x-user-id"] || req.query.userId || req.body?.userId || "").trim();
+  return String(req.authUser?.id || "").trim();
 }
 
 async function ensureLetterRequestColumns() {
@@ -118,7 +118,7 @@ async function ensureResearchProjectExists(projectId) {
 
 function buildLetterRequestId(requesterType) {
   const prefix = requesterType === "lecturer" ? "LTR-DSN" : "LTR-STD";
-  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  return `${prefix}-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
 }
 
 function mapLetterRequestRow(row) {
@@ -256,7 +256,8 @@ router.get(
     let resolvedRequesterUserId = null;
 
     if (role === "mahasiswa") {
-      const student = await resolveStudentRecord(studentId || requesterUserId);
+      // Mahasiswa hanya bisa lihat surat miliknya sendiri — abaikan studentId dari query param
+      const student = await resolveStudentRecord(requesterUserId);
       if (!(student?.id)) {
         return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
       }
@@ -320,6 +321,7 @@ router.get(
       LEFT JOIN research_projects rp ON rp.id = lr.project_id
       ${whereClause}
       ORDER BY lr.tanggal DESC, lr.id DESC
+      LIMIT 200
       `,
       params
     );
@@ -333,7 +335,7 @@ router.post(
   asyncHandler(async (req, res) => {
     await ensureLetterRequestColumns();
     const role = extractRole(req);
-    if (role && !["mahasiswa", "dosen"].includes(role)) {
+    if (!role || !["mahasiswa", "dosen"].includes(role)) {
       return res.status(403).json({ message: "Hanya mahasiswa/dosen yang dapat membuat pengajuan surat." });
     }
 

@@ -230,8 +230,18 @@ router.get(
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
 
-    const requestedStudentId = req.query.studentId;
+    const role = extractRole(req);
     const { status } = req.query;
+    let requestedStudentId = req.query.studentId;
+
+    // Mahasiswa hanya boleh lihat miliknya sendiri
+    if (role === "mahasiswa") {
+      const myStudentId = await resolveStudentId(req.authUser.id);
+      if (!myStudentId) {
+        return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
+      }
+      requestedStudentId = myStudentId;
+    }
 
     const resolvedStudentId = requestedStudentId
       ? await resolveStudentId(String(requestedStudentId))
@@ -281,6 +291,7 @@ router.get(
       LEFT JOIN users ru ON ru.id = lr.reviewed_by
       ${whereClause}
       ORDER BY lr.tanggal_pengajuan DESC, lr.id DESC
+      LIMIT 200
       `,
       params
     );
@@ -294,6 +305,7 @@ router.get(
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
 
+    const role = extractRole(req);
     const leaveRequestId = requireSafeId(req.params.id, "id");
 
     const result = await query(
@@ -339,7 +351,17 @@ router.get(
       return res.status(404).json({ message: "Pengajuan cuti tidak ditemukan." });
     }
 
-    res.json(mapLeaveRequestRow(result.rows[0]));
+    const lr = result.rows[0];
+
+    // Mahasiswa hanya boleh lihat miliknya sendiri
+    if (role === "mahasiswa") {
+      const myStudentId = await resolveStudentId(req.authUser.id);
+      if (!myStudentId || String(lr.student_id) !== String(myStudentId)) {
+        return res.status(403).json({ message: "Akses ditolak." });
+      }
+    }
+
+    res.json(mapLeaveRequestRow(lr));
   })
 );
 

@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const { query } = require("../db/pool");
 
-const JWT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const JWT_SESSION_TTL_MS = 15 * 60 * 1000; // 15 menit
 
 let ensureJwtSessionsTablePromise = null;
 
@@ -96,6 +96,34 @@ async function verifyJwtSession({ id, userId, token }) {
   return result.rowCount > 0;
 }
 
+// Perpanjang expires_at session jika sudah melewati setengah TTL (sliding window)
+async function extendJwtSessionIfNeeded({ id, userId, token }) {
+  if (!id || !userId || !token) return false;
+
+  await ensureJwtSessionsTable();
+
+  const halfTtl = JWT_SESSION_TTL_MS / 2;
+  const newExpiresAt = getJwtSessionExpiresAt();
+
+  const result = await query(
+    `
+    UPDATE jwt_sessions
+    SET expires_at = $4,
+        last_seen_at = NOW()
+    WHERE id = $1
+      AND user_id = $2
+      AND token_hash = $3
+      AND revoked_at IS NULL
+      AND expires_at > NOW()
+      AND expires_at < NOW() + ($5 || ' milliseconds')::interval
+    RETURNING id
+    `,
+    [id, userId, hashToken(token), newExpiresAt, halfTtl.toString()]
+  );
+
+  return result.rowCount > 0;
+}
+
 async function revokeJwtSession({ id, userId = null, token = null }) {
   if (!id && !token) return false;
 
@@ -121,6 +149,7 @@ module.exports = {
   JWT_SESSION_TTL_MS,
   createJwtSession,
   ensureJwtSessionsTable,
+  extendJwtSessionIfNeeded,
   generateSessionId,
   getJwtSessionExpiresAt,
   revokeJwtSession,

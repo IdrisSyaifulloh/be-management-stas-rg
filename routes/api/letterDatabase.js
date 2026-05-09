@@ -28,7 +28,7 @@ const ALLOWED_FILE_TYPES = {
 let ensureTablePromise = null;
 
 function resolveUserId(req) {
-  return String(req.authUser?.id || req.headers["x-user-id"] || req.query.userId || req.body?.userId || "").trim() || null;
+  return String(req.authUser?.id || "").trim() || null;
 }
 
 function requireOperator(req, res) {
@@ -151,13 +151,39 @@ async function fetchLetterDatabaseItem(id) {
 router.get(
   "/",
   asyncHandler(async (req, res) => {
+    if (!requireOperator(req, res)) return;
     await ensureLetterDatabaseTable();
-    const result = await query(`
-      SELECT id, title, category, number, TO_CHAR(date, 'YYYY-MM-DD') AS date_text,
-             description, file_url, created_by, created_at, updated_at
-      FROM letter_database
-      ORDER BY COALESCE(date, created_at::date) DESC, created_at DESC
-    `);
+
+    const { search, category, limit = 100, offset = 0 } = req.query;
+    const params = [];
+    const where = [];
+
+    if (search && String(search).trim()) {
+      params.push(`%${String(search).trim()}%`);
+      where.push(`(title ILIKE $${params.length} OR number ILIKE $${params.length} OR description ILIKE $${params.length})`);
+    }
+
+    if (category && String(category).trim()) {
+      params.push(String(category).trim());
+      where.push(`LOWER(category) = LOWER($${params.length})`);
+    }
+
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const parsedLimit = Math.min(Math.max(Number(limit) || 100, 1), 200);
+    const parsedOffset = Math.max(Number(offset) || 0, 0);
+    params.push(parsedLimit);
+    params.push(parsedOffset);
+
+    const result = await query(
+      `SELECT id, title, category, number, TO_CHAR(date, 'YYYY-MM-DD') AS date_text,
+              description, file_url, created_by, created_at, updated_at
+       FROM letter_database
+       ${whereClause}
+       ORDER BY COALESCE(date, created_at::date) DESC, created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
 
     res.json(result.rows.map(mapLetterDatabaseRow));
   })
@@ -183,7 +209,7 @@ router.post(
       }
     }
 
-    const id = `LDB-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    const id = `LDB-${Date.now()}-${require("crypto").randomUUID().slice(0, 8)}`;
     await query(
       `
       INSERT INTO letter_database (

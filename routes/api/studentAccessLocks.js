@@ -20,7 +20,7 @@ router.get(
       return res.status(403).json({ message: "Endpoint lock saya hanya untuk mahasiswa." });
     }
 
-    const userId = req.authUser?.id || req.headers["x-user-id"];
+    const userId = req.authUser?.id;
     const lock = await getActiveLockForStudent(userId);
     if (!lock) {
       const student = await resolveStudentRecord(userId);
@@ -78,7 +78,7 @@ router.patch(
     }
 
     const id = requireSafeId(req.params.id, "id");
-    const unlockedBy = req.body?.unlockedBy || req.authUser?.id || req.headers["x-user-id"] || null;
+    const unlockedBy = req.authUser?.id || null;
     const lock = await unlockAccessLock({ id, unlockedBy });
     if (!lock) {
       return res.status(404).json({ message: "Access lock tidak ditemukan." });
@@ -97,7 +97,7 @@ router.post(
     }
 
     const studentId = requireSafeId(req.body?.studentId || req.body?.student_id, "studentId");
-    const unlockedBy = req.body?.unlockedBy || req.authUser?.id || req.headers["x-user-id"] || null;
+    const unlockedBy = req.authUser?.id || null;
     const activeLock = await getActiveLockForStudent(studentId);
     if (!activeLock) {
       return res.status(404).json({ message: "Access lock aktif tidak ditemukan." });

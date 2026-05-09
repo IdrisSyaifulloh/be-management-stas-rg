@@ -280,8 +280,8 @@ async function recordAttendanceAudit({
   before = null,
   after = null
 }) {
-  const auditId = `AUD-ATT-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-  const actedByUserId = req.authUser?.id || String(req.headers["x-user-id"] || "").trim() || null;
+  const auditId = `AUD-ATT-${Date.now()}-${require("crypto").randomUUID().slice(0, 8).toUpperCase()}`;
+  const actedByUserId = req.authUser?.id || null;
 
   await query(
     `
@@ -487,11 +487,13 @@ router.post(
       !studentIdInput ||
       !isValidLatitude(userLatitude) ||
       !isValidLongitude(userLongitude) ||
-      (accuracy != null && (!Number.isFinite(accuracyMetersValue) || accuracyMetersValue < 0))
+      accuracy == null ||
+      !Number.isFinite(accuracyMetersValue) ||
+      accuracyMetersValue < 0
     ) {
       return res.status(400).json(
         buildGpsValidationError({
-          message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
+          message: "Payload GPS tidak valid. studentId, latitude, longitude, dan accuracy wajib valid.",
           reason: "INVALID_GPS_PAYLOAD",
           accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
         })
@@ -591,7 +593,7 @@ router.post(
       return res.status(409).json({ message: "Check-in hari ini sudah tercatat." });
     }
 
-    const recordId = `ATD-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    const recordId = `ATD-${Date.now()}-${require("crypto").randomUUID().slice(0, 8).toUpperCase()}`;
     const attendanceStatus = hasWfhToday ? "WFH" : "Hadir";
 
     if (todayRecord.rowCount > 0) {
@@ -660,11 +662,13 @@ router.post(
       !studentIdInput ||
       !isValidLatitude(userLatitude) ||
       !isValidLongitude(userLongitude) ||
-      (accuracy != null && (!Number.isFinite(accuracyMetersValue) || accuracyMetersValue < 0))
+      accuracy == null ||
+      !Number.isFinite(accuracyMetersValue) ||
+      accuracyMetersValue < 0
     ) {
       return res.status(400).json(
         buildGpsValidationError({
-          message: "Payload GPS tidak valid. studentId, latitude, dan longitude wajib valid.",
+          message: "Payload GPS tidak valid. studentId, latitude, longitude, dan accuracy wajib valid.",
           reason: "INVALID_GPS_PAYLOAD",
           accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue)
         })
@@ -742,6 +746,45 @@ router.post(
 
     const settings = await getSettingsAsync();
     const attendanceRules = getAttendanceRules(settings);
+
+    // Validasi radius GPS checkout (kecuali WFH)
+    const hasWfhCheckout = await hasApprovedWfhToday(resolvedStudentId, todayIso);
+    if (!hasWfhCheckout && role === "mahasiswa") {
+      const gpsPolicy = buildGpsPolicy(settings);
+      const refLat = gpsPolicy.targetLatitude;
+      const refLng = gpsPolicy.targetLongitude;
+      const refRadius = gpsPolicy.radiusMeters;
+      const maxAccuracyMeters = gpsPolicy.maxAccuracyMeters;
+
+      if (isValidLatitude(refLat) && isValidLongitude(refLng) && Number.isFinite(refRadius) && refRadius > 0) {
+        if (Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
+          return res.status(400).json(
+            buildGpsValidationError({
+              message: "Akurasi GPS terlalu rendah untuk checkout.",
+              reason: "GPS_ACCURACY_TOO_LOW",
+              accuracyMeters: Math.round(accuracyMetersValue),
+              maxAccuracyMeters,
+              allowedRadiusMeters: refRadius
+            })
+          );
+        }
+
+        const checkoutDistance = haversineDistanceMeters(userLatitude, userLongitude, refLat, refLng);
+        if (checkoutDistance > refRadius) {
+          return res.status(400).json(
+            buildGpsValidationError({
+              message: "Lokasi checkout di luar radius absensi.",
+              reason: "OUTSIDE_RADIUS",
+              accuracyMeters: Math.round(accuracyMetersValue),
+              maxAccuracyMeters,
+              distanceMeters: Math.round(checkoutDistance),
+              allowedRadiusMeters: refRadius
+            })
+          );
+        }
+      }
+    }
+
     const durationHoursValue = calculateDurationHours(todayRecord.rows[0].check_in_at);
     const durationHours = roundHours(durationHoursValue);
     const requiredHours = attendanceRules.magangMinCheckoutHours;
@@ -909,7 +952,7 @@ router.post(
       });
     }
 
-    const recordId = `ATD-MAN-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    const recordId = `ATD-MAN-${Date.now()}-${require("crypto").randomUUID().slice(0, 8).toUpperCase()}`;
 
     await query(
       `
@@ -1157,6 +1200,7 @@ router.get(
       FROM students s
       JOIN users u ON u.id = s.user_id
       WHERE u.is_active = TRUE
+      LIMIT 1000
       `
     );
 
