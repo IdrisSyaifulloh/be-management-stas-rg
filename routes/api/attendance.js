@@ -1229,9 +1229,25 @@ router.get(
       `
     );
 
+    const weeklyHadirResult = await query(
+      `
+      SELECT student_id, COUNT(*) AS hadir_count
+      FROM attendance_records
+      WHERE status = 'Hadir'
+        AND attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)
+        AND attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+      GROUP BY student_id
+      `
+    );
+
     const allStudentIds = studentsResult.rows.map((row) => row.id);
     const studentsById = new Map(studentsResult.rows.map((row) => [row.id, row]));
     const leaveSet = new Set(leavesResult.rows.map((row) => row.student_id));
+
+    const weeklyHadirByStudentId = {};
+    for (const row of weeklyHadirResult.rows) {
+      weeklyHadirByStudentId[row.student_id] = Number(row.hadir_count);
+    }
 
     const leaveTypesByStudentId = {};
     for (const row of leavesResult.rows) {
@@ -1389,7 +1405,8 @@ router.get(
       magangLockedIds,
       magangUnderHoursLockIds,
       magangMissingCheckoutLockIds,
-      risetWeeklyUnderHoursLockIds
+      risetWeeklyUnderHoursLockIds,
+      weeklyHadirByStudentId
     });
   })
 );
