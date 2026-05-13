@@ -38,12 +38,22 @@ app.use(logger("dev"));
 // atau banyak origin dipisah koma:
 // CORS_ORIGIN=https://ms.stas-rg.com,http://localhost:5173,http://localhost:3000
 
-var allowedOrigins = String(env.corsOrigin || "")
+var defaultAllowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://ms.stas-rg.com"
+];
+
+var configuredAllowedOrigins = String(env.corsOrigin || "")
   .split(",")
   .map(function (origin) {
     return origin.trim();
   })
-  .filter(Boolean);
+  .filter(function (origin) {
+    return origin && origin !== "*";
+  });
+
+var allowedOrigins = Array.from(new Set(defaultAllowedOrigins.concat(configuredAllowedOrigins)));
 
 var corsOptions = {
   origin: function (origin, callback) {
@@ -61,11 +71,14 @@ var corsOptions = {
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
+    "Accept",
     "Content-Type",
     "Authorization",
     "X-User-Id",
     "X-User-Role"
-  ]
+  ],
+  exposedHeaders: ["Content-Disposition"],
+  optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
@@ -278,7 +291,7 @@ app.use(function (err, req, res, next) {
 
     return res.status(status).json({
       message:
-        status >= 500
+        status >= 500 && err.expose !== true
           ? "Terjadi kesalahan pada server."
           : err.message || "Input tidak valid."
     });
