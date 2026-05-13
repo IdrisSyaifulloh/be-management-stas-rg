@@ -89,7 +89,7 @@ var corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
 // ======================================================
 // RATE LIMITING
