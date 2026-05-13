@@ -39,8 +39,29 @@ app.use(logger("dev"));
 // ======================================================
 // CORS
 // ======================================================
+// env.corsOrigin bisa berisi satu origin:
+// CORS_ORIGIN=https://ms.stas-rg.com
+//
+// atau banyak origin dipisah koma:
+// CORS_ORIGIN=https://ms.stas-rg.com,http://localhost:5173,http://localhost:3000
+
+var defaultAllowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://ms.stas-rg.com"
+];
+
+var configuredAllowedOrigins = String(env.corsOrigin || "")
 var allowedOrigins = String(env.corsOrigin || "")
   .split(",")
+  .map(function (origin) {
+    return origin.trim();
+  })
+  .filter(function (origin) {
+    return origin && origin !== "*";
+  });
+
+var allowedOrigins = Array.from(new Set(defaultAllowedOrigins.concat(configuredAllowedOrigins)));
   .map(function (origin) { return origin.trim(); })
   .filter(Boolean);
 
@@ -60,6 +81,15 @@ var corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Accept",
+    "Content-Type",
+    "Authorization",
+    "X-User-Id",
+    "X-User-Role"
+  ],
+  exposedHeaders: ["Content-Disposition"],
+  optionsSuccessStatus: 204
   allowedHeaders: ["Content-Type", "Authorization"]
 };
 
@@ -175,7 +205,7 @@ app.use(async function (req, res, next) {
             maxAge: JWT_SESSION_TTL_MS
           });
         }
-      }).catch(() => {});
+      }).catch(() => { });
 
       return next();
     } catch (error) {
@@ -304,7 +334,7 @@ app.use(function (err, req, res, next) {
 
     return res.status(status).json({
       message:
-        status >= 500
+        status >= 500 && err.expose !== true
           ? "Terjadi kesalahan pada server."
           : err.message || "Input tidak valid."
     });

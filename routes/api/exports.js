@@ -18,9 +18,10 @@ const router = express.Router();
 const SUPPORTED_FORMATS = ["xlsx", "csv", "pdf"];
 const PDF_MAX_ROWS = 500;
 
-function createHttpError(status, message) {
+function createHttpError(status, message, expose = status < 500) {
   const error = new Error(message);
   error.status = status;
+  error.expose = expose;
   return error;
 }
 
@@ -276,6 +277,8 @@ function buildCommonPdfMetadata(request, context) {
 function sendFile(res, payload) {
   res.setHeader("Content-Type", payload.mimeType);
   res.setHeader("Content-Disposition", `attachment; filename="${payload.filename}"`);
+  res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+  res.setHeader("Content-Length", payload.buffer.length);
   res.send(payload.buffer);
 }
 
@@ -1038,7 +1041,16 @@ const EXPORT_DEFINITIONS = {
   }
 };
 
-const TEMPLATE_TYPES = ["kehadiran", "logbook", "riset", "cuti", "database-mahasiswa", "layanan-surat", "kegiatan-stas"];
+const TEMPLATE_TYPES = [
+  "kehadiran",
+  "logbook",
+  "riset",
+  "cuti",
+  "database-mahasiswa",
+  "layanan-surat",
+  "rekap-data",
+  "kegiatan-stas"
+];
 
 router.get("/templates", (req, res) => {
   res.json(
@@ -1058,40 +1070,52 @@ router.get("/templates", (req, res) => {
 });
 
 async function handleExport(req, res, typeOverride) {
-  const request = parseExportRequest(req, typeOverride);
-  const definition = EXPORT_DEFINITIONS[request.type];
+  let request;
 
-  if (!definition) {
-    throw createHttpError(400, `Jenis export "${request.type}" tidak didukung.`);
+  try {
+    request = parseExportRequest(req, typeOverride);
+    const definition = EXPORT_DEFINITIONS[request.type];
+
+    if (!definition) {
+      throw createHttpError(400, `Jenis export "${request.type}" tidak didukung.`);
+    }
+
+    const normalizedRequest = definition.normalizeRequest
+      ? definition.normalizeRequest(request)
+      : request;
+    assertSupportedFilters(definition, normalizedRequest);
+
+    const context = await resolveFilterContext(normalizedRequest);
+    const resolvedRequest = context.student
+      ? { ...normalizedRequest, studentId: context.student.id }
+      : normalizedRequest;
+    const dataset = await definition.getDataset(resolvedRequest, context);
+
+    if (!dataset.rows.length) {
+      throw createHttpError(404, buildNoDataMessage(definition, resolvedRequest, context));
+    }
+
+    const payload = buildFilePayload({
+      definition,
+      format: resolvedRequest.format,
+      headers: dataset.headers,
+      rows: dataset.rows,
+      filtersSummary: buildFilterSummary(definition, resolvedRequest, context),
+      pdfOptions: definition.buildPdfOptions
+        ? definition.buildPdfOptions(resolvedRequest, context)
+        : {}
+    });
+
+    sendFile(res, payload);
+  } catch (error) {
+    if (!error.status && !error.statusCode) {
+      const format = request?.format || normalizeText(req.query.format || req.body?.format || "csv").toLowerCase();
+      const formatLabel = SUPPORTED_FORMATS.includes(format) ? format.toUpperCase() : "file";
+      throw createHttpError(500, `Gagal generate export ${formatLabel}`, true);
+    }
+
+    throw error;
   }
-
-  const normalizedRequest = definition.normalizeRequest
-    ? definition.normalizeRequest(request)
-    : request;
-  assertSupportedFilters(definition, normalizedRequest);
-
-  const context = await resolveFilterContext(normalizedRequest);
-  const resolvedRequest = context.student
-    ? { ...normalizedRequest, studentId: context.student.id }
-    : normalizedRequest;
-  const dataset = await definition.getDataset(resolvedRequest, context);
-
-  if (!dataset.rows.length) {
-    throw createHttpError(404, buildNoDataMessage(definition, resolvedRequest, context));
-  }
-
-  const payload = buildFilePayload({
-    definition,
-    format: resolvedRequest.format,
-    headers: dataset.headers,
-    rows: dataset.rows,
-    filtersSummary: buildFilterSummary(definition, resolvedRequest, context),
-    pdfOptions: definition.buildPdfOptions
-      ? definition.buildPdfOptions(resolvedRequest, context)
-      : {}
-  });
-
-  sendFile(res, payload);
 }
 
 router.get(
