@@ -39,31 +39,27 @@ app.use(logger("dev"));
 // ======================================================
 // CORS
 // ======================================================
-// env.corsOrigin bisa berisi satu origin:
-// CORS_ORIGIN=https://ms.stas-rg.com
-//
-// atau banyak origin dipisah koma:
-// CORS_ORIGIN=https://ms.stas-rg.com,http://localhost:5173,http://localhost:3000
+// env.corsOrigin bisa berisi satu atau banyak domain production yang sudah deploy.
+// CORS_ORIGIN=https://ms.stas-rg.com,https://app.stas-rg.com
 
-var defaultAllowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:3000",
+var deployedAllowedOrigins = [
   "https://ms.stas-rg.com"
 ];
 
+function isLocalOrigin(origin) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(origin);
+}
+
 var configuredAllowedOrigins = String(env.corsOrigin || "")
-var allowedOrigins = String(env.corsOrigin || "")
   .split(",")
   .map(function (origin) {
     return origin.trim();
   })
   .filter(function (origin) {
-    return origin && origin !== "*";
+    return origin && origin !== "*" && !isLocalOrigin(origin);
   });
 
-var allowedOrigins = Array.from(new Set(defaultAllowedOrigins.concat(configuredAllowedOrigins)));
-  .map(function (origin) { return origin.trim(); })
-  .filter(Boolean);
+var allowedOrigins = Array.from(new Set(deployedAllowedOrigins.concat(configuredAllowedOrigins)));
 
 var corsOptions = {
   origin: function (origin, callback) {
@@ -90,11 +86,10 @@ var corsOptions = {
   ],
   exposedHeaders: ["Content-Disposition"],
   optionsSuccessStatus: 204
-  allowedHeaders: ["Content-Type", "Authorization"]
 };
 
 app.use(cors(corsOptions));
-app.options("/{*path}", cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 // ======================================================
 // RATE LIMITING
