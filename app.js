@@ -82,7 +82,25 @@ var corsOptions = {
 };
 
 app.use(cors(corsOptions));
+<<<<<<< Updated upstream
 app.options("*", cors(corsOptions));
+=======
+app.options(/.*/, cors(corsOptions));
+
+// ======================================================
+// RATE LIMITING
+// ======================================================
+var loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit." },
+  keyGenerator: function (req) {
+    return rateLimit.ipKeyGenerator(req.ip) + ":" + String(req.body && req.body.identifier || "").slice(0, 80);
+  }
+});
+>>>>>>> Stashed changes
 
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: false, limit: "15mb" }));
