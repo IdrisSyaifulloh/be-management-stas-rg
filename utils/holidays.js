@@ -54,10 +54,20 @@ function normalizeHolidays(value) {
 
 function getHolidayRules(settings) {
   const attendanceRules = settings?.attendanceRules || {};
+  const attendanceRuleHolidays = Array.isArray(attendanceRules.holidays)
+    ? attendanceRules.holidays
+    : null;
+  const topLevelHolidays = Array.isArray(settings?.holidays)
+    ? settings.holidays
+    : null;
+  const holidaySource =
+    attendanceRuleHolidays && attendanceRuleHolidays.length > 0
+      ? attendanceRuleHolidays
+      : topLevelHolidays || attendanceRuleHolidays || [];
 
   return {
     excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays !== false,
-    holidays: normalizeHolidays(attendanceRules.holidays || settings?.holidays)
+    holidays: normalizeHolidays(holidaySource)
   };
 }
 

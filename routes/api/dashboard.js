@@ -12,9 +12,13 @@ const {
   recordDashboardWarningReview,
   resolveDashboardReminderStudentId
 } = require("../../utils/dashboardReminders");
-const { createAttendanceAbsentLocks } = require("../../utils/studentAccessLocks");
+const {
+  createAttendanceAbsentLocks,
+  deactivateAttendanceAbsentLocksForDate
+} = require("../../utils/studentAccessLocks");
 const { requireSafeId } = require("../../utils/securityValidation");
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
+const { findNonWorkingDayForDate } = require("../../utils/holidays");
 
 const router = express.Router();
 
@@ -133,7 +137,9 @@ router.get(
     await ensureDashboardWarningReviewTable();
 
     const nowParts = getJakartaNowParts();
-    const attendanceSectionActive = isAfterAttendanceCutoff(nowParts.time);
+    const settings = await getSettingsAsync();
+    const todayHoliday = findNonWorkingDayForDate(settings, nowParts.date);
+    const attendanceSectionActive = isAfterAttendanceCutoff(nowParts.time) && !todayHoliday;
     const attendanceAbsentSearch = normalizeSearchValue(
       req.query.attendanceAbsentSearch || req.query.absentSearch || req.query.tidakHadirSearch
     );
@@ -147,6 +153,10 @@ router.get(
 
     const today = nowParts.date;
     const weekKey = calendarResult.rows[0]?.week_key;
+
+    if (todayHoliday) {
+      await deactivateAttendanceAbsentLocksForDate({ date: today });
+    }
 
     const [logbookMissingRows, attendanceAbsentRows, lowHoursRows] = await Promise.all([
       query(
@@ -318,6 +328,8 @@ router.get(
         attendanceAbsent: {
           visibleAfter: ATTENDANCE_ABSENT_VISIBLE_AFTER,
           active: attendanceSectionActive,
+          isHoliday: Boolean(todayHoliday),
+          holidayToday: todayHoliday,
           notificationEnabled: false,
           search: attendanceAbsentSearch
         }

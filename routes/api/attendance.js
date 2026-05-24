@@ -21,14 +21,20 @@ const {
 const {
   createAttendanceAbsentLocks,
   createCheckoutMissing22Locks,
+  createPicketSubmissionMissingLocks,
   createRisetWeeklyHoursUnderTargetLocks,
-  createWorkHoursUnder8Locks
+  createWorkHoursUnder8Locks,
+  deactivateAttendanceAbsentLocksForDate
 } = require("../../utils/studentAccessLocks");
 const { requireSafeId } = require("../../utils/securityValidation");
 const {
   findNonWorkingDayForDate,
   getHolidayRules
 } = require("../../utils/holidays");
+const {
+  getPicketCheckoutRequirement,
+  getPicketTodayForStudent
+} = require("../../utils/picketService");
 
 const router = express.Router();
 
@@ -744,6 +750,24 @@ router.post(
       }
     }
 
+    const picketRequirement = await getPicketCheckoutRequirement(resolvedStudentId, todayIso);
+    if (picketRequirement.required) {
+      const picketLockIds = await createPicketSubmissionMissingLocks({
+        studentIds: [resolvedStudentId],
+        date: todayIso
+      });
+
+      return res.status(409).json({
+        message: "Upload foto piket hari ini terlebih dahulu sebelum check-out. Akses Anda dikunci sampai operator membuka block.",
+        picketRequired: true,
+        accessLocked: true,
+        accessLockReason: "PICKET_SUBMISSION_MISSING",
+        accessLockIds: picketLockIds,
+        date: todayIso,
+        assignment: picketRequirement.assignment
+      });
+    }
+
     const settings = await getSettingsAsync();
     const attendanceRules = getAttendanceRules(settings);
 
@@ -1192,6 +1216,10 @@ router.get(
     const todayHoliday = findNonWorkingDayForDate(settings, todayIso);
     const shouldCreateAbsentLocks = lockWindowOpen && !todayHoliday;
 
+    if (todayHoliday) {
+      await deactivateAttendanceAbsentLocksForDate({ date: todayIso });
+    }
+
     const studentsResult = await query(
       `
       SELECT s.id, s.tipe, s.status,
@@ -1332,6 +1360,10 @@ router.get(
           }
         }
 
+        return;
+      }
+
+      if (todayHoliday) {
         return;
       }
 
@@ -1498,6 +1530,7 @@ router.get(
     const attendanceRules = getAttendanceRules(settings);
     const gpsPolicy = buildGpsPolicy(settings);
     const todayHoliday = findNonWorkingDayForDate(settings, todayIso);
+    const picketToday = await getPicketTodayForStudent(resolvedStudentId, todayIso);
 
     const { attendanceMap, leaveSet, leaveMap, history, summary } = buildAttendanceHistory({
       startDate: effectiveStartDate,
@@ -1533,6 +1566,8 @@ router.get(
         tipe: student.tipe
       },
       attendanceRules,
+      picketToday,
+      picketAssignment: picketToday.assignment,
       isHoliday: Boolean(todayHoliday),
       todayHoliday,
       holidays: attendanceRules.holidays,

@@ -2,6 +2,9 @@ const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { extractRole } = require("../../utils/roleGuard");
 const { getSettingsAsync, updateSettings } = require("../../config/systemSettingsStore");
+const {
+  deactivateAttendanceAbsentLocksForConfiguredHolidays
+} = require("../../utils/studentAccessLocks");
 
 const router = express.Router();
 
@@ -36,7 +39,14 @@ router.patch(
       return res.status(403).json({ message: "Akses ditolak." });
     }
     const settings = await updateSettings(req.body || {});
-    res.json({ message: "Pengaturan sistem berhasil diperbarui.", settings });
+    const deactivatedAttendanceAbsentLockIds =
+      await deactivateAttendanceAbsentLocksForConfiguredHolidays(settings);
+
+    res.json({
+      message: "Pengaturan sistem berhasil diperbarui.",
+      settings,
+      deactivatedAttendanceAbsentLockIds
+    });
   })
 );
 

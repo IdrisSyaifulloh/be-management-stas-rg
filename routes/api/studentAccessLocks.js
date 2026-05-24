@@ -5,6 +5,9 @@ const {
   getActiveLockForStudent,
   listAccessLocks,
   mapAccessLockRow,
+  createStudentAccessLocks,
+  ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+  ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
   unlockAccessLock
 } = require("../../utils/studentAccessLocks");
 const { resolveStudentRecord } = require("../../utils/studentResolver");
@@ -54,6 +57,47 @@ router.get(
     }
 
     res.json(await listAccessLocks({ status: req.query.status, search: req.query.search || req.query.q }));
+  })
+);
+
+router.post(
+  "/",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Membuat access lock hanya untuk operator." });
+    }
+
+    const studentId = requireSafeId(req.body?.studentId || req.body?.student_id, "studentId");
+    const reason = String(req.body?.reason || "").trim();
+    const date = String(req.body?.date || req.body?.lockDate || req.body?.lock_date || "")
+      .trim()
+      .slice(0, 10);
+
+    if (
+      reason !== ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID &&
+      reason !== ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+    ) {
+      return res.status(400).json({ message: "reason tidak didukung untuk endpoint ini." });
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ message: "date wajib format YYYY-MM-DD." });
+    }
+
+    const ids = await createStudentAccessLocks({
+      studentIds: [studentId],
+      date,
+      reason
+    });
+
+    res.status(201).json({
+      message: ids.length > 0 ? "Access lock berhasil dibuat." : "Access lock sudah aktif atau sudah ada.",
+      ids,
+      reason,
+      studentId,
+      date
+    });
   })
 );
 

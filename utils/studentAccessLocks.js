@@ -1,4 +1,6 @@
 const { query } = require("../db/pool");
+const { getSettingsAsync } = require("../config/systemSettingsStore");
+const { findNonWorkingDayForDate, getHolidayRules, normalizeHolidayDate } = require("./holidays");
 const { resolveStudentRecord } = require("./studentResolver");
 
 const ACCESS_LOCK_REASON_ATTENDANCE_ABSENT = "ATTENDANCE_ABSENT";
@@ -6,6 +8,8 @@ const ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8 = "WORK_HOURS_UNDER_8";
 const ACCESS_LOCK_REASON_CHECKOUT_MISSING_22 = "CHECKOUT_MISSING_22";
 const ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET = "RISET_WEEKLY_HOURS_UNDER_TARGET";
 const ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS = "RESEARCH_WEEKLY_LOW_HOURS";
+const ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID = "PICKET_SUBMISSION_INVALID";
+const ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING = "PICKET_SUBMISSION_MISSING";
 
 const ACCESS_LOCK_REASON_DETAILS = {
   [ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]: {
@@ -27,6 +31,14 @@ const ACCESS_LOCK_REASON_DETAILS = {
   [ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS]: {
     label: "Jam Mingguan Riset Tidak Terpenuhi",
     message: "Akses dikunci karena jam kerja riset mingguan belum memenuhi target."
+  },
+  [ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID]: {
+    label: "Piket Tidak Sesuai",
+    message: "Anda telah melakukan kegiatan piket yang tidak sesuai dengan tugas anda, mohon hubungi admin untuk melepas block."
+  },
+  [ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING]: {
+    label: "Belum Melakukan Piket",
+    message: "Akses dikunci karena Anda belum melakukan piket atau belum mengirim bukti piket hari ini."
   }
 };
 
@@ -158,6 +170,7 @@ async function createStudentAccessLocks({ studentIds, date, reason }) {
         FROM student_access_locks existing
         WHERE existing.student_id = $2
           AND existing.lock_date = $3::date
+          AND existing.reason = $4
           AND existing.active = TRUE
           AND existing.locked = TRUE
           AND existing.status = 'LOCKED'
@@ -173,10 +186,80 @@ async function createStudentAccessLocks({ studentIds, date, reason }) {
   return created;
 }
 
+async function deactivateAttendanceAbsentLocksForDate({ date, unlockedBy = null } = {}) {
+  await ensureStudentAccessLockTable();
+  const normalizedDate = normalizeHolidayDate(date);
+  if (!normalizedDate) return [];
+
+  const result = await query(
+    `
+    UPDATE student_access_locks
+    SET status = 'UNLOCKED',
+        locked = FALSE,
+        active = FALSE,
+        unlocked_at = COALESCE(unlocked_at, NOW()),
+        unlocked_by = COALESCE($2, unlocked_by),
+        updated_at = NOW()
+    WHERE lock_date = $1::date
+      AND reason = $3
+      AND active = TRUE
+      AND locked = TRUE
+      AND status = 'LOCKED'
+    RETURNING id
+    `,
+    [normalizedDate, unlockedBy || null, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]
+  );
+
+  return result.rows.map((row) => row.id);
+}
+
+async function deactivateAttendanceAbsentLocksForConfiguredHolidays(settings = null) {
+  await ensureStudentAccessLockTable();
+  const activeSettings = settings || await getSettingsAsync();
+  const rules = getHolidayRules(activeSettings);
+
+  if (rules.excludeHolidaysFromWorkdays === false) return [];
+
+  const holidayDates = rules.holidays
+    .filter((holiday) => holiday.active !== false)
+    .map((holiday) => holiday.date);
+
+  if (holidayDates.length === 0) return [];
+
+  const result = await query(
+    `
+    UPDATE student_access_locks
+    SET status = 'UNLOCKED',
+        locked = FALSE,
+        active = FALSE,
+        unlocked_at = COALESCE(unlocked_at, NOW()),
+        updated_at = NOW()
+    WHERE lock_date = ANY($1::date[])
+      AND reason = $2
+      AND active = TRUE
+      AND locked = TRUE
+      AND status = 'LOCKED'
+    RETURNING id
+    `,
+    [holidayDates, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]
+  );
+
+  return result.rows.map((row) => row.id);
+}
+
 async function createAttendanceAbsentLocks({ studentIds, date }) {
+  const settings = await getSettingsAsync();
+  const normalizedDate = normalizeHolidayDate(date);
+  const holiday = normalizedDate ? findNonWorkingDayForDate(settings, normalizedDate) : null;
+
+  if (holiday) {
+    await deactivateAttendanceAbsentLocksForDate({ date: normalizedDate });
+    return [];
+  }
+
   return createStudentAccessLocks({
     studentIds,
-    date,
+    date: normalizedDate || date,
     reason: ACCESS_LOCK_REASON_ATTENDANCE_ABSENT
   });
 }
@@ -205,10 +288,27 @@ async function createRisetWeeklyHoursUnderTargetLocks({ studentIds, date }) {
   });
 }
 
+async function createPicketSubmissionInvalidLocks({ studentIds, date }) {
+  return createStudentAccessLocks({
+    studentIds,
+    date,
+    reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID
+  });
+}
+
+async function createPicketSubmissionMissingLocks({ studentIds, date }) {
+  return createStudentAccessLocks({
+    studentIds,
+    date,
+    reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+  });
+}
+
 async function getActiveLockForStudent(studentIdOrUserId) {
   await ensureStudentAccessLockTable();
   const student = await resolveStudentRecord(studentIdOrUserId);
   if (!student) return null;
+  const settings = await getSettingsAsync();
 
   const result = await query(
     `
@@ -225,16 +325,28 @@ async function getActiveLockForStudent(studentIdOrUserId) {
       AND sal.status = 'LOCKED'
       AND NOT (sal.reason = $2 AND s.tipe = 'Riset')
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
-    LIMIT 1
     `,
     [student.id, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]
   );
 
-  return result.rows[0] || null;
+  for (const row of result.rows) {
+    if (
+      row.reason === ACCESS_LOCK_REASON_ATTENDANCE_ABSENT &&
+      findNonWorkingDayForDate(settings, row.lock_date_text || row.lock_date)
+    ) {
+      await deactivateAttendanceAbsentLocksForDate({ date: row.lock_date_text || row.lock_date });
+      continue;
+    }
+
+    return row;
+  }
+
+  return null;
 }
 
 async function listAccessLocks({ status = null, search = null } = {}) {
   await ensureStudentAccessLockTable();
+  await deactivateAttendanceAbsentLocksForConfiguredHolidays();
   const activeOnly = String(status || "").toLowerCase() === "active";
   const searchValue = String(search || "").trim();
   const params = [activeOnly, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT];
@@ -338,14 +450,20 @@ module.exports = {
   ACCESS_LOCK_REASON_ATTENDANCE_ABSENT,
   ACCESS_LOCK_REASON_CHECKOUT_MISSING_22,
   ACCESS_LOCK_REASON_DETAILS,
+  ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+  ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
   ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET,
   ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS,
   ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
   createCheckoutMissing22Locks,
   createAttendanceAbsentLocks,
+  createPicketSubmissionInvalidLocks,
+  createPicketSubmissionMissingLocks,
   createRisetWeeklyHoursUnderTargetLocks,
   createStudentAccessLocks,
   createWorkHoursUnder8Locks,
+  deactivateAttendanceAbsentLocksForConfiguredHolidays,
+  deactivateAttendanceAbsentLocksForDate,
   ensureStudentAccessLockTable,
   getActiveLockForStudent,
   getLockReasonDetail,

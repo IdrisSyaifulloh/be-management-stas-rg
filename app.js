@@ -104,6 +104,21 @@ var loginRateLimiter = rateLimit({
     return req.ip + ":" + String(req.body && req.body.identifier || "").slice(0, 80);
   }
 });
+app.options(/.*/, cors(corsOptions));
+
+// ======================================================
+// RATE LIMITING
+// ======================================================
+var loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit." },
+  keyGenerator: function (req) {
+    return rateLimit.ipKeyGenerator(req.ip) + ":" + String(req.body && req.body.identifier || "").slice(0, 80);
+  }
+});
 
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: false, limit: "15mb" }));
@@ -313,6 +328,9 @@ weeklyResearchAttendanceSuspensionJob.startMonitoring();
 // ======================================================
 app.use("/", indexRouter);
 app.use("/users", usersRouter);
+// Apply login rate limiter to the login endpoints handled inside `apiRouter`
+app.use("/api/auth/login", loginRateLimiter);
+app.use("/api/v1/auth/login", loginRateLimiter);
 app.use("/api", apiRouter);
 app.use("/api/v1", apiRouter);
 
