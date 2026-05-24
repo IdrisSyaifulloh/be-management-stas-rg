@@ -358,6 +358,82 @@ CREATE TABLE IF NOT EXISTS student_access_locks (
   UNIQUE(student_id, lock_date, reason)
 );
 
+CREATE TABLE IF NOT EXISTS picket_tasks (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  deleted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS picket_settings (
+  id TEXT PRIMARY KEY DEFAULT 'default',
+  people_per_day INTEGER NOT NULL DEFAULT 2 CHECK (people_per_day > 0),
+  randomize_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  rotation_strategy TEXT NOT NULL DEFAULT 'random',
+  exclude_on_leave BOOLEAN NOT NULL DEFAULT TRUE,
+  allow_same_student_gap_days INTEGER NOT NULL DEFAULT 7 CHECK (allow_same_student_gap_days >= 0),
+  weekly_schedule JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO picket_settings (id, people_per_day, randomize_enabled)
+VALUES ('default', 2, TRUE)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS picket_assignments (
+  id TEXT PRIMARY KEY,
+  date DATE NOT NULL,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  task_id TEXT REFERENCES picket_tasks(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'Ditugaskan',
+  generated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(date, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS picket_submissions (
+  id TEXT PRIMARY KEY,
+  assignment_id TEXT NOT NULL REFERENCES picket_assignments(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  date DATE NOT NULL,
+  photo_url TEXT NOT NULL,
+  file_url TEXT,
+  photo_file_name TEXT,
+  source TEXT,
+  status TEXT NOT NULL DEFAULT 'Terkirim' CHECK (status IN ('Terkirim', 'Valid', 'Bermasalah')),
+  submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMPTZ,
+  review_note TEXT,
+  UNIQUE(assignment_id)
+);
+
+CREATE TABLE IF NOT EXISTS picket_leave_requests (
+  id TEXT PRIMARY KEY,
+  assignment_id TEXT NOT NULL REFERENCES picket_assignments(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  date DATE NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'Menunggu' CHECK (status IN ('Menunggu', 'Disetujui', 'Ditolak')),
+  reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMPTZ,
+  review_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(assignment_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS picket_managers (
+  student_id TEXT PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -439,6 +515,10 @@ CREATE INDEX IF NOT EXISTS idx_logbook_comments_entry_created ON logbook_comment
 CREATE INDEX IF NOT EXISTS idx_draft_reports_student_upload ON draft_reports(student_id, upload_date DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_attendance_records_student_date ON attendance_records(student_id, attendance_date DESC);
 CREATE INDEX IF NOT EXISTS idx_student_access_locks_active ON student_access_locks(student_id, active, lock_date DESC);
+CREATE INDEX IF NOT EXISTS idx_picket_assignments_date ON picket_assignments(date);
+CREATE INDEX IF NOT EXISTS idx_picket_assignments_student_date ON picket_assignments(student_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_logged_at ON audit_logs(logged_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created ON notifications(recipient_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dashboard_reminders_student_date ON dashboard_reminder_logs(student_id, type, reference_date, sent_at DESC);

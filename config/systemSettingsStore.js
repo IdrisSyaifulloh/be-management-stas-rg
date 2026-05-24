@@ -64,13 +64,22 @@ function mergeSettings(current, patch) {
   const source = normalize(patch);
   const sourceAttendanceRules = normalize(source.attendanceRules);
   const currentAttendanceRules = normalize(current.attendanceRules);
-  const sourceHolidays = Array.isArray(sourceAttendanceRules.holidays)
-    ? sourceAttendanceRules.holidays
-    : source.holidays;
+  const sourceHolidays =
+    Array.isArray(sourceAttendanceRules.holidays) && sourceAttendanceRules.holidays.length > 0
+      ? sourceAttendanceRules.holidays
+      : Array.isArray(source.holidays)
+        ? source.holidays
+        : Array.isArray(sourceAttendanceRules.holidays)
+          ? sourceAttendanceRules.holidays
+          : null;
+  const holidays = Array.isArray(sourceHolidays)
+    ? normalizeHolidays(sourceHolidays)
+    : normalizeHolidays(currentAttendanceRules.holidays);
 
   return {
     ...current,
     ...source,
+    holidays,
     umum: { ...(current.umum || {}), ...(source.umum || {}) },
     gps: { ...(current.gps || {}), ...(source.gps || {}) },
     cuti: { ...(current.cuti || {}), ...(source.cuti || {}) },
@@ -88,9 +97,7 @@ function mergeSettings(current, patch) {
     attendanceRules: {
       ...currentAttendanceRules,
       ...sourceAttendanceRules,
-      holidays: Array.isArray(sourceHolidays)
-        ? normalizeHolidays(sourceHolidays)
-        : normalizeHolidays(currentAttendanceRules.holidays)
+      holidays
     }
   };
 }
