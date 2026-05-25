@@ -22,6 +22,12 @@ function normalizeKeahlian(input) {
   return [];
 }
 
+function normalizeOptionalText(input) {
+  if (input === undefined || input === null) return null;
+  const value = String(input).trim();
+  return value || null;
+}
+
 function mapUniqueConstraintError(error) {
   if (!error || error.code !== "23505") return null;
 
@@ -31,6 +37,14 @@ function mapUniqueConstraintError(error) {
 
   if (error.constraint === "lecturers_nip_key") {
     return { status: 409, message: "NIP sudah terdaftar." };
+  }
+
+  if (error.constraint === "lecturers_nidn_key") {
+    return { status: 409, message: "NIDN sudah terdaftar." };
+  }
+
+  if (error.constraint === "lecturers_kode_dosen_key") {
+    return { status: 409, message: "Kode dosen sudah terdaftar." };
   }
 
   if (error.constraint === "users_pkey" || error.constraint === "lecturers_pkey") {
@@ -45,8 +59,11 @@ router.get(
   asyncHandler(async (req, res) => {
     const result = await query(
       `
-      SELECT l.id, l.user_id, l.nip, u.name, u.initials, u.email,
-             l.departemen, l.jabatan, l.keahlian,
+      SELECT l.id, l.user_id, l.kode_dosen, l.nip, l.nidn,
+             l.asal_kampus, l.pendidikan_terakhir, l.kategori_dosen,
+             u.name, u.initials, u.email,
+             l.departemen, COALESCE(l.jfa, l.jabatan) AS jfa,
+             COALESCE(l.jfa, l.jabatan) AS jabatan, l.keahlian,
              l.riset_dipimpin, l.riset_diikuti,
              l.status, l.bergabung, l.mahasiswa_count
       FROM lecturers l
@@ -63,8 +80,26 @@ router.get(
 router.post(
   "/",
   asyncHandler(async (req, res) => {
-    const { id, nip, name, initials, email, departemen, jabatan, keahlian, status, password } = req.body;
+    const {
+      id,
+      nip,
+      name,
+      initials,
+      email,
+      kode_dosen,
+      nidn,
+      asal_kampus,
+      pendidikan_terakhir,
+      kategori_dosen,
+      departemen,
+      jabatan,
+      jfa,
+      keahlian,
+      status,
+      password
+    } = req.body;
     const normalizedKeahlian = normalizeKeahlian(keahlian);
+    const normalizedJfa = normalizeOptionalText(jfa ?? jabatan);
 
     if (!id || !nip || !name || !initials || !status || !password) {
       return res.status(400).json({ message: "id, nip, name, initials, status, password wajib diisi." });
@@ -83,10 +118,31 @@ router.post(
 
       await query(
         `
-        INSERT INTO lecturers (id, user_id, nip, departemen, jabatan, keahlian, status)
-        VALUES ($1, $1, $2, $3, $4, COALESCE($5::text[], '{}'::text[]), $6)
+        INSERT INTO lecturers (
+          id, user_id, kode_dosen, nip, nidn, asal_kampus,
+          pendidikan_terakhir, kategori_dosen, departemen,
+          jabatan, jfa, keahlian, status
+        )
+        VALUES (
+          $1, $1, $2, $3, $4, $5,
+          $6, $7, $8,
+          $9, $10, COALESCE($11::text[], '{}'::text[]), $12
+        )
         `,
-        [id, nip, departemen || null, jabatan || null, normalizedKeahlian, status]
+        [
+          id,
+          normalizeOptionalText(kode_dosen),
+          nip,
+          normalizeOptionalText(nidn),
+          normalizeOptionalText(asal_kampus),
+          normalizeOptionalText(pendidikan_terakhir),
+          normalizeOptionalText(kategori_dosen),
+          normalizeOptionalText(departemen),
+          normalizedJfa,
+          normalizedJfa,
+          normalizedKeahlian,
+          status
+        ]
       );
 
       await query("COMMIT");
@@ -105,25 +161,55 @@ router.post(
 router.put(
   "/:id",
   asyncHandler(async (req, res) => {
-    let { id } = req.params;
-    const { nip, name, initials, email, departemen, jabatan, keahlian, status, password } = req.body;
+    const requestedId = req.params.id;
+    const {
+      nip,
+      name,
+      initials,
+      email,
+      kode_dosen,
+      nidn,
+      asal_kampus,
+      pendidikan_terakhir,
+      kategori_dosen,
+      departemen,
+      jabatan,
+      jfa,
+      keahlian,
+      status,
+      password
+    } = req.body;
     const normalizedKeahlian = keahlian === undefined ? undefined : normalizeKeahlian(keahlian);
+    const normalizedJfa = jfa === undefined && jabatan === undefined
+      ? undefined
+      : normalizeOptionalText(jfa ?? jabatan);
 
     await query("BEGIN");
     try {
-      // Cek apakah ID yang dikirim adalah lecturer_id, jika ya cari user_id-nya
-      const lecturerCheck = await query("SELECT user_id FROM lecturers WHERE id = $1", [id]);
-      let userId = id;
-      if (lecturerCheck.rowCount > 0) {
-        userId = lecturerCheck.rows[0].user_id;
+      const lecturerLookup = await query(
+        `
+        SELECT id, user_id
+        FROM lecturers
+        WHERE id = $1 OR user_id = $1
+        LIMIT 1
+        `,
+        [requestedId]
+      );
+
+      if (lecturerLookup.rowCount === 0) {
+        await query("ROLLBACK");
+        return res.status(404).json({ message: "Dosen tidak ditemukan." });
       }
 
+      const lecturerId = lecturerLookup.rows[0].id;
+      const userId = lecturerLookup.rows[0].user_id;
+
       let passwordHash = null;
-      if (password && String(password).trim() !== '') {
+      if (password && String(password).trim() !== "") {
         passwordHash = await bcrypt.hash(password, 10);
       }
 
-      const userResult = await query(
+      await query(
         `
         UPDATE users
         SET name = COALESCE($2, name),
@@ -132,28 +218,41 @@ router.put(
             password_hash = COALESCE($5, password_hash),
             updated_at = NOW()
         WHERE id = $1 AND role = 'dosen'
-        RETURNING id
         `,
         [userId, name, initials, email, passwordHash]
       );
 
-      if (userResult.rowCount === 0) {
-        await query("ROLLBACK");
-        return res.status(404).json({ message: "Dosen tidak ditemukan." });
-      }
-
       await query(
         `
         UPDATE lecturers
-        SET nip = COALESCE($2, nip),
-            departemen = COALESCE($3, departemen),
-            jabatan = COALESCE($4, jabatan),
-            keahlian = COALESCE($5::text[], keahlian),
-            status = COALESCE($6, status),
+        SET kode_dosen = COALESCE($2, kode_dosen),
+            nip = COALESCE($3, nip),
+            nidn = COALESCE($4, nidn),
+            asal_kampus = COALESCE($5, asal_kampus),
+            pendidikan_terakhir = COALESCE($6, pendidikan_terakhir),
+            kategori_dosen = COALESCE($7, kategori_dosen),
+            departemen = COALESCE($8, departemen),
+            jabatan = COALESCE($9, jabatan),
+            jfa = COALESCE($10, jfa),
+            keahlian = COALESCE($11::text[], keahlian),
+            status = COALESCE($12, status),
             updated_at = NOW()
         WHERE id = $1
         `,
-        [id, nip, departemen, jabatan, normalizedKeahlian, status]
+        [
+          lecturerId,
+          normalizeOptionalText(kode_dosen),
+          nip,
+          normalizeOptionalText(nidn),
+          normalizeOptionalText(asal_kampus),
+          normalizeOptionalText(pendidikan_terakhir),
+          normalizeOptionalText(kategori_dosen),
+          normalizeOptionalText(departemen),
+          normalizedJfa,
+          normalizedJfa,
+          normalizedKeahlian,
+          status
+        ]
       );
 
       await query("COMMIT");
@@ -172,13 +271,11 @@ router.put(
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
-    // Coba hapus berdasarkan user_id terlebih dahulu
     let result = await query(
       "DELETE FROM users WHERE id = $1 AND role = 'dosen' RETURNING id",
       [req.params.id]
     );
 
-    // Jika tidak ketemu, coba cari berdasarkan lecturer_id
     if (result.rowCount === 0) {
       const lecturerCheck = await query(
         "SELECT user_id FROM lecturers WHERE id = $1",

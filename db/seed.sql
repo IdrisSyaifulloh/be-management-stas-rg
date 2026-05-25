@@ -672,3 +672,5 @@ ON CONFLICT (id) DO UPDATE SET
   created_at = EXCLUDED.created_at;
 
 COMMIT;
+
+
