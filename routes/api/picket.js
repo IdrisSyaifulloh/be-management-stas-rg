@@ -94,7 +94,10 @@ router.patch(
   "/settings",
   asyncHandler(async (req, res) => {
     if (!(await requirePicketManager(req, res))) return;
-    res.json(await updatePicketSettings(req.body || {}));
+    res.json(await updatePicketSettings({
+      ...(req.body || {}),
+      updatedBy: req.authUser?.id || null
+    }));
   })
 );
 

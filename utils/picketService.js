@@ -25,6 +25,11 @@ function buildId(prefix) {
   return `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+function runQuery(executor, text, params) {
+  if (typeof executor === "function") return executor(text, params);
+  return executor.query(text, params);
+}
+
 function normalizeIsoDate(value, fallback = null) {
   const text = String(value || fallback || "").trim().slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
@@ -289,6 +294,28 @@ function getWeeklyScheduleForDate(settings, isoDate) {
   return (settings.weeklySchedule || []).find((item) => item.enabled !== false && item.dayOfWeek === dayOfWeek) || null;
 }
 
+function getWeeklySchedulePayload(payload = {}) {
+  if (Array.isArray(payload.weeklySchedule)) return payload.weeklySchedule;
+  if (Array.isArray(payload.weekly_schedule)) return payload.weekly_schedule;
+  return null;
+}
+
+function weeklyScheduleItemSignature(item) {
+  if (!item) return null;
+  return JSON.stringify({
+    enabled: item.enabled !== false,
+    peoplePerDay: Number(item.peoplePerDay || item.people_per_day || 0),
+    studentIds: item.studentIds || item.student_ids || []
+  });
+}
+
+function isWeeklyScheduleChangedForDate(previousSettings, nextSettings, isoDate) {
+  const dayOfWeek = getJakartaDayOfWeek(isoDate);
+  const previous = (previousSettings.weeklySchedule || []).find((item) => item.dayOfWeek === dayOfWeek) || null;
+  const next = (nextSettings.weeklySchedule || []).find((item) => item.dayOfWeek === dayOfWeek) || null;
+  return weeklyScheduleItemSignature(previous) !== weeklyScheduleItemSignature(next);
+}
+
 function mapTask(row) {
   return {
     id: row.id,
@@ -411,34 +438,69 @@ async function updatePicketSettings(payload = {}) {
     current.allowSameStudentGapDays,
     "allowSameStudentGapDays"
   );
-  const weeklySchedule = Array.isArray(payload.weeklySchedule || payload.weekly_schedule)
-    ? normalizeWeeklySchedule(payload.weeklySchedule || payload.weekly_schedule)
+  const weeklySchedulePayload = getWeeklySchedulePayload(payload);
+  const hasWeeklySchedulePayload = weeklySchedulePayload !== null;
+  const weeklySchedule = hasWeeklySchedulePayload
+    ? normalizeWeeklySchedule(weeklySchedulePayload)
     : current.weeklySchedule;
+  const syncDate = payload.syncDate || payload.sync_date
+    ? normalizeIsoDate(payload.syncDate || payload.sync_date)
+    : null;
 
-  const result = await query(
-    `
-    UPDATE picket_settings
-    SET people_per_day = $2,
-        randomize_enabled = $3,
-        rotation_strategy = $4,
-        exclude_on_leave = $5,
-        allow_same_student_gap_days = $6,
-        weekly_schedule = $7::jsonb,
-        updated_at = NOW()
-    WHERE id = $1
-    RETURNING *
-    `,
-    [
-      DEFAULT_SETTINGS_ID,
-      peoplePerDay,
-      randomizeEnabled,
-      rotationStrategy,
-      excludeOnLeave,
-      gapDays,
-      JSON.stringify(weeklySchedule)
-    ]
-  );
-  return mapSettings(result.rows[0]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `
+      UPDATE picket_settings
+      SET people_per_day = $2,
+          randomize_enabled = $3,
+          rotation_strategy = $4,
+          exclude_on_leave = $5,
+          allow_same_student_gap_days = $6,
+          weekly_schedule = $7::jsonb,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [
+        DEFAULT_SETTINGS_ID,
+        peoplePerDay,
+        randomizeEnabled,
+        rotationStrategy,
+        excludeOnLeave,
+        gapDays,
+        JSON.stringify(weeklySchedule)
+      ]
+    );
+
+    const settings = mapSettings(result.rows[0]);
+    const shouldSync = Boolean(
+      syncDate &&
+      hasWeeklySchedulePayload &&
+      isWeeklyScheduleChangedForDate(current, settings, syncDate)
+    );
+    let sync = syncDate
+      ? { date: syncDate, skipped: !shouldSync }
+      : null;
+
+    if (shouldSync) {
+      sync = await reconcilePicketAssignmentsForDate({
+        date: syncDate,
+        settings,
+        generatedBy: payload.updatedBy || payload.updated_by || null,
+        executor: client
+      });
+    }
+
+    await client.query("COMMIT");
+    return sync ? { ...settings, sync } : settings;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function listPicketTasks({ includeInactive = true } = {}) {
@@ -653,8 +715,9 @@ async function chooseTaskForStudent(studentId, activeTasks) {
   return candidates[Math.floor(Math.random() * candidates.length)] || activeTasks[0];
 }
 
-async function fetchAssignmentsByDate(date) {
-  const result = await query(
+async function fetchAssignmentsByDate(date, executor = query) {
+  const result = await runQuery(
+    executor,
     `
     SELECT pa.id, TO_CHAR(pa.date, 'YYYY-MM-DD') AS date_text, pa.student_id,
            pa.task_id, pa.status, pa.generated_by, pa.generated_at,
@@ -861,34 +924,25 @@ async function generatePicketSchedule({
   };
 }
 
-async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
-  await ensurePicketTables();
+async function reconcilePicketAssignmentsForDate({ date, settings = null, generatedBy = null, executor = null } = {}) {
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  const settings = await getPicketSettings();
-  const weeklySchedule = getWeeklyScheduleForDate(settings, targetDate);
+  const effectiveSettings = settings || await getPicketSettings();
+  const weeklySchedule = getWeeklyScheduleForDate(effectiveSettings, targetDate);
   const weeklyStudentIds = await normalizeManualStudentIds(weeklySchedule?.studentIds || [], {
     allowEmpty: true,
     activeOnly: false
   });
   const dayOfWeek = getJakartaDayOfWeek(targetDate);
-
-  const activeTasks = weeklyStudentIds.length > 0
-    ? await listPicketTasks({ includeInactive: false })
-    : [];
-  if (weeklyStudentIds.length > 0 && activeTasks.length === 0) {
-    const error = new Error("Belum ada tugas piket aktif.");
-    error.statusCode = 400;
-    throw error;
-  }
-
   const createdIds = [];
   const updatedIds = [];
-  const client = await pool.connect();
+  const client = executor || await pool.connect();
+  const ownsTransaction = !executor;
 
   try {
-    await client.query("BEGIN");
+    if (ownsTransaction) await client.query("BEGIN");
 
-    const removed = await client.query(
+    const removed = await runQuery(
+      client,
       `
       WITH ranked AS (
         SELECT pa.id,
@@ -913,7 +967,8 @@ async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
       [targetDate, weeklyStudentIds]
     );
 
-    const existing = await client.query(
+    const existing = await runQuery(
+      client,
       `
       SELECT id, student_id
       FROM picket_assignments
@@ -925,13 +980,32 @@ async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
     );
     const existingByStudentId = new Map(existing.rows.map((row) => [row.student_id, row.id]));
 
+    const activeTasks = weeklyStudentIds.length > 0
+      ? (await runQuery(
+          client,
+          `
+          SELECT *
+          FROM picket_tasks
+          WHERE deleted_at IS NULL
+            AND active = TRUE
+          ORDER BY name ASC
+          `
+        )).rows.map(mapTask)
+      : [];
+    if (weeklyStudentIds.length > 0 && activeTasks.length === 0) {
+      const error = new Error("Belum ada tugas piket aktif.");
+      error.statusCode = 400;
+      throw error;
+    }
+
     for (let index = 0; index < weeklyStudentIds.length; index += 1) {
       const studentId = weeklyStudentIds[index];
       const task = activeTasks[index % activeTasks.length];
       const existingId = existingByStudentId.get(studentId);
 
       if (existingId) {
-        const result = await client.query(
+        const result = await runQuery(
+          client,
           `
           UPDATE picket_assignments
           SET task_id = $2,
@@ -949,7 +1023,8 @@ async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
       }
 
       const id = buildId("PKT-ASG");
-      const result = await client.query(
+      const result = await runQuery(
+        client,
         `
         INSERT INTO picket_assignments (id, date, student_id, task_id, status, generated_by)
         VALUES ($1, $2::date, $3, $4, 'Ditugaskan', $5)
@@ -966,24 +1041,30 @@ async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
       createdIds.push(result.rows[0].id);
     }
 
-    await client.query("COMMIT");
+    const assignments = await fetchAssignmentsByDate(targetDate, client);
+    if (ownsTransaction) await client.query("COMMIT");
 
     return {
       date: targetDate,
       dayOfWeek,
       weeklyStudentIds,
-      assignments: await fetchAssignmentsByDate(targetDate),
+      assignments,
       created: createdIds,
       updated: updatedIds,
       removed: removed.rows.map((row) => row.id),
       removedStudentIds: removed.rows.map((row) => row.student_id)
     };
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (ownsTransaction) await client.query("ROLLBACK");
     throw error;
   } finally {
-    client.release();
+    if (ownsTransaction) client.release();
   }
+}
+
+async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
+  await ensurePicketTables();
+  return reconcilePicketAssignmentsForDate({ date, generatedBy });
 }
 
 async function listSubmissions({ date = null, studentId = null } = {}) {
@@ -1016,12 +1097,18 @@ async function listSubmissions({ date = null, studentId = null } = {}) {
 async function getPicketOverview(date) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  const [assignments, submissions, leaveRequests] = await Promise.all([
-    fetchAssignmentsByDate(targetDate),
+  const sync = await reconcilePicketAssignmentsForDate({ date: targetDate });
+  const [submissions, leaveRequests] = await Promise.all([
     listSubmissions({ date: targetDate }),
     listPicketLeaveRequests({ date: targetDate })
   ]);
-  return { date: targetDate, assignments, submissions, leaveRequests };
+  return {
+    date: targetDate,
+    assignments: sync.assignments,
+    submissions,
+    leaveRequests,
+    sync
+  };
 }
 
 async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDateIso()) {
