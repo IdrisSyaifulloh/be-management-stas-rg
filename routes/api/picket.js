@@ -18,6 +18,7 @@ const {
   listPicketManagers,
   listPicketTasks,
   replacePicketManagers,
+  resyncPicketSchedule,
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
   updatePicketSettings,
@@ -176,9 +177,25 @@ router.post(
       peoplePerDay: req.body?.peoplePerDay ?? req.body?.people_per_day,
       randomize: req.body?.randomize,
       studentIds: req.body?.studentIds || req.body?.student_ids,
+      replaceExisting: req.body?.replaceExisting ?? req.body?.replace_existing,
+      overwrite: req.body?.overwrite,
       generatedBy: req.authUser?.id || null
     });
     return res.status(201).json(result);
+  })
+);
+
+router.post(
+  "/schedules/resync",
+  asyncHandler(async (req, res) => {
+    if (extractRole(req) !== "operator") {
+      return res.status(403).json({ message: "Resync jadwal piket hanya untuk operator." });
+    }
+    const result = await resyncPicketSchedule({
+      date: req.body?.date,
+      generatedBy: req.authUser?.id || null
+    });
+    return res.json(result);
   })
 );
 

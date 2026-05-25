@@ -57,6 +57,17 @@ function normalizeNonNegativeInteger(value, fallback, label) {
   return parsed;
 }
 
+function normalizeBoolean(value, fallback = false) {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+  return Boolean(value);
+}
+
 function sanitizeFilenameBase(name) {
   return String(name || "picket-photo")
     .replace(/\.[^/.]+$/, "")
@@ -663,9 +674,11 @@ async function fetchAssignmentsByDate(date) {
   return result.rows.map(mapAssignment);
 }
 
-async function normalizeManualStudentIds(studentIds) {
+async function normalizeManualStudentIds(studentIds, { allowEmpty = false, activeOnly = true } = {}) {
   const uniqueIds = [...new Set((studentIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
   if (uniqueIds.length === 0) {
+    if (allowEmpty) return [];
+
     const error = new Error("studentIds wajib diisi untuk mode manual.");
     error.statusCode = 400;
     throw error;
@@ -677,15 +690,18 @@ async function normalizeManualStudentIds(studentIds) {
     FROM students s
     JOIN users u ON u.id = s.user_id
     WHERE s.id = ANY($1::text[])
-      AND s.status = 'Aktif'
-      AND u.is_active = TRUE
+      AND (
+        $2::boolean = FALSE
+        OR (s.status = 'Aktif' AND u.is_active = TRUE)
+      )
     `,
-    [uniqueIds]
+    [uniqueIds, activeOnly]
   );
   const foundIds = new Set(result.rows.map((row) => row.id));
   const missingIds = uniqueIds.filter((id) => !foundIds.has(id));
   if (missingIds.length > 0) {
-    const error = new Error(`studentIds tidak valid atau tidak aktif: ${missingIds.join(", ")}`);
+    const reason = activeOnly ? "tidak valid atau tidak aktif" : "tidak valid";
+    const error = new Error(`studentIds ${reason}: ${missingIds.join(", ")}`);
     error.statusCode = 400;
     throw error;
   }
@@ -693,9 +709,9 @@ async function normalizeManualStudentIds(studentIds) {
   return uniqueIds;
 }
 
-async function generateManualPicketSchedule({ date, studentIds, activeTasks, generatedBy = null }) {
+async function generateManualPicketSchedule({ date, studentIds, activeTasks, generatedBy = null, allowEmptyStudentIds = false }) {
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  const manualStudentIds = await normalizeManualStudentIds(studentIds);
+  const manualStudentIds = await normalizeManualStudentIds(studentIds, { allowEmpty: allowEmptyStudentIds });
   const createdIds = [];
   const client = await pool.connect();
 
@@ -736,16 +752,26 @@ async function generateManualPicketSchedule({ date, studentIds, activeTasks, gen
   };
 }
 
-async function generatePicketSchedule({ date, peoplePerDay, randomize, studentIds, generatedBy = null } = {}) {
+async function generatePicketSchedule({
+  date,
+  peoplePerDay,
+  randomize,
+  studentIds,
+  replaceExisting,
+  overwrite,
+  generatedBy = null
+} = {}) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
   const settings = await getPicketSettings();
   const weeklySchedule = getWeeklyScheduleForDate(settings, targetDate);
   const weeklyStudentIds = weeklySchedule?.studentIds || [];
+  const explicitStudentIdsProvided = Array.isArray(studentIds);
+  const shouldReplaceExisting = normalizeBoolean(replaceExisting ?? overwrite, false);
   const effectiveStudentIds =
-    Array.isArray(studentIds) && studentIds.length > 0
+    explicitStudentIdsProvided
       ? studentIds
-      : weeklyStudentIds.length > 0
+      : weeklySchedule
         ? weeklyStudentIds
         : studentIds;
   const targetCount = Array.isArray(effectiveStudentIds) && effectiveStudentIds.length > 0
@@ -755,22 +781,40 @@ async function generatePicketSchedule({ date, peoplePerDay, randomize, studentId
         settings.peoplePerDay,
         "peoplePerDay"
       );
-  const useRandom = randomize == null ? settings.randomizeEnabled : Boolean(randomize);
+  const useRandom = normalizeBoolean(randomize, settings.randomizeEnabled);
+
+  if (shouldReplaceExisting && !Array.isArray(effectiveStudentIds)) {
+    const error = new Error("studentIds wajib diisi saat replaceExisting atau overwrite bernilai true.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (Array.isArray(effectiveStudentIds) && (shouldReplaceExisting || effectiveStudentIds.length > 0)) {
+    const allowEmptyStudentIds = shouldReplaceExisting || explicitStudentIdsProvided;
+    const manualStudentIds = await normalizeManualStudentIds(effectiveStudentIds, { allowEmpty: allowEmptyStudentIds });
+    const activeTasks = manualStudentIds.length > 0
+      ? await listPicketTasks({ includeInactive: false })
+      : [];
+    if (manualStudentIds.length > 0 && activeTasks.length === 0) {
+      const error = new Error("Belum ada tugas piket aktif.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return generateManualPicketSchedule({
+      date: targetDate,
+      studentIds: manualStudentIds,
+      activeTasks,
+      generatedBy,
+      allowEmptyStudentIds
+    });
+  }
 
   const activeTasks = await listPicketTasks({ includeInactive: false });
   if (activeTasks.length === 0) {
     const error = new Error("Belum ada tugas piket aktif.");
     error.statusCode = 400;
     throw error;
-  }
-
-  if (Array.isArray(effectiveStudentIds) && effectiveStudentIds.length > 0) {
-    return generateManualPicketSchedule({
-      date: targetDate,
-      studentIds: effectiveStudentIds,
-      activeTasks,
-      generatedBy
-    });
   }
 
   const existing = await fetchAssignmentsByDate(targetDate);
@@ -815,6 +859,131 @@ async function generatePicketSchedule({ date, peoplePerDay, randomize, studentId
     assignments: await fetchAssignmentsByDate(targetDate),
     created: createdIds
   };
+}
+
+async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
+  await ensurePicketTables();
+  const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  const settings = await getPicketSettings();
+  const weeklySchedule = getWeeklyScheduleForDate(settings, targetDate);
+  const weeklyStudentIds = await normalizeManualStudentIds(weeklySchedule?.studentIds || [], {
+    allowEmpty: true,
+    activeOnly: false
+  });
+  const dayOfWeek = getJakartaDayOfWeek(targetDate);
+
+  const activeTasks = weeklyStudentIds.length > 0
+    ? await listPicketTasks({ includeInactive: false })
+    : [];
+  if (weeklyStudentIds.length > 0 && activeTasks.length === 0) {
+    const error = new Error("Belum ada tugas piket aktif.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const createdIds = [];
+  const updatedIds = [];
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const removed = await client.query(
+      `
+      WITH ranked AS (
+        SELECT pa.id,
+               pa.student_id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY pa.student_id
+                 ORDER BY (ps.id IS NOT NULL) DESC, pa.generated_at DESC, pa.created_at DESC, pa.id ASC
+               ) AS student_rank
+        FROM picket_assignments pa
+        LEFT JOIN picket_submissions ps ON ps.assignment_id = pa.id
+        WHERE pa.date = $1::date
+      )
+      DELETE FROM picket_assignments pa
+      USING ranked
+      WHERE pa.id = ranked.id
+        AND (
+          NOT (ranked.student_id = ANY($2::text[]))
+          OR ranked.student_rank > 1
+        )
+      RETURNING pa.id, pa.student_id
+      `,
+      [targetDate, weeklyStudentIds]
+    );
+
+    const existing = await client.query(
+      `
+      SELECT id, student_id
+      FROM picket_assignments
+      WHERE date = $1::date
+        AND student_id = ANY($2::text[])
+      FOR UPDATE
+      `,
+      [targetDate, weeklyStudentIds]
+    );
+    const existingByStudentId = new Map(existing.rows.map((row) => [row.student_id, row.id]));
+
+    for (let index = 0; index < weeklyStudentIds.length; index += 1) {
+      const studentId = weeklyStudentIds[index];
+      const task = activeTasks[index % activeTasks.length];
+      const existingId = existingByStudentId.get(studentId);
+
+      if (existingId) {
+        const result = await client.query(
+          `
+          UPDATE picket_assignments
+          SET task_id = $2,
+              status = 'Ditugaskan',
+              generated_by = $3,
+              generated_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING id
+          `,
+          [existingId, task.id, generatedBy]
+        );
+        if (result.rowCount > 0) updatedIds.push(result.rows[0].id);
+        continue;
+      }
+
+      const id = buildId("PKT-ASG");
+      const result = await client.query(
+        `
+        INSERT INTO picket_assignments (id, date, student_id, task_id, status, generated_by)
+        VALUES ($1, $2::date, $3, $4, 'Ditugaskan', $5)
+        ON CONFLICT (date, student_id)
+        DO UPDATE SET task_id = EXCLUDED.task_id,
+                      status = 'Ditugaskan',
+                      generated_by = EXCLUDED.generated_by,
+                      generated_at = NOW(),
+                      updated_at = NOW()
+        RETURNING id
+        `,
+        [id, targetDate, studentId, task.id, generatedBy]
+      );
+      createdIds.push(result.rows[0].id);
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      date: targetDate,
+      dayOfWeek,
+      weeklyStudentIds,
+      assignments: await fetchAssignmentsByDate(targetDate),
+      created: createdIds,
+      updated: updatedIds,
+      removed: removed.rows.map((row) => row.id),
+      removedStudentIds: removed.rows.map((row) => row.student_id)
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function listSubmissions({ date = null, studentId = null } = {}) {
@@ -1163,6 +1332,7 @@ module.exports = {
   listPicketManagers,
   listPicketTasks,
   replacePicketManagers,
+  resyncPicketSchedule,
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
   updatePicketSettings,
