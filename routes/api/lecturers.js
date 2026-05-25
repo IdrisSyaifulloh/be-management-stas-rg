@@ -4,6 +4,44 @@ const { query } = require("../../db/pool");
 const bcrypt = require("bcrypt");
 
 const router = express.Router();
+let ensureLecturerColumnsPromise = null;
+
+async function ensureLecturerColumns() {
+  if (!ensureLecturerColumnsPromise) {
+    ensureLecturerColumnsPromise = (async () => {
+      await query(`
+        ALTER TABLE lecturers
+        ADD COLUMN IF NOT EXISTS kode_dosen TEXT,
+        ADD COLUMN IF NOT EXISTS nidn TEXT,
+        ADD COLUMN IF NOT EXISTS asal_kampus TEXT,
+        ADD COLUMN IF NOT EXISTS pendidikan_terakhir TEXT,
+        ADD COLUMN IF NOT EXISTS kategori_dosen TEXT,
+        ADD COLUMN IF NOT EXISTS jfa TEXT
+      `);
+
+      await query(`
+        UPDATE lecturers
+        SET jfa = jabatan
+        WHERE jfa IS NULL
+          AND jabatan IS NOT NULL
+      `);
+
+      await query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lecturers_kode_dosen_unique
+        ON lecturers (kode_dosen)
+        WHERE kode_dosen IS NOT NULL
+      `);
+
+      await query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lecturers_nidn_unique
+        ON lecturers (nidn)
+        WHERE nidn IS NOT NULL
+      `);
+    })();
+  }
+
+  await ensureLecturerColumnsPromise;
+}
 
 function normalizeKeahlian(input) {
   if (Array.isArray(input)) {
@@ -39,11 +77,11 @@ function mapUniqueConstraintError(error) {
     return { status: 409, message: "NIP sudah terdaftar." };
   }
 
-  if (error.constraint === "lecturers_nidn_key") {
+  if (error.constraint === "lecturers_nidn_key" || error.constraint === "idx_lecturers_nidn_unique") {
     return { status: 409, message: "NIDN sudah terdaftar." };
   }
 
-  if (error.constraint === "lecturers_kode_dosen_key") {
+  if (error.constraint === "lecturers_kode_dosen_key" || error.constraint === "idx_lecturers_kode_dosen_unique") {
     return { status: 409, message: "Kode dosen sudah terdaftar." };
   }
 
@@ -57,6 +95,8 @@ function mapUniqueConstraintError(error) {
 router.get(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureLecturerColumns();
+
     const result = await query(
       `
       SELECT l.id, l.user_id, l.kode_dosen, l.nip, l.nidn,
@@ -80,6 +120,8 @@ router.get(
 router.post(
   "/",
   asyncHandler(async (req, res) => {
+    await ensureLecturerColumns();
+
     const {
       id,
       nip,
@@ -161,6 +203,8 @@ router.post(
 router.put(
   "/:id",
   asyncHandler(async (req, res) => {
+    await ensureLecturerColumns();
+
     const requestedId = req.params.id;
     const {
       nip,
@@ -271,6 +315,8 @@ router.put(
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
+    await ensureLecturerColumns();
+
     let result = await query(
       "DELETE FROM users WHERE id = $1 AND role = 'dosen' RETURNING id",
       [req.params.id]
