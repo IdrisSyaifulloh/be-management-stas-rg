@@ -17,6 +17,39 @@ const { requireSafeId } = require("../../utils/securityValidation");
 const router = express.Router();
 const SUPPORTED_FORMATS = ["xlsx", "csv", "pdf"];
 const PDF_MAX_ROWS = 500;
+let ensureLecturerExportColumnsPromise = null;
+
+async function ensureLecturerExportColumns() {
+  if (!ensureLecturerExportColumnsPromise) {
+    ensureLecturerExportColumnsPromise = (async () => {
+      await query(`
+        ALTER TABLE lecturers
+        ADD COLUMN IF NOT EXISTS kode_dosen TEXT,
+        ADD COLUMN IF NOT EXISTS nidn TEXT,
+        ADD COLUMN IF NOT EXISTS asal_kampus TEXT,
+        ADD COLUMN IF NOT EXISTS pendidikan_terakhir TEXT,
+        ADD COLUMN IF NOT EXISTS kategori_dosen TEXT,
+        ADD COLUMN IF NOT EXISTS jfa TEXT,
+        ADD COLUMN IF NOT EXISTS tanggal_persetujuan_anggota DATE
+      `);
+
+      await query(`
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS phone TEXT
+      `);
+
+      await query(`
+        UPDATE lecturers
+        SET jfa = jabatan
+        WHERE jfa IS NULL
+          AND jabatan IS NOT NULL
+      `);
+    })();
+  }
+
+  await ensureLecturerExportColumnsPromise;
+}
+
 
 function createHttpError(status, message, expose = status < 500) {
   const error = new Error(message);
@@ -773,6 +806,95 @@ const EXPORT_DEFINITIONS = {
       };
     }
   },
+  "database-dosen": {
+    title: "Database Dosen",
+    description: "Master data dosen beserta kode dosen, kampus asal, kategori, JFA, dan keterlibatan riset.",
+    fileBaseName: "database-dosen",
+    sheetName: "Dosen",
+    filters: { student: false, project: false, dateRange: false },
+    normalizeRequest(request) {
+      return { ...request, startDate: null, endDate: null };
+    },
+    buildPdfOptions() {
+      return {
+        metadata: [],
+        columnWeights: [0.85, 1.25, 1.0, 0.9, 1.1, 0.95, 1.0, 0.95, 0.95, 0.95, 0.95, 0.95, 1.2, 0.7, 0.7, 0.75, 0.9, 0.8]
+      };
+    },
+    async getDataset() {
+      await ensureLecturerExportColumns();
+
+      const result = await query(
+        `
+        SELECT
+          COALESCE(l.kode_dosen, l.id, '-') AS kode_dosen,
+          u.name,
+          COALESCE(l.nip, '-') AS nip,
+          COALESCE(l.nidn, '-') AS nidn,
+          COALESCE(u.email, '-') AS email,
+          COALESCE(u.phone, '-') AS phone,
+          COALESCE(l.asal_kampus, '-') AS asal_kampus,
+          COALESCE(TO_CHAR(l.tanggal_persetujuan_anggota, 'YYYY-MM-DD'), '-') AS tanggal_persetujuan_anggota,
+          COALESCE(l.pendidikan_terakhir, '-') AS pendidikan_terakhir,
+          COALESCE(l.kategori_dosen, '-') AS kategori_dosen,
+          COALESCE(l.jfa, l.jabatan, '-') AS jfa,
+          COALESCE(l.departemen, '-') AS departemen,
+          COALESCE(NULLIF(array_to_string(COALESCE(l.keahlian, '{}'::text[]), '; '), ''), '-') AS keahlian,
+          COALESCE(l.riset_dipimpin, 0) AS riset_dipimpin,
+          COALESCE(l.riset_diikuti, 0) AS riset_diikuti,
+          COALESCE(l.status, '-') AS status,
+          COALESCE(TO_CHAR(l.bergabung, 'YYYY-MM-DD'), '-') AS bergabung,
+          COALESCE(l.mahasiswa_count, 0) AS mahasiswa_count
+        FROM lecturers l
+        JOIN users u ON u.id = l.user_id
+        ORDER BY u.name ASC
+        `
+      );
+
+      return {
+        headers: [
+          "Kode Dosen",
+          "Nama",
+          "NIP",
+          "NIDN",
+          "Email",
+          "Kontak HP",
+          "Asal Kampus",
+          "Tgl Persetujuan Anggota",
+          "Pendidikan Terakhir",
+          "Kategori Dosen",
+          "JFA",
+          "Departemen",
+          "Keahlian",
+          "Riset Dipimpin",
+          "Riset Diikuti",
+          "Status",
+          "Tgl Bergabung",
+          "Jumlah Mahasiswa"
+        ],
+        rows: result.rows.map((row) => [
+          row.kode_dosen,
+          row.name,
+          row.nip,
+          row.nidn,
+          row.email,
+          row.phone,
+          row.asal_kampus,
+          row.tanggal_persetujuan_anggota,
+          row.pendidikan_terakhir,
+          row.kategori_dosen,
+          row.jfa,
+          row.departemen,
+          row.keahlian,
+          row.riset_dipimpin,
+          row.riset_diikuti,
+          row.status,
+          row.bergabung,
+          row.mahasiswa_count
+        ])
+      };
+    }
+  },
   "layanan-surat": {
     title: "Layanan Surat",
     description: "Riwayat pengajuan layanan surat mahasiswa.",
@@ -1047,6 +1169,7 @@ const TEMPLATE_TYPES = [
   "riset",
   "cuti",
   "database-mahasiswa",
+  "database-dosen",
   "layanan-surat",
   "rekap-data",
   "kegiatan-stas"
@@ -1131,6 +1254,7 @@ router.get(
   "riset",
   "cuti",
   "database-mahasiswa",
+  "database-dosen",
   "layanan-surat",
   "rekap-data"
 ].forEach((type) => {

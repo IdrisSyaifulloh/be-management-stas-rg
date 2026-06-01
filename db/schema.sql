@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS lecturers (
   departemen TEXT,
   jabatan TEXT,
   jfa TEXT,
+  tanggal_persetujuan_anggota DATE,
   keahlian TEXT[] NOT NULL DEFAULT '{}',
   riset_dipimpin INTEGER NOT NULL DEFAULT 0,
   riset_diikuti INTEGER NOT NULL DEFAULT 0,
@@ -542,4 +543,5 @@ CREATE INDEX IF NOT EXISTS idx_jwt_sessions_user_active ON jwt_sessions(user_id,
 CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_at);
 
 COMMIT;
+
 

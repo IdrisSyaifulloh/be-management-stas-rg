@@ -16,7 +16,13 @@ async function ensureLecturerColumns() {
         ADD COLUMN IF NOT EXISTS asal_kampus TEXT,
         ADD COLUMN IF NOT EXISTS pendidikan_terakhir TEXT,
         ADD COLUMN IF NOT EXISTS kategori_dosen TEXT,
-        ADD COLUMN IF NOT EXISTS jfa TEXT
+        ADD COLUMN IF NOT EXISTS jfa TEXT,
+        ADD COLUMN IF NOT EXISTS tanggal_persetujuan_anggota DATE
+      `);
+
+      await query(`
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS phone TEXT
       `);
 
       await query(`
@@ -66,6 +72,19 @@ function normalizeOptionalText(input) {
   return value || null;
 }
 
+function normalizeOptionalDate(input) {
+  if (input === undefined || input === null || input === "") return null;
+  const value = String(input).trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const error = new Error("tanggal_persetujuan_anggota wajib format YYYY-MM-DD.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return value;
+}
+
 function mapUniqueConstraintError(error) {
   if (!error || error.code !== "23505") return null;
 
@@ -101,7 +120,8 @@ router.get(
       `
       SELECT l.id, l.user_id, l.kode_dosen, l.nip, l.nidn,
              l.asal_kampus, l.pendidikan_terakhir, l.kategori_dosen,
-             u.name, u.initials, u.email,
+             l.tanggal_persetujuan_anggota,
+             u.name, u.initials, u.email, u.phone,
              l.departemen, COALESCE(l.jfa, l.jabatan) AS jfa,
              COALESCE(l.jfa, l.jabatan) AS jabatan, l.keahlian,
              l.riset_dipimpin, l.riset_diikuti,
@@ -128,11 +148,13 @@ router.post(
       name,
       initials,
       email,
+      phone,
       kode_dosen,
       nidn,
       asal_kampus,
       pendidikan_terakhir,
       kategori_dosen,
+      tanggal_persetujuan_anggota,
       departemen,
       jabatan,
       jfa,
@@ -142,6 +164,7 @@ router.post(
     } = req.body;
     const normalizedKeahlian = normalizeKeahlian(keahlian);
     const normalizedJfa = normalizeOptionalText(jfa ?? jabatan);
+    const normalizedApprovalDate = normalizeOptionalDate(tanggal_persetujuan_anggota);
 
     if (!id || !nip || !name || !initials || !status || !password) {
       return res.status(400).json({ message: "id, nip, name, initials, status, password wajib diisi." });
@@ -152,23 +175,23 @@ router.post(
       const passwordHash = await bcrypt.hash(password, 10);
       await query(
         `
-        INSERT INTO users (id, name, initials, role, email, password_hash)
-        VALUES ($1, $2, $3, 'dosen', $4, $5)
+        INSERT INTO users (id, name, initials, role, email, phone, password_hash)
+        VALUES ($1, $2, $3, 'dosen', $4, $5, $6)
         `,
-        [id, name, initials, email || null, passwordHash]
+        [id, name, initials, email || null, normalizeOptionalText(phone), passwordHash]
       );
 
       await query(
         `
         INSERT INTO lecturers (
           id, user_id, kode_dosen, nip, nidn, asal_kampus,
-          pendidikan_terakhir, kategori_dosen, departemen,
-          jabatan, jfa, keahlian, status
+          pendidikan_terakhir, kategori_dosen, tanggal_persetujuan_anggota,
+          departemen, jabatan, jfa, keahlian, status
         )
         VALUES (
           $1, $1, $2, $3, $4, $5,
           $6, $7, $8,
-          $9, $10, COALESCE($11::text[], '{}'::text[]), $12
+          $9, $10, $11, COALESCE($12::text[], '{}'::text[]), $13
         )
         `,
         [
@@ -179,6 +202,7 @@ router.post(
           normalizeOptionalText(asal_kampus),
           normalizeOptionalText(pendidikan_terakhir),
           normalizeOptionalText(kategori_dosen),
+          normalizedApprovalDate,
           normalizeOptionalText(departemen),
           normalizedJfa,
           normalizedJfa,
@@ -211,11 +235,13 @@ router.put(
       name,
       initials,
       email,
+      phone,
       kode_dosen,
       nidn,
       asal_kampus,
       pendidikan_terakhir,
       kategori_dosen,
+      tanggal_persetujuan_anggota,
       departemen,
       jabatan,
       jfa,
@@ -227,6 +253,9 @@ router.put(
     const normalizedJfa = jfa === undefined && jabatan === undefined
       ? undefined
       : normalizeOptionalText(jfa ?? jabatan);
+    const normalizedApprovalDate = Object.prototype.hasOwnProperty.call(req.body || {}, "tanggal_persetujuan_anggota")
+      ? normalizeOptionalDate(tanggal_persetujuan_anggota)
+      : undefined;
 
     await query("BEGIN");
     try {
@@ -259,11 +288,12 @@ router.put(
         SET name = COALESCE($2, name),
             initials = COALESCE($3, initials),
             email = COALESCE($4, email),
-            password_hash = COALESCE($5, password_hash),
+            phone = COALESCE($5, phone),
+            password_hash = COALESCE($6, password_hash),
             updated_at = NOW()
         WHERE id = $1 AND role = 'dosen'
         `,
-        [userId, name, initials, email, passwordHash]
+        [userId, name, initials, email, normalizeOptionalText(phone), passwordHash]
       );
 
       await query(
@@ -275,11 +305,12 @@ router.put(
             asal_kampus = COALESCE($5, asal_kampus),
             pendidikan_terakhir = COALESCE($6, pendidikan_terakhir),
             kategori_dosen = COALESCE($7, kategori_dosen),
-            departemen = COALESCE($8, departemen),
-            jabatan = COALESCE($9, jabatan),
-            jfa = COALESCE($10, jfa),
-            keahlian = COALESCE($11::text[], keahlian),
-            status = COALESCE($12, status),
+            tanggal_persetujuan_anggota = COALESCE($8, tanggal_persetujuan_anggota),
+            departemen = COALESCE($9, departemen),
+            jabatan = COALESCE($10, jabatan),
+            jfa = COALESCE($11, jfa),
+            keahlian = COALESCE($12::text[], keahlian),
+            status = COALESCE($13, status),
             updated_at = NOW()
         WHERE id = $1
         `,
@@ -291,6 +322,7 @@ router.put(
           normalizeOptionalText(asal_kampus),
           normalizeOptionalText(pendidikan_terakhir),
           normalizeOptionalText(kategori_dosen),
+          normalizedApprovalDate,
           normalizeOptionalText(departemen),
           normalizedJfa,
           normalizedJfa,

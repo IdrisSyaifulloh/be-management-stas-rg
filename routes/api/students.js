@@ -87,6 +87,112 @@ function normalizeNonNegativeInteger(value, fieldName) {
   return parsed;
 }
 
+function normalizeResearchSelections(input) {
+  const items = Array.isArray(input)
+    ? input
+    : input == null || input === ""
+      ? []
+      : [input];
+
+  const seen = new Set();
+  const normalized = [];
+
+  for (const item of items) {
+    const value = String(item || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+
+  return normalized;
+}
+
+async function resolveResearchProjectIds(input) {
+  const selections = normalizeResearchSelections(input);
+
+  if (selections.length === 0) return [];
+
+  const result = await query(
+    `
+    SELECT id, title, COALESCE(short_title, '') AS short_title
+    FROM research_projects
+    WHERE id = ANY($1::text[])
+       OR title = ANY($1::text[])
+       OR COALESCE(short_title, '') = ANY($1::text[])
+    `,
+    [selections]
+  );
+
+  const lookup = new Map();
+
+  for (const row of result.rows) {
+    lookup.set(row.id, row.id);
+    if (row.title) lookup.set(row.title, row.id);
+    if (row.short_title) lookup.set(row.short_title, row.id);
+  }
+
+  const resolved = [];
+  const missing = [];
+
+  for (const selection of selections) {
+    const projectId = lookup.get(selection);
+
+    if (!projectId) {
+      missing.push(selection);
+      continue;
+    }
+
+    if (!resolved.includes(projectId)) {
+      resolved.push(projectId);
+    }
+  }
+
+  if (missing.length > 0) {
+    const error = new Error(`Riset tidak ditemukan: ${missing.join(", ")}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return resolved;
+}
+
+async function syncStudentResearchMemberships({ userId, researchProjectIds, bergabung }) {
+  if (!userId) return;
+
+  if (!Array.isArray(researchProjectIds) || researchProjectIds.length === 0) {
+    await query(
+      `
+      DELETE FROM research_memberships
+      WHERE user_id = $1 AND member_type = 'Mahasiswa'
+      `,
+      [userId]
+    );
+    return;
+  }
+
+  await query(
+    `
+    DELETE FROM research_memberships
+    WHERE user_id = $1
+      AND member_type = 'Mahasiswa'
+      AND NOT (project_id = ANY($2::text[]))
+    `,
+    [userId, researchProjectIds]
+  );
+
+  await query(
+    `
+    INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
+    SELECT selected.project_id, $1, 'Mahasiswa', NULL, 'Aktif', $3::date
+    FROM UNNEST($2::text[]) AS selected(project_id)
+    ON CONFLICT (project_id, user_id)
+    DO UPDATE SET member_type = EXCLUDED.member_type,
+                  status = EXCLUDED.status,
+                  bergabung = COALESCE(research_memberships.bergabung, EXCLUDED.bergabung)
+    `,
+    [userId, researchProjectIds, bergabung || null]
+  );
+}
 function getRequestBaseUrl(req) {
   const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
@@ -117,6 +223,7 @@ function mapStudentRow(row, req) {
   const wfhQuota = Number(row.wfh_quota || 0);
   const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);
   const photoUrl = resolvePhotoUrl(req, row.photo_url || row.photoUrl);
+  const researchProjectIds = Array.isArray(row.research_project_ids) ? row.research_project_ids : [];
 
   return {
     ...row,
@@ -126,6 +233,9 @@ function mapStudentRow(row, req) {
 
     user_id: row.user_id,
     userId: row.user_id,
+
+    research_project_ids: researchProjectIds,
+    researchProjectIds,
 
     wfh_quota: wfhQuota,
     wfhQuota,
@@ -212,6 +322,10 @@ router.get(
         s.wfh_quota,
         COUNT(DISTINCT lr.id)::int AS wfh_used,
         COALESCE(
+          array_agg(DISTINCT rp.id) FILTER (WHERE rp.id IS NOT NULL),
+          ARRAY[]::text[]
+        ) AS research_project_ids,
+        COALESCE(
           array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
           ARRAY[]::text[]
         ) AS research_projects
@@ -286,6 +400,10 @@ router.get(
         s.wfh_quota,
         COUNT(DISTINCT lr.id)::int AS wfh_used,
         COALESCE(
+          array_agg(DISTINCT rp.id) FILTER (WHERE rp.id IS NOT NULL),
+          ARRAY[]::text[]
+        ) AS research_project_ids,
+        COALESCE(
           array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
           ARRAY[]::text[]
         ) AS research_projects
@@ -345,6 +463,9 @@ router.post(
       pembimbing,
       wfhQuota,
       wfh_quota: wfhQuotaSnake,
+      riset,
+      researchProjectIds,
+      research_project_ids: researchProjectIdsSnake,
       password
     } = req.body;
 
@@ -357,6 +478,10 @@ router.post(
     await ensureStudentColumns();
 
     const normalizedBergabung = normalizeOptionalDate(bergabung);
+    const resolvedResearchProjectIds = await resolveResearchProjectIds(
+      riset ?? researchProjectIds ?? researchProjectIdsSnake
+    );
+    const membershipBergabung = normalizedBergabung || new Date().toISOString().slice(0, 10);
 
     let normalizedWfhQuota;
     try {
@@ -427,6 +552,13 @@ router.post(
         ]
       );
 
+      await syncStudentResearchMemberships({
+        userId,
+        researchProjectIds: resolvedResearchProjectIds,
+        bergabung: membershipBergabung
+      });
+
+
       await query("COMMIT");
 
       return res.status(201).json({
@@ -460,6 +592,9 @@ router.put(
       pembimbing,
       wfhQuota,
       wfh_quota: wfhQuotaSnake,
+      riset,
+      researchProjectIds,
+      research_project_ids: researchProjectIdsSnake,
       password
     } = req.body;
 
@@ -467,6 +602,13 @@ router.put(
 
     const normalizedBergabung = hasOwn(req.body || {}, "bergabung")
       ? normalizeOptionalDate(bergabung)
+      : null;
+    const hasResearchSelections =
+      hasOwn(req.body || {}, "riset") ||
+      hasOwn(req.body || {}, "researchProjectIds") ||
+      hasOwn(req.body || {}, "research_project_ids");
+    const resolvedResearchProjectIds = hasResearchSelections
+      ? await resolveResearchProjectIds(riset ?? researchProjectIds ?? researchProjectIdsSnake)
       : null;
 
     let normalizedWfhQuota = null;
@@ -488,7 +630,8 @@ router.put(
         SELECT 
           s.id AS student_id,
           s.user_id,
-          s.status AS current_status
+          s.status AS current_status,
+          TO_CHAR(s.bergabung, 'YYYY-MM-DD') AS current_bergabung
         FROM students s
         WHERE s.id = $1 OR s.user_id = $1
         LIMIT 1
@@ -504,7 +647,8 @@ router.put(
       const {
         student_id: studentId,
         user_id: userId,
-        current_status: previousStatus
+        current_status: previousStatus,
+        current_bergabung: currentBergabung
       } = studentRecord.rows[0];
 
       let passwordHash = null;
@@ -591,6 +735,14 @@ router.put(
             })
           ]
         );
+      }
+
+      if (hasResearchSelections) {
+        await syncStudentResearchMemberships({
+          userId,
+          researchProjectIds: resolvedResearchProjectIds,
+          bergabung: normalizedBergabung || currentBergabung || null
+        });
       }
 
       await query("COMMIT");
