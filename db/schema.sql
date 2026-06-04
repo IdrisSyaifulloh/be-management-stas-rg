@@ -50,6 +50,20 @@ CREATE TABLE IF NOT EXISTS students (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS student_documents (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  document_type TEXT NOT NULL CHECK (document_type IN ('surat_pengantar', 'surat_penerimaan', 'surat_keterangan_selesai', 'sertifikat')),
+  file_url TEXT NOT NULL,
+  file_name TEXT,
+  file_size BIGINT,
+  mime_type TEXT,
+  uploaded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (student_id, document_type)
+);
+
 CREATE TABLE IF NOT EXISTS lecturers (
   id TEXT PRIMARY KEY,
   user_id TEXT UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -518,6 +532,7 @@ CREATE INDEX IF NOT EXISTS idx_research_board_tasks_project_updated ON research_
 CREATE INDEX IF NOT EXISTS idx_research_board_subtasks_task ON research_board_task_subtasks(task_id, sort_order ASC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_research_board_attachments_task ON research_board_task_attachments(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_board_comments_task ON research_board_task_comments(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_student_documents_student ON student_documents(student_id, document_type);
 CREATE INDEX IF NOT EXISTS idx_logbook_entries_student_date ON logbook_entries(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_logbook_comments_entry_created ON logbook_comments(logbook_entry_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_draft_reports_student_upload ON draft_reports(student_id, upload_date DESC, updated_at DESC);
