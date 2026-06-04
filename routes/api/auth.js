@@ -120,7 +120,9 @@ router.post(
         initials: user.initials,
         role: user.role,
         prodi: user.prodi,
-        tipe: user.role === "mahasiswa" ? user.tipe : undefined
+        tipe: user.role === "mahasiswa" ? user.tipe : undefined,
+        status: user.role === "mahasiswa" ? user.student_status : undefined,
+        studentStatus: user.role === "mahasiswa" ? user.student_status : undefined
       }
     });
   })
@@ -159,7 +161,9 @@ router.get(
         initials: user.initials,
         role: user.role,
         prodi: user.prodi,
-        tipe: user.role === "mahasiswa" ? user.student_tipe : undefined
+        tipe: user.role === "mahasiswa" ? user.student_tipe : undefined,
+        status: user.role === "mahasiswa" ? user.student_status : undefined,
+        studentStatus: user.role === "mahasiswa" ? user.student_status : undefined
       }
     });
   })

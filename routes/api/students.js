@@ -10,6 +10,15 @@ const {
   resolveSortDirection
 } = require("../../utils/securityValidation");
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
+const crypto = require("crypto");
+const {
+  ensureStudentDocumentsTable,
+  fetchStudentDocuments,
+  fetchStudentDocumentsMap,
+  getStudentDocumentDefinition,
+  removeStudentDocumentFile,
+  saveStudentDocumentFile
+} = require("../../utils/studentDocuments");
 
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
@@ -34,6 +43,8 @@ async function ensureStudentColumns() {
         ALTER TABLE research_memberships
         ADD COLUMN IF NOT EXISTS selesai DATE
       `);
+
+      await ensureStudentDocumentsTable();
     })();
   }
 
@@ -286,6 +297,7 @@ function mapStudentRow(row, req) {
   const photoUrl = resolvePhotoUrl(req, row.photo_url || row.photoUrl);
   const researchProjectIds = Array.isArray(row.research_project_ids) ? row.research_project_ids : [];
   const researchMemberships = Array.isArray(row.research_memberships) ? row.research_memberships : [];
+  const studentDocuments = Array.isArray(row.student_documents) ? row.student_documents : [];
 
   return {
     ...row,
@@ -300,6 +312,8 @@ function mapStudentRow(row, req) {
     researchProjectIds,
     research_memberships: researchMemberships,
     researchMemberships,
+    student_documents: studentDocuments,
+    studentDocuments,
 
     wfh_quota: wfhQuota,
     wfhQuota,
@@ -438,7 +452,12 @@ router.get(
       params
     );
 
-    res.json(result.rows.map((row) => mapStudentRow(row, req)));
+    const documentsByStudent = await fetchStudentDocumentsMap(result.rows);
+
+    res.json(result.rows.map((row) => mapStudentRow({
+      ...row,
+      student_documents: documentsByStudent.get(row.id) || []
+    }, req)));
   })
 );
 
@@ -529,7 +548,12 @@ router.get(
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
-    res.json(mapStudentRow(result.rows[0], req));
+    const studentDocuments = await fetchStudentDocuments(studentId, result.rows[0].status);
+
+    res.json(mapStudentRow({
+      ...result.rows[0],
+      student_documents: studentDocuments
+    }, req));
   })
 );
 
@@ -583,7 +607,7 @@ router.post(
 
     try {
       const timestamp = Date.now();
-      const randomSuffix = require("crypto").randomUUID().slice(0, 8);
+      const randomSuffix = crypto.randomUUID().slice(0, 8);
       const userId = `usr_mhs_${timestamp}${randomSuffix}`;
       const studentId = `stu_${timestamp}${randomSuffix}`;
 
@@ -846,6 +870,125 @@ router.put(
       await query("ROLLBACK");
       throw error;
     }
+  })
+);
+
+
+router.put(
+  "/:id/documents/:documentType",
+  asyncHandler(async (req, res) => {
+    await ensureStudentColumns();
+
+    if (req.authUser?.role !== "operator") {
+      return res.status(403).json({ message: "Upload dokumen mahasiswa hanya bisa dilakukan admin/operator." });
+    }
+
+    const id = requireSafeId(req.params.id);
+    const definition = getStudentDocumentDefinition(req.params.documentType);
+
+    if (!definition) {
+      return res.status(400).json({ message: "Jenis dokumen mahasiswa tidak valid." });
+    }
+
+    const { fileDataUrl, fileName, clearFile } = req.body || {};
+
+    const studentResult = await query(
+      `
+      SELECT id, user_id, status
+      FROM students
+      WHERE id = $1 OR user_id = $1
+      LIMIT 1
+      `,
+      [id]
+    );
+
+    if (studentResult.rowCount === 0) {
+      return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    const student = studentResult.rows[0];
+    const isAlumni = String(student.status || "").toLowerCase() === "alumni";
+
+    if (definition.requiresAlumni && !isAlumni) {
+      return res.status(423).json({
+        message: "Dokumen ini baru bisa diunggah setelah mahasiswa berstatus Alumni.",
+        locked: true,
+        requiresAlumni: true
+      });
+    }
+
+    const existing = await query(
+      `
+      SELECT id, file_url
+      FROM student_documents
+      WHERE student_id = $1 AND document_type = $2
+      LIMIT 1
+      `,
+      [student.id, definition.type]
+    );
+
+    if (clearFile === true) {
+      await query(
+        "DELETE FROM student_documents WHERE student_id = $1 AND document_type = $2",
+        [student.id, definition.type]
+      );
+
+      if (existing.rows[0]?.file_url) {
+        await removeStudentDocumentFile(existing.rows[0].file_url);
+      }
+
+      const documents = await fetchStudentDocuments(student.id, student.status);
+      return res.json({ message: "Dokumen mahasiswa berhasil dihapus.", documents });
+    }
+
+    if (!fileDataUrl || !fileName) {
+      return res.status(400).json({ message: "fileDataUrl dan fileName wajib diisi." });
+    }
+
+    const uploaded = await saveStudentDocumentFile(fileDataUrl, fileName);
+    const documentId = existing.rows[0]?.id || `std_doc_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+
+    try {
+      await query(
+        `
+        INSERT INTO student_documents (id, student_id, document_type, file_url, file_name, file_size, mime_type, uploaded_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (student_id, document_type)
+        DO UPDATE SET file_url = EXCLUDED.file_url,
+                      file_name = EXCLUDED.file_name,
+                      file_size = EXCLUDED.file_size,
+                      mime_type = EXCLUDED.mime_type,
+                      uploaded_by = EXCLUDED.uploaded_by,
+                      uploaded_at = NOW(),
+                      updated_at = NOW()
+        `,
+        [
+          documentId,
+          student.id,
+          definition.type,
+          uploaded.fileUrl,
+          uploaded.fileName,
+          uploaded.fileSize,
+          uploaded.mimeType,
+          req.authUser?.id || null
+        ]
+      );
+    } catch (error) {
+      await removeStudentDocumentFile(uploaded.fileUrl).catch(() => {});
+      throw error;
+    }
+
+    if (existing.rows[0]?.file_url && existing.rows[0].file_url !== uploaded.fileUrl) {
+      await removeStudentDocumentFile(existing.rows[0].file_url).catch(() => {});
+    }
+
+    const documents = await fetchStudentDocuments(student.id, student.status);
+
+    res.json({
+      message: "Dokumen mahasiswa berhasil diunggah.",
+      documentType: definition.type,
+      documents
+    });
   })
 );
 

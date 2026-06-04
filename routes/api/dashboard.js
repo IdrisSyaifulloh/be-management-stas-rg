@@ -19,6 +19,7 @@ const {
 const { requireSafeId } = require("../../utils/securityValidation");
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 const { findNonWorkingDayForDate } = require("../../utils/holidays");
+const { ensureStudentDocumentsTable, fetchStudentDocuments } = require("../../utils/studentDocuments");
 
 const router = express.Router();
 
@@ -464,6 +465,8 @@ router.get(
       ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
     `);
 
+    await ensureStudentDocumentsTable();
+
     await query(`
       ALTER TABLE leave_requests
       ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
@@ -484,6 +487,8 @@ router.get(
         id,
         nim,
         pembimbing,
+        status,
+        tipe,
         COALESCE(wfh_quota, 0)::int AS wfh_quota,
         TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
       FROM students
@@ -519,6 +524,8 @@ router.get(
         FROM research_projects rp
         JOIN research_memberships rm ON rm.project_id = rp.id
         WHERE rm.user_id = $1
+          AND COALESCE(rm.status, 'Aktif') = 'Aktif'
+          AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
         ORDER BY rp.id
         LIMIT 100
         `,
@@ -530,6 +537,8 @@ router.get(
         FROM research_memberships rm
         JOIN research_milestones m ON m.project_id = rm.project_id
         WHERE rm.user_id = $1
+          AND COALESCE(rm.status, 'Aktif') = 'Aktif'
+          AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
         ORDER BY rm.project_id ASC, m.sort_order ASC, m.id ASC
         LIMIT 500
         `,
@@ -639,14 +648,27 @@ router.get(
 
     const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);
 
-    const dokSiapUnduh = letterRows.rows.filter((item) => item.status === "Siap Unduh").length;
+    const studentDocuments = await fetchStudentDocuments(studentId, studentRow.status);
+    const uploadedStudentDocumentCount = studentDocuments.filter((item) => item.fileUrl || item.file_url).length;
+    const dokSiapUnduh = letterRows.rows.filter((item) => item.status === "Siap Unduh").length + uploadedStudentDocumentCount;
     const todayAttendance = todayAttendanceRows.rows[0] || null;
     const certTerbitCount = certRows.rows.filter((item) => item.status === "Terbit").length;
 
     res.json({
       header: {
         activeResearchCount: projects.filter((item) => item.status === "Aktif").length,
-        nim: studentRow.nim
+        nim: studentRow.nim,
+        tipe: studentRow.tipe,
+        status: studentRow.status,
+        studentStatus: studentRow.status
+      },
+      student: {
+        id: studentId,
+        status: studentRow.status,
+        studentStatus: studentRow.status,
+        tipe: studentRow.tipe,
+        documents: studentDocuments,
+        student_documents: studentDocuments
       },
       stats: {
         attendanceHadir,

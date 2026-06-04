@@ -7,6 +7,7 @@ const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { ensureStudentDocumentsTable, fetchStudentDocuments } = require("../../utils/studentDocuments");
 
 const router = express.Router();
 
@@ -34,6 +35,8 @@ async function ensureProfileColumns() {
         ALTER TABLE users
         ADD COLUMN IF NOT EXISTS photo_url TEXT
       `);
+
+      await ensureStudentDocumentsTable();
     })();
   }
 
@@ -358,7 +361,107 @@ router.get(
       });
     }
 
-    res.json(mapProfileRow(result.rows[0], req));
+    const mappedProfile = mapProfileRow(result.rows[0], req);
+    const studentDocuments = result.rows[0].student_id
+      ? await fetchStudentDocuments(result.rows[0].student_id, result.rows[0].status)
+      : [];
+
+    res.json({
+      ...mappedProfile,
+      student_documents: studentDocuments,
+      studentDocuments
+    });
+  })
+);
+
+
+router.post(
+  "/finish-stas",
+  asyncHandler(async (req, res) => {
+    await ensureProfileColumns();
+
+    if (req.authUser?.role !== "mahasiswa") {
+      return res.status(403).json({ message: "Aksi ini hanya bisa dilakukan oleh mahasiswa." });
+    }
+
+    const userId = req.authUser.id;
+
+    const studentResult = await query(
+      `
+      SELECT id, user_id, status
+      FROM students
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    if (studentResult.rowCount === 0) {
+      return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
+    }
+
+    const student = studentResult.rows[0];
+
+    if (student.status === "Mengundurkan Diri") {
+      return res.status(400).json({ message: "Mahasiswa yang mengundurkan diri tidak bisa menyelesaikan status sebagai Alumni lewat menu ini." });
+    }
+
+    if (student.status !== "Alumni") {
+      await query("BEGIN");
+      try {
+        await query(
+          `
+          UPDATE students
+          SET status = 'Alumni',
+              updated_at = NOW()
+          WHERE id = $1
+          `,
+          [student.id]
+        );
+
+        await query(
+          `
+          UPDATE research_memberships
+          SET status = 'Nonaktif',
+              selesai = COALESCE(selesai, CURRENT_DATE)
+          WHERE user_id = $1
+            AND member_type = 'Mahasiswa'
+          `,
+          [userId]
+        );
+
+        await query(
+          `
+          INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+          VALUES ($1, $2, 'Mahasiswa', 'Update', 'student_finish_stas', $3)
+          `,
+          [
+            `aud_finish_stas_${Date.now()}`,
+            userId,
+            JSON.stringify({
+              student_id: student.id,
+              previous_status: student.status,
+              new_status: "Alumni",
+              finished_at: new Date().toISOString()
+            })
+          ]
+        );
+
+        await query("COMMIT");
+      } catch (error) {
+        await query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    const documents = await fetchStudentDocuments(student.id, "Alumni");
+
+    res.json({
+      message: student.status === "Alumni" ? "Status Anda sudah Alumni." : "Status Anda berhasil diubah menjadi Alumni.",
+      status: "Alumni",
+      studentStatus: "Alumni",
+      documents
+    });
   })
 );
 
