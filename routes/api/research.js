@@ -18,6 +18,7 @@ const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
 let ensureResearchAttachmentLinkPromise = null;
+let ensureResearchMembershipPeriodPromise = null;
 
 async function ensureResearchAttachmentLinkColumn() {
   if (!ensureResearchAttachmentLinkPromise) {
@@ -33,9 +34,24 @@ async function ensureResearchAttachmentLinkColumn() {
   await ensureResearchAttachmentLinkPromise;
 }
 
+async function ensureResearchMembershipPeriodColumn() {
+  if (!ensureResearchMembershipPeriodPromise) {
+    ensureResearchMembershipPeriodPromise = query(`
+      ALTER TABLE research_memberships
+      ADD COLUMN IF NOT EXISTS selesai DATE
+    `).catch((error) => {
+      ensureResearchMembershipPeriodPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureResearchMembershipPeriodPromise;
+}
+
 router.use(
   asyncHandler(async (req, res, next) => {
     await ensureResearchAttachmentLinkColumn();
+    await ensureResearchMembershipPeriodColumn();
     next();
   })
 );
@@ -94,7 +110,7 @@ async function hasProjectAccess({ userId, role, projectId }) {
       `
       SELECT 1
       FROM research_projects rp
-      LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $1
+      LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $1 AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
       LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id AND l.user_id = $1
       WHERE rp.id = $2
         AND (rm.user_id IS NOT NULL OR l.user_id IS NOT NULL)
@@ -109,7 +125,7 @@ async function hasProjectAccess({ userId, role, projectId }) {
     `
     SELECT 1
     FROM research_projects rp
-    LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $1
+    LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $1 AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
     LEFT JOIN board_access ba ON ba.project_id = rp.id AND ba.user_id = $1
     WHERE rp.id = $2
       AND (rm.user_id IS NOT NULL OR ba.user_id IS NOT NULL)
@@ -177,6 +193,7 @@ async function isProjectLeaderMember({ userId, projectId }) {
       AND LOWER(COALESCE(member_type, '')) = 'mahasiswa'
       AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
       AND COALESCE(status, 'Aktif') = 'Aktif'
+      AND (selesai IS NULL OR selesai >= CURRENT_DATE)
     LIMIT 1
     `,
     [projectId, userId]
@@ -283,6 +300,8 @@ async function notifyMilestoneUpdate(projectId, actorUserId, actionLabel, milest
       SELECT rm.user_id
       FROM research_memberships rm
       WHERE rm.project_id = $1
+        AND COALESCE(rm.status, 'Aktif') = 'Aktif'
+        AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
       UNION
       SELECT l.user_id
       FROM lecturers l
@@ -344,7 +363,7 @@ router.get(
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text
         FROM research_projects rp
         LEFT JOIN research_memberships rm
-          ON rm.project_id = rp.id AND rm.user_id = $1
+          ON rm.project_id = rp.id AND rm.user_id = $1 AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
         LEFT JOIN lecturers l
           ON l.id = rp.supervisor_lecturer_id AND l.user_id = $1
         WHERE rm.user_id IS NOT NULL OR l.user_id IS NOT NULL
@@ -360,6 +379,8 @@ router.get(
         FROM research_projects rp
         JOIN research_memberships rm ON rm.project_id = rp.id
         WHERE rm.user_id = $1
+          AND COALESCE(rm.status, 'Aktif') = 'Aktif'
+          AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
         ORDER BY rp.id ASC
         LIMIT 500
         `,
@@ -429,7 +450,7 @@ router.get(
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
         LEFT JOIN users u ON u.id = l.user_id
-        LEFT JOIN research_memberships rm ON rm.project_id = rp.id
+        LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
         LEFT JOIN lecturers own_l ON own_l.id = rp.supervisor_lecturer_id
         ${meetingSub}
         ${appendWhere(["(rm.user_id = $1 OR own_l.user_id = $1)"], shiftedListFilters)}
@@ -453,7 +474,7 @@ router.get(
         FROM research_projects rp
         LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
         LEFT JOIN users u ON u.id = l.user_id
-        LEFT JOIN research_memberships rm ON rm.project_id = rp.id
+        LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
         LEFT JOIN board_access ba ON ba.project_id = rp.id
         ${meetingSub}
         ${appendWhere(["(rm.user_id = $1 OR ba.user_id = $1)"], shiftedListFilters)}
@@ -479,10 +500,14 @@ router.get(
     const result = await query(
       `
       SELECT rm.id, rm.project_id, rm.user_id, u.name, u.initials, rm.member_type,
-             rm.peran, rm.status, rm.bergabung, u.role
+             rm.peran,
+             CASE WHEN rm.selesai IS NOT NULL AND rm.selesai < CURRENT_DATE THEN 'Nonaktif' ELSE rm.status END AS status,
+             rm.bergabung, rm.selesai, u.role
       FROM research_memberships rm
       JOIN users u ON u.id = rm.user_id
       WHERE rm.project_id = $1
+        AND COALESCE(rm.status, 'Aktif') = 'Aktif'
+        AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
       ORDER BY rm.member_type ASC, u.name ASC
       `,
       [req.params.id]

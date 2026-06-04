@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS research_memberships (
   peran TEXT,
   status TEXT NOT NULL CHECK (status IN ('Aktif', 'Nonaktif')),
   bergabung DATE,
+  selesai DATE,
   UNIQUE (project_id, user_id)
 );
 
@@ -543,5 +544,3 @@ CREATE INDEX IF NOT EXISTS idx_jwt_sessions_user_active ON jwt_sessions(user_id,
 CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_at);
 
 COMMIT;
-
-

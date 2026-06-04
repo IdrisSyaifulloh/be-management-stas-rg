@@ -25,13 +25,20 @@ let ensureLogbookColumnsPromise = null;
 
 async function ensureLogbookAttachmentColumns() {
   if (!ensureLogbookColumnsPromise) {
-    ensureLogbookColumnsPromise = query(`
-      ALTER TABLE logbook_entries
-      ALTER COLUMN project_id DROP NOT NULL,
-      ADD COLUMN IF NOT EXISTS file_url TEXT,
-      ADD COLUMN IF NOT EXISTS file_name TEXT,
-      ADD COLUMN IF NOT EXISTS file_size BIGINT
-    `);
+    ensureLogbookColumnsPromise = (async () => {
+      await query(`
+        ALTER TABLE logbook_entries
+        ALTER COLUMN project_id DROP NOT NULL,
+        ADD COLUMN IF NOT EXISTS file_url TEXT,
+        ADD COLUMN IF NOT EXISTS file_name TEXT,
+        ADD COLUMN IF NOT EXISTS file_size BIGINT
+      `);
+
+      await query(`
+        ALTER TABLE research_memberships
+        ADD COLUMN IF NOT EXISTS selesai DATE
+      `);
+    })();
   }
   await ensureLogbookColumnsPromise;
 }
@@ -59,6 +66,7 @@ async function ensureProjectCanBeUsed(projectId, studentId) {
     WHERE rp.id = $1
       AND s.id = $2
       AND rm.status = 'Aktif'
+      AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
     LIMIT 1
     `,
     [normalizedProjectId, studentId]

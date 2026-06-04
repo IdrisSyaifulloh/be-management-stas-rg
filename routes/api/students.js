@@ -29,6 +29,11 @@ async function ensureStudentColumns() {
         ALTER TABLE users
         ADD COLUMN IF NOT EXISTS photo_url TEXT
       `);
+
+      await query(`
+        ALTER TABLE research_memberships
+        ADD COLUMN IF NOT EXISTS selesai DATE
+      `);
     })();
   }
 
@@ -59,18 +64,22 @@ function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object || {}, key);
 }
 
-function normalizeOptionalDate(value) {
+function normalizeOptionalDateField(value, fieldLabel) {
   if (value == null || value === "") return null;
 
   const normalized = String(value).trim();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    const error = new Error("bergabung wajib format YYYY-MM-DD.");
+    const error = new Error(`${fieldLabel} wajib format YYYY-MM-DD.`);
     error.statusCode = 400;
     throw error;
   }
 
   return normalized;
+}
+
+function normalizeOptionalDate(value) {
+  return normalizeOptionalDateField(value, "bergabung");
 }
 
 function normalizeNonNegativeInteger(value, fieldName) {
@@ -87,31 +96,61 @@ function normalizeNonNegativeInteger(value, fieldName) {
   return parsed;
 }
 
-function normalizeResearchSelections(input) {
+function normalizeResearchMembershipInputs(input, fallbackBergabung) {
   const items = Array.isArray(input)
     ? input
     : input == null || input === ""
       ? []
       : [input];
 
-  const seen = new Set();
   const normalized = [];
+  const seen = new Set();
 
   for (const item of items) {
-    const value = String(item || "").trim();
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    normalized.push(value);
+    const isObject = item && typeof item === "object" && !Array.isArray(item);
+    const rawProjectId = isObject
+      ? item.projectId ?? item.project_id ?? item.id ?? item.value ?? item.title ?? item.short_title
+      : item;
+    const selection = String(rawProjectId || "").trim();
+
+    if (!selection) continue;
+
+    const joinedAt = isObject
+      ? normalizeOptionalDateField(item.bergabung ?? item.joinedAt ?? item.startDate ?? item.mulai, "Tanggal bergabung riset")
+      : null;
+    const finishedAt = isObject
+      ? normalizeOptionalDateField(item.selesai ?? item.finishedAt ?? item.endDate, "Tanggal selesai riset")
+      : null;
+    const effectiveJoinedAt = joinedAt || fallbackBergabung || null;
+
+    if (effectiveJoinedAt && finishedAt && finishedAt < effectiveJoinedAt) {
+      const error = new Error("Tanggal selesai riset tidak boleh sebelum tanggal bergabung riset.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (seen.has(selection)) {
+      const existing = normalized.find((entry) => entry.selection === selection);
+      if (existing) {
+        existing.bergabung = joinedAt || existing.bergabung;
+        existing.selesai = finishedAt;
+      }
+      continue;
+    }
+
+    seen.add(selection);
+    normalized.push({ selection, bergabung: joinedAt, selesai: finishedAt });
   }
 
   return normalized;
 }
 
-async function resolveResearchProjectIds(input) {
-  const selections = normalizeResearchSelections(input);
+async function resolveResearchMemberships(input, fallbackBergabung) {
+  const selections = normalizeResearchMembershipInputs(input, fallbackBergabung);
 
   if (selections.length === 0) return [];
 
+  const selectionValues = selections.map((item) => item.selection);
   const result = await query(
     `
     SELECT id, title, COALESCE(short_title, '') AS short_title
@@ -120,7 +159,7 @@ async function resolveResearchProjectIds(input) {
        OR title = ANY($1::text[])
        OR COALESCE(short_title, '') = ANY($1::text[])
     `,
-    [selections]
+    [selectionValues]
   );
 
   const lookup = new Map();
@@ -133,18 +172,24 @@ async function resolveResearchProjectIds(input) {
 
   const resolved = [];
   const missing = [];
+  const seenProjectIds = new Set();
 
-  for (const selection of selections) {
-    const projectId = lookup.get(selection);
+  for (const item of selections) {
+    const projectId = lookup.get(item.selection);
 
     if (!projectId) {
-      missing.push(selection);
+      missing.push(item.selection);
       continue;
     }
 
-    if (!resolved.includes(projectId)) {
-      resolved.push(projectId);
-    }
+    if (seenProjectIds.has(projectId)) continue;
+    seenProjectIds.add(projectId);
+
+    resolved.push({
+      projectId,
+      bergabung: item.bergabung || fallbackBergabung || null,
+      selesai: item.selesai || null
+    });
   }
 
   if (missing.length > 0) {
@@ -156,10 +201,13 @@ async function resolveResearchProjectIds(input) {
   return resolved;
 }
 
-async function syncStudentResearchMemberships({ userId, researchProjectIds, bergabung }) {
+async function syncStudentResearchMemberships({ userId, researchMemberships }) {
   if (!userId) return;
 
-  if (!Array.isArray(researchProjectIds) || researchProjectIds.length === 0) {
+  const memberships = Array.isArray(researchMemberships) ? researchMemberships : [];
+  const projectIds = memberships.map((item) => item.projectId);
+
+  if (projectIds.length === 0) {
     await query(
       `
       DELETE FROM research_memberships
@@ -177,22 +225,35 @@ async function syncStudentResearchMemberships({ userId, researchProjectIds, berg
       AND member_type = 'Mahasiswa'
       AND NOT (project_id = ANY($2::text[]))
     `,
-    [userId, researchProjectIds]
+    [userId, projectIds]
   );
 
   await query(
     `
-    INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
-    SELECT selected.project_id, $1, 'Mahasiswa', NULL, 'Aktif', $3::date
-    FROM UNNEST($2::text[]) AS selected(project_id)
+    INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung, selesai)
+    SELECT selected.project_id,
+           $1,
+           'Mahasiswa',
+           NULL,
+           CASE WHEN selected.selesai IS NOT NULL AND selected.selesai < CURRENT_DATE THEN 'Nonaktif' ELSE 'Aktif' END,
+           selected.bergabung,
+           selected.selesai
+    FROM UNNEST($2::text[], $3::date[], $4::date[]) AS selected(project_id, bergabung, selesai)
     ON CONFLICT (project_id, user_id)
     DO UPDATE SET member_type = EXCLUDED.member_type,
                   status = EXCLUDED.status,
-                  bergabung = COALESCE(research_memberships.bergabung, EXCLUDED.bergabung)
+                  bergabung = COALESCE(EXCLUDED.bergabung, research_memberships.bergabung),
+                  selesai = EXCLUDED.selesai
     `,
-    [userId, researchProjectIds, bergabung || null]
+    [
+      userId,
+      projectIds,
+      memberships.map((item) => item.bergabung || null),
+      memberships.map((item) => item.selesai || null)
+    ]
   );
 }
+
 function getRequestBaseUrl(req) {
   const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
@@ -224,6 +285,7 @@ function mapStudentRow(row, req) {
   const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);
   const photoUrl = resolvePhotoUrl(req, row.photo_url || row.photoUrl);
   const researchProjectIds = Array.isArray(row.research_project_ids) ? row.research_project_ids : [];
+  const researchMemberships = Array.isArray(row.research_memberships) ? row.research_memberships : [];
 
   return {
     ...row,
@@ -236,6 +298,8 @@ function mapStudentRow(row, req) {
 
     research_project_ids: researchProjectIds,
     researchProjectIds,
+    research_memberships: researchMemberships,
+    researchMemberships,
 
     wfh_quota: wfhQuota,
     wfhQuota,
@@ -328,10 +392,22 @@ router.get(
         COALESCE(
           array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
           ARRAY[]::text[]
-        ) AS research_projects
+        ) AS research_projects,
+        COALESCE(
+          jsonb_agg(DISTINCT jsonb_build_object(
+            'project_id', rp.id,
+            'projectId', rp.id,
+            'title', rp.title,
+            'short_title', COALESCE(rp.short_title, rp.title),
+            'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
+            'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
+            'status', rm.status
+          )) FILTER (WHERE rp.id IS NOT NULL),
+          '[]'::jsonb
+        ) AS research_memberships
       FROM students s
       JOIN users u ON u.id = s.user_id
-      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN ${weekStartPlaceholder}::date AND ${weekEndPlaceholder}::date
       ${whereClause}
@@ -406,10 +482,22 @@ router.get(
         COALESCE(
           array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
           ARRAY[]::text[]
-        ) AS research_projects
+        ) AS research_projects,
+        COALESCE(
+          jsonb_agg(DISTINCT jsonb_build_object(
+            'project_id', rp.id,
+            'projectId', rp.id,
+            'title', rp.title,
+            'short_title', COALESCE(rp.short_title, rp.title),
+            'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
+            'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
+            'status', rm.status
+          )) FILTER (WHERE rp.id IS NOT NULL),
+          '[]'::jsonb
+        ) AS research_memberships
       FROM students s
       JOIN users u ON u.id = s.user_id
-      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN $2::date AND $3::date
       WHERE s.id = $1
@@ -478,10 +566,11 @@ router.post(
     await ensureStudentColumns();
 
     const normalizedBergabung = normalizeOptionalDate(bergabung);
-    const resolvedResearchProjectIds = await resolveResearchProjectIds(
-      riset ?? researchProjectIds ?? researchProjectIdsSnake
-    );
     const membershipBergabung = normalizedBergabung || new Date().toISOString().slice(0, 10);
+    const resolvedResearchMemberships = await resolveResearchMemberships(
+      riset ?? researchProjectIds ?? researchProjectIdsSnake,
+      membershipBergabung
+    );
 
     let normalizedWfhQuota;
     try {
@@ -554,8 +643,7 @@ router.post(
 
       await syncStudentResearchMemberships({
         userId,
-        researchProjectIds: resolvedResearchProjectIds,
-        bergabung: membershipBergabung
+        researchMemberships: resolvedResearchMemberships
       });
 
 
@@ -607,8 +695,8 @@ router.put(
       hasOwn(req.body || {}, "riset") ||
       hasOwn(req.body || {}, "researchProjectIds") ||
       hasOwn(req.body || {}, "research_project_ids");
-    const resolvedResearchProjectIds = hasResearchSelections
-      ? await resolveResearchProjectIds(riset ?? researchProjectIds ?? researchProjectIdsSnake)
+    const resolvedResearchMemberships = hasResearchSelections
+      ? await resolveResearchMemberships(riset ?? researchProjectIds ?? researchProjectIdsSnake, normalizedBergabung)
       : null;
 
     let normalizedWfhQuota = null;
@@ -740,8 +828,7 @@ router.put(
       if (hasResearchSelections) {
         await syncStudentResearchMemberships({
           userId,
-          researchProjectIds: resolvedResearchProjectIds,
-          bergabung: normalizedBergabung || currentBergabung || null
+          researchMemberships: resolvedResearchMemberships
         });
       }
 
