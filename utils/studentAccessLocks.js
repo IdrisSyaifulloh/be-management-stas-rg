@@ -1,5 +1,6 @@
 const { query } = require("../db/pool");
 const { getSettingsAsync } = require("../config/systemSettingsStore");
+const { getJakartaDateIso } = require("./attendanceHistory");
 const { findNonWorkingDayForDate, getHolidayRules, normalizeHolidayDate } = require("./holidays");
 const { resolveStudentRecord } = require("./studentResolver");
 
@@ -38,7 +39,7 @@ const ACCESS_LOCK_REASON_DETAILS = {
   },
   [ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING]: {
     label: "Belum Melakukan Piket",
-    message: "Akses dikunci karena Anda belum melakukan piket atau belum mengirim bukti piket hari ini."
+    message: "Akses dikunci karena Anda belum melakukan piket atau belum mengirim bukti piket dari jadwal sebelumnya."
   }
 };
 
@@ -304,11 +305,71 @@ async function createPicketSubmissionMissingLocks({ studentIds, date }) {
   });
 }
 
+async function createOverduePicketSubmissionMissingLocksForStudent(studentId, referenceDate = getJakartaDateIso()) {
+  await ensureStudentAccessLockTable();
+  const normalizedReferenceDate = normalizeHolidayDate(referenceDate) || getJakartaDateIso();
+  const tableCheck = await query(
+    `
+    SELECT
+      to_regclass('public.picket_schedules') AS picket_schedules,
+      to_regclass('public.picket_submissions') AS picket_submissions,
+      to_regclass('public.picket_leave_requests') AS picket_leave_requests
+    `
+  );
+  const tables = tableCheck.rows[0] || {};
+  if (!tables.picket_schedules || !tables.picket_submissions || !tables.picket_leave_requests) {
+    return [];
+  }
+
+  const result = await query(
+    `
+    SELECT DISTINCT TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') AS schedule_date_text
+    FROM picket_schedules psch
+    WHERE psch.student_id = $1
+      AND psch.schedule_date < $2::date
+      AND NOT EXISTS (
+        SELECT 1
+        FROM picket_submissions psub
+        WHERE psub.schedule_id = psch.id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM picket_leave_requests plr
+        WHERE plr.schedule_id = psch.id
+          AND plr.status = 'Disetujui'
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM student_access_locks sal
+        WHERE sal.student_id = psch.student_id
+          AND sal.lock_date = psch.schedule_date
+          AND sal.reason = $3
+          AND sal.active = TRUE
+          AND sal.locked = TRUE
+          AND sal.status = 'LOCKED'
+      )
+    ORDER BY schedule_date_text ASC
+    `,
+    [studentId, normalizedReferenceDate, ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING]
+  );
+
+  const createdIds = [];
+  for (const row of result.rows) {
+    const ids = await createPicketSubmissionMissingLocks({
+      studentIds: [studentId],
+      date: row.schedule_date_text
+    });
+    createdIds.push(...ids);
+  }
+  return createdIds;
+}
+
 async function getActiveLockForStudent(studentIdOrUserId) {
   await ensureStudentAccessLockTable();
   const student = await resolveStudentRecord(studentIdOrUserId);
   if (!student) return null;
   const settings = await getSettingsAsync();
+  await createOverduePicketSubmissionMissingLocksForStudent(student.id);
 
   const result = await query(
     `
@@ -457,6 +518,7 @@ module.exports = {
   ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
   createCheckoutMissing22Locks,
   createAttendanceAbsentLocks,
+  createOverduePicketSubmissionMissingLocksForStudent,
   createPicketSubmissionInvalidLocks,
   createPicketSubmissionMissingLocks,
   createRisetWeeklyHoursUnderTargetLocks,

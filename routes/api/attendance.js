@@ -21,7 +21,6 @@ const {
 const {
   createAttendanceAbsentLocks,
   createCheckoutMissing22Locks,
-  createPicketSubmissionMissingLocks,
   createRisetWeeklyHoursUnderTargetLocks,
   createWorkHoursUnder8Locks,
   deactivateAttendanceAbsentLocksForDate
@@ -752,17 +751,9 @@ router.post(
 
     const picketRequirement = await getPicketCheckoutRequirement(resolvedStudentId, todayIso);
     if (picketRequirement.required) {
-      const picketLockIds = await createPicketSubmissionMissingLocks({
-        studentIds: [resolvedStudentId],
-        date: todayIso
-      });
-
       return res.status(409).json({
-        message: "Upload foto piket hari ini terlebih dahulu sebelum check-out. Akses Anda dikunci sampai operator membuka block.",
+        message: "Upload foto piket hari ini terlebih dahulu sebelum check-out.",
         picketRequired: true,
-        accessLocked: true,
-        accessLockReason: "PICKET_SUBMISSION_MISSING",
-        accessLockIds: picketLockIds,
         date: todayIso,
         assignment: picketRequirement.assignment
       });
