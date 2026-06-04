@@ -743,6 +743,31 @@ async function listPicketDays({ includeInactive = true } = {}) {
   return result.rows.map(mapDay);
 }
 
+async function listPicketStudentOptions() {
+  await ensurePicketTables();
+  const result = await query(
+    `
+    SELECT s.id, s.nim, s.tipe, u.name, u.initials
+    FROM students s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.status = 'Aktif'
+      AND u.is_active = TRUE
+    ORDER BY u.name ASC
+    `
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    student_id: row.id,
+    studentId: row.id,
+    name: row.name,
+    student_name: row.name,
+    studentName: row.name,
+    nim: row.nim || null,
+    initials: row.initials || String(row.name || "M").slice(0, 2).toUpperCase(),
+    tipe: row.tipe || null
+  }));
+}
+
 async function ensureStudentCanBeScheduled(studentId) {
   const result = await query(
     `
@@ -1827,6 +1852,7 @@ module.exports = {
   listPicketLeaveRequests,
   listPicketManagers,
   listPicketSchedules,
+  listPicketStudentOptions,
   listPicketTasks,
   replacePicketManagers,
   resyncPicketSchedule,

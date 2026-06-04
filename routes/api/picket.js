@@ -20,6 +20,7 @@ const {
   listPicketLeaveRequests,
   listPicketManagers,
   listPicketSchedules,
+  listPicketStudentOptions,
   listPicketTasks,
   replacePicketManagers,
   resyncPicketSchedule,
@@ -111,6 +112,15 @@ router.get(
   asyncHandler(async (req, res) => {
     const includeInactive = String(req.query.includeInactive || "true").toLowerCase() !== "false";
     res.json(await listPicketDays({ includeInactive }));
+  })
+);
+
+router.get(
+  "/students",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const items = await listPicketStudentOptions();
+    res.json({ items, students: items });
   })
 );
 
