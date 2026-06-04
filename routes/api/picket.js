@@ -5,8 +5,10 @@ const { requireSafeId } = require("../../utils/securityValidation");
 const { resolveStudentId } = require("../../utils/studentResolver");
 const {
   createPicketLeaveRequest,
+  createPicketSchedule,
   createPicketSubmission,
   createPicketTask,
+  deletePicketSchedule,
   deletePicketTask,
   generatePicketSchedule,
   getPicketHistory,
@@ -14,13 +16,16 @@ const {
   getPicketSettings,
   getPicketTodayForStudent,
   isPicketManagerUser,
+  listPicketDays,
   listPicketLeaveRequests,
   listPicketManagers,
+  listPicketSchedules,
   listPicketTasks,
   replacePicketManagers,
   resyncPicketSchedule,
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
+  updatePicketSchedule,
   updatePicketSettings,
   updatePicketTask
 } = require("../../utils/picketService");
@@ -102,6 +107,14 @@ router.patch(
 );
 
 router.get(
+  "/days",
+  asyncHandler(async (req, res) => {
+    const includeInactive = String(req.query.includeInactive || "true").toLowerCase() !== "false";
+    res.json(await listPicketDays({ includeInactive }));
+  })
+);
+
+router.get(
   "/tasks",
   asyncHandler(async (req, res) => {
     const includeInactive = String(req.query.includeInactive || "true").toLowerCase() !== "false";
@@ -168,6 +181,57 @@ router.get(
       return res.json({ isManager: false });
     }
     return res.json({ isManager: await isPicketManagerUser(req.authUser?.id) });
+  })
+);
+
+router.post(
+  "/schedules",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const item = await createPicketSchedule({
+      ...(req.body || {}),
+      createdBy: req.authUser?.id || null,
+      updatedBy: req.authUser?.id || null
+    });
+    return res.status(201).json(item);
+  })
+);
+
+router.get(
+  "/schedules",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const items = await listPicketSchedules({
+      date: req.query.date || req.query.scheduleDate || req.query.schedule_date || null,
+      studentId: req.query.studentId || req.query.student_id || null,
+      dayId: req.query.dayId || req.query.day_id || null
+    });
+    return res.json({ items, schedules: items, assignments: items });
+  })
+);
+
+router.patch(
+  "/schedules/:id",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const id = requireSafeId(req.params.id, "id");
+    const item = await updatePicketSchedule(id, {
+      ...(req.body || {}),
+      updatedBy: req.authUser?.id || null
+    });
+    if (!item) return res.status(404).json({ message: "Jadwal piket tidak ditemukan." });
+    return res.json(item);
+  })
+);
+
+router.delete(
+  "/schedules/:id",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const id = requireSafeId(req.params.id, "id");
+    const item = await deletePicketSchedule(id);
+    if (!item) return res.status(404).json({ message: "Jadwal piket tidak ditemukan." });
+    return res.json({ message: "Jadwal piket dihapus.", schedule: item, assignment: item });
   })
 );
 

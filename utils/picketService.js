@@ -151,22 +151,48 @@ async function ensurePicketTables() {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        CREATE TABLE IF NOT EXISTS picket_assignments (
+        CREATE TABLE IF NOT EXISTS picket_days (
+          id SMALLINT PRIMARY KEY,
+          name TEXT NOT NULL,
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        INSERT INTO picket_days (id, name)
+        VALUES
+          (0, 'Minggu'),
+          (1, 'Senin'),
+          (2, 'Selasa'),
+          (3, 'Rabu'),
+          (4, 'Kamis'),
+          (5, 'Jumat'),
+          (6, 'Sabtu')
+        ON CONFLICT (id) DO UPDATE
+        SET name = EXCLUDED.name,
+            updated_at = NOW();
+
+        CREATE TABLE IF NOT EXISTS picket_schedules (
           id TEXT PRIMARY KEY,
-          date DATE NOT NULL,
+          schedule_date DATE NOT NULL,
+          day_id SMALLINT NOT NULL REFERENCES picket_days(id),
           student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
           task_id TEXT REFERENCES picket_tasks(id) ON DELETE SET NULL,
           status TEXT NOT NULL DEFAULT 'Ditugaskan',
+          notes TEXT,
           generated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          UNIQUE(date, student_id)
+          UNIQUE(schedule_date, student_id)
         );
 
         CREATE TABLE IF NOT EXISTS picket_submissions (
           id TEXT PRIMARY KEY,
-          assignment_id TEXT NOT NULL REFERENCES picket_assignments(id) ON DELETE CASCADE,
+          schedule_id TEXT NOT NULL REFERENCES picket_schedules(id) ON DELETE CASCADE,
+          assignment_id TEXT NOT NULL,
           student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
           date DATE NOT NULL,
           photo_url TEXT NOT NULL,
@@ -178,12 +204,13 @@ async function ensurePicketTables() {
           reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           reviewed_at TIMESTAMPTZ,
           review_note TEXT,
-          UNIQUE(assignment_id)
+          UNIQUE(schedule_id)
         );
 
         CREATE TABLE IF NOT EXISTS picket_leave_requests (
           id TEXT PRIMARY KEY,
-          assignment_id TEXT NOT NULL REFERENCES picket_assignments(id) ON DELETE CASCADE,
+          schedule_id TEXT NOT NULL REFERENCES picket_schedules(id) ON DELETE CASCADE,
+          assignment_id TEXT NOT NULL,
           student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
           date DATE NOT NULL,
           reason TEXT NOT NULL,
@@ -193,7 +220,7 @@ async function ensurePicketTables() {
           review_note TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          UNIQUE(assignment_id, student_id)
+          UNIQUE(schedule_id, student_id)
         );
 
         CREATE TABLE IF NOT EXISTS picket_managers (
@@ -202,10 +229,98 @@ async function ensurePicketTables() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        CREATE INDEX IF NOT EXISTS idx_picket_assignments_date ON picket_assignments(date);
-        CREATE INDEX IF NOT EXISTS idx_picket_assignments_student_date ON picket_assignments(student_id, date DESC);
+        CREATE INDEX IF NOT EXISTS idx_picket_schedules_date ON picket_schedules(schedule_date);
+        CREATE INDEX IF NOT EXISTS idx_picket_schedules_student_date ON picket_schedules(student_id, schedule_date DESC);
         CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
         CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
+      `);
+
+      await query(`
+        DO $$
+        BEGIN
+          IF to_regclass('public.picket_assignments') IS NOT NULL THEN
+            INSERT INTO picket_schedules (
+              id, schedule_date, day_id, student_id, task_id, status,
+              generated_by, generated_at, created_at, updated_at
+            )
+            SELECT id, date, EXTRACT(DOW FROM date)::smallint, student_id, task_id, status,
+                   generated_by, generated_at, created_at, updated_at
+            FROM picket_assignments
+            ON CONFLICT (id) DO NOTHING;
+          END IF;
+        END $$;
+      `);
+
+      await query(`
+        ALTER TABLE picket_submissions
+        ADD COLUMN IF NOT EXISTS schedule_id TEXT;
+
+        UPDATE picket_submissions
+        SET schedule_id = COALESCE(schedule_id, assignment_id)
+        WHERE schedule_id IS NULL;
+
+        ALTER TABLE picket_submissions
+        ALTER COLUMN schedule_id SET NOT NULL;
+
+        ALTER TABLE picket_submissions
+        DROP CONSTRAINT IF EXISTS picket_submissions_assignment_id_fkey;
+
+        ALTER TABLE picket_submissions
+        DROP CONSTRAINT IF EXISTS picket_submissions_assignment_id_key;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'picket_submissions_schedule_id_fkey'
+          ) THEN
+            ALTER TABLE picket_submissions
+            ADD CONSTRAINT picket_submissions_schedule_id_fkey
+            FOREIGN KEY (schedule_id) REFERENCES picket_schedules(id) ON DELETE CASCADE
+            NOT VALID;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'picket_submissions_schedule_id_key'
+          ) THEN
+            ALTER TABLE picket_submissions
+            ADD CONSTRAINT picket_submissions_schedule_id_key UNIQUE (schedule_id);
+          END IF;
+        END $$;
+
+        ALTER TABLE picket_leave_requests
+        ADD COLUMN IF NOT EXISTS schedule_id TEXT;
+
+        UPDATE picket_leave_requests
+        SET schedule_id = COALESCE(schedule_id, assignment_id)
+        WHERE schedule_id IS NULL;
+
+        ALTER TABLE picket_leave_requests
+        ALTER COLUMN schedule_id SET NOT NULL;
+
+        ALTER TABLE picket_leave_requests
+        DROP CONSTRAINT IF EXISTS picket_leave_requests_assignment_id_fkey;
+
+        ALTER TABLE picket_leave_requests
+        DROP CONSTRAINT IF EXISTS picket_leave_requests_assignment_id_student_id_key;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'picket_leave_requests_schedule_id_fkey'
+          ) THEN
+            ALTER TABLE picket_leave_requests
+            ADD CONSTRAINT picket_leave_requests_schedule_id_fkey
+            FOREIGN KEY (schedule_id) REFERENCES picket_schedules(id) ON DELETE CASCADE
+            NOT VALID;
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'picket_leave_requests_schedule_id_student_id_key'
+          ) THEN
+            ALTER TABLE picket_leave_requests
+            ADD CONSTRAINT picket_leave_requests_schedule_id_student_id_key UNIQUE (schedule_id, student_id);
+          END IF;
+        END $$;
       `);
 
       await query(`
@@ -316,6 +431,18 @@ function isWeeklyScheduleChangedForDate(previousSettings, nextSettings, isoDate)
   return weeklyScheduleItemSignature(previous) !== weeklyScheduleItemSignature(next);
 }
 
+function mapDay(row) {
+  return {
+    id: Number(row.id),
+    name: row.name,
+    active: row.active === true,
+    created_at: row.created_at,
+    createdAt: row.created_at,
+    updated_at: row.updated_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function mapTask(row) {
   return {
     id: row.id,
@@ -331,9 +458,20 @@ function mapTask(row) {
 
 function mapAssignment(row) {
   if (!row) return null;
+  const date = row.date_text || row.schedule_date_text || row.schedule_date || row.date;
   return {
     id: row.id,
-    date: row.date_text || row.date,
+    schedule_id: row.id,
+    scheduleId: row.id,
+    assignment_id: row.id,
+    assignmentId: row.id,
+    date,
+    schedule_date: date,
+    scheduleDate: date,
+    day_id: row.day_id == null ? null : Number(row.day_id),
+    dayId: row.day_id == null ? null : Number(row.day_id),
+    day_name: row.day_name || null,
+    dayName: row.day_name || null,
     student_id: row.student_id,
     studentId: row.student_id,
     student_name: row.student_name || null,
@@ -351,18 +489,30 @@ function mapAssignment(row) {
     submissionId: row.submission_id || null,
     submission_status: row.submission_status || null,
     submissionStatus: row.submission_status || null,
+    notes: row.notes || null,
     generated_by: row.generated_by || null,
     generatedBy: row.generated_by || null,
     generated_at: row.generated_at || null,
-    generatedAt: row.generated_at || null
+    generatedAt: row.generated_at || null,
+    created_by: row.created_by || null,
+    createdBy: row.created_by || null,
+    updated_by: row.updated_by || null,
+    updatedBy: row.updated_by || null,
+    created_at: row.created_at || null,
+    createdAt: row.created_at || null,
+    updated_at: row.updated_at || null,
+    updatedAt: row.updated_at || null
   };
 }
 
 function mapSubmission(row) {
+  const scheduleId = row.schedule_id || row.assignment_id;
   return {
     id: row.id,
-    assignment_id: row.assignment_id,
-    assignmentId: row.assignment_id,
+    schedule_id: scheduleId,
+    scheduleId,
+    assignment_id: row.assignment_id || scheduleId,
+    assignmentId: row.assignment_id || scheduleId,
     student_id: row.student_id,
     studentId: row.student_id,
     student_name: row.student_name || null,
@@ -389,10 +539,13 @@ function mapSubmission(row) {
 }
 
 function mapLeaveRequest(row) {
+  const scheduleId = row.schedule_id || row.assignment_id;
   return {
     id: row.id,
-    assignment_id: row.assignment_id,
-    assignmentId: row.assignment_id,
+    schedule_id: scheduleId,
+    scheduleId,
+    assignment_id: row.assignment_id || scheduleId,
+    assignmentId: row.assignment_id || scheduleId,
     student_id: row.student_id,
     studentId: row.student_id,
     student_name: row.student_name || null,
@@ -576,6 +729,241 @@ async function deletePicketTask(id) {
   return result.rows[0] ? mapTask(result.rows[0]) : null;
 }
 
+async function listPicketDays({ includeInactive = true } = {}) {
+  await ensurePicketTables();
+  const result = await query(
+    `
+    SELECT *
+    FROM picket_days
+    WHERE $1::boolean = TRUE OR active = TRUE
+    ORDER BY id ASC
+    `,
+    [includeInactive]
+  );
+  return result.rows.map(mapDay);
+}
+
+async function ensureStudentCanBeScheduled(studentId) {
+  const result = await query(
+    `
+    SELECT s.id
+    FROM students s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.id = $1
+      AND s.status = 'Aktif'
+      AND u.is_active = TRUE
+    LIMIT 1
+    `,
+    [studentId]
+  );
+  if (result.rowCount === 0) {
+    const error = new Error("Mahasiswa tidak valid atau tidak aktif.");
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
+async function ensureTaskCanBeScheduled(taskId) {
+  if (!taskId) return null;
+  const result = await query(
+    `
+    SELECT id
+    FROM picket_tasks
+    WHERE id = $1
+      AND deleted_at IS NULL
+    LIMIT 1
+    `,
+    [taskId]
+  );
+  if (result.rowCount === 0) {
+    const error = new Error("Tugas piket tidak ditemukan.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return taskId;
+}
+
+function getScheduleId(payload = {}) {
+  return String(payload.scheduleId || payload.schedule_id || payload.assignmentId || payload.assignment_id || "").trim();
+}
+
+async function listPicketSchedules({ date = null, studentId = null, dayId = null } = {}) {
+  await ensurePicketTables();
+  const params = [];
+  const clauses = [];
+  if (date) {
+    params.push(normalizeIsoDate(date));
+    clauses.push(`psch.schedule_date = $${params.length}::date`);
+  }
+  if (studentId) {
+    const resolved = await resolveStudentId(studentId);
+    params.push(resolved || studentId);
+    clauses.push(`psch.student_id = $${params.length}`);
+  }
+  if (dayId != null && dayId !== "") {
+    const parsedDayId = Number(dayId);
+    if (!Number.isInteger(parsedDayId) || parsedDayId < 0 || parsedDayId > 6) {
+      const error = new Error("dayId wajib berupa angka 0-6.");
+      error.statusCode = 400;
+      throw error;
+    }
+    params.push(parsedDayId);
+    clauses.push(`psch.day_id = $${params.length}`);
+  }
+
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const result = await query(
+    `
+    SELECT psch.id, TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') AS date_text,
+           psch.schedule_date, psch.day_id, pd.name AS day_name,
+           psch.student_id, psch.task_id, psch.status, psch.notes,
+           psch.generated_by, psch.generated_at, psch.created_by, psch.updated_by,
+           psch.created_at, psch.updated_at,
+           s.nim, u.name AS student_name,
+           pt.name AS task_name, pt.description AS task_description,
+           psub.id AS submission_id, psub.status AS submission_status
+    FROM picket_schedules psch
+    JOIN picket_days pd ON pd.id = psch.day_id
+    JOIN students s ON s.id = psch.student_id
+    JOIN users u ON u.id = s.user_id
+    LEFT JOIN picket_tasks pt ON pt.id = psch.task_id
+    LEFT JOIN picket_submissions psub ON psub.schedule_id = psch.id
+    ${where}
+    ORDER BY psch.schedule_date DESC, pd.id ASC, u.name ASC
+    `,
+    params
+  );
+  return result.rows.map(mapAssignment);
+}
+
+async function getPicketScheduleById(id, executor = query) {
+  const result = await runQuery(
+    executor,
+    `
+    SELECT psch.id, TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') AS date_text,
+           psch.schedule_date, psch.day_id, pd.name AS day_name,
+           psch.student_id, psch.task_id, psch.status, psch.notes,
+           psch.generated_by, psch.generated_at, psch.created_by, psch.updated_by,
+           psch.created_at, psch.updated_at,
+           s.nim, u.name AS student_name,
+           pt.name AS task_name, pt.description AS task_description,
+           psub.id AS submission_id, psub.status AS submission_status
+    FROM picket_schedules psch
+    JOIN picket_days pd ON pd.id = psch.day_id
+    JOIN students s ON s.id = psch.student_id
+    JOIN users u ON u.id = s.user_id
+    LEFT JOIN picket_tasks pt ON pt.id = psch.task_id
+    LEFT JOIN picket_submissions psub ON psub.schedule_id = psch.id
+    WHERE psch.id = $1
+    LIMIT 1
+    `,
+    [id]
+  );
+  return result.rows[0] ? mapAssignment(result.rows[0]) : null;
+}
+
+async function createPicketSchedule(payload = {}) {
+  await ensurePicketTables();
+  const scheduleDate = normalizeIsoDate(payload.scheduleDate || payload.schedule_date || payload.date, getJakartaDateIso());
+  const studentId = await resolveStudentId(payload.studentId || payload.student_id);
+  const taskId = String(payload.taskId || payload.task_id || "").trim();
+  const status = String(payload.status || "Ditugaskan").trim() || "Ditugaskan";
+  if (!studentId || !taskId) {
+    const error = new Error("scheduleDate/date, studentId, dan taskId wajib diisi.");
+    error.statusCode = 400;
+    throw error;
+  }
+  await ensureStudentCanBeScheduled(studentId);
+  await ensureTaskCanBeScheduled(taskId);
+
+  const id = buildId("PKT-SCH");
+  const dayId = getJakartaDayOfWeek(scheduleDate);
+  const result = await query(
+    `
+    INSERT INTO picket_schedules (
+      id, schedule_date, day_id, student_id, task_id, status, notes,
+      generated_by, created_by, updated_by
+    )
+    VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $8, $8)
+    RETURNING id
+    `,
+    [
+      id,
+      scheduleDate,
+      dayId,
+      studentId,
+      taskId,
+      status,
+      payload.notes == null ? null : String(payload.notes),
+      payload.createdBy || payload.created_by || payload.updatedBy || payload.updated_by || null
+    ]
+  );
+  return getPicketScheduleById(result.rows[0].id);
+}
+
+async function updatePicketSchedule(id, payload = {}) {
+  await ensurePicketTables();
+  const current = await getPicketScheduleById(id);
+  if (!current) return null;
+
+  const scheduleDate = payload.scheduleDate || payload.schedule_date || payload.date
+    ? normalizeIsoDate(payload.scheduleDate || payload.schedule_date || payload.date)
+    : current.date;
+  const studentId = payload.studentId || payload.student_id
+    ? await resolveStudentId(payload.studentId || payload.student_id)
+    : current.studentId;
+  const hasTaskPayload = Object.prototype.hasOwnProperty.call(payload, "taskId") ||
+    Object.prototype.hasOwnProperty.call(payload, "task_id");
+  const taskId = hasTaskPayload
+    ? String(payload.taskId ?? payload.task_id ?? "").trim()
+    : current.taskId;
+  const status = payload.status == null ? current.status : String(payload.status).trim();
+
+  if (!studentId) {
+    const error = new Error("Mahasiswa tidak ditemukan.");
+    error.statusCode = 400;
+    throw error;
+  }
+  await ensureStudentCanBeScheduled(studentId);
+  await ensureTaskCanBeScheduled(taskId);
+
+  const result = await query(
+    `
+    UPDATE picket_schedules
+    SET schedule_date = $2::date,
+        day_id = $3,
+        student_id = $4,
+        task_id = $5,
+        status = $6,
+        notes = CASE WHEN $7::boolean THEN $8 ELSE notes END,
+        updated_by = $9,
+        updated_at = NOW()
+    WHERE id = $1
+    RETURNING id
+    `,
+    [
+      id,
+      scheduleDate,
+      getJakartaDayOfWeek(scheduleDate),
+      studentId,
+      taskId || null,
+      status || "Ditugaskan",
+      Object.prototype.hasOwnProperty.call(payload, "notes"),
+      payload.notes == null ? null : String(payload.notes),
+      payload.updatedBy || payload.updated_by || null
+    ]
+  );
+  return result.rows[0] ? getPicketScheduleById(result.rows[0].id) : null;
+}
+
+async function deletePicketSchedule(id) {
+  await ensurePicketTables();
+  const existing = await getPicketScheduleById(id);
+  if (!existing) return null;
+  await query("DELETE FROM picket_schedules WHERE id = $1", [id]);
+  return existing;
+}
+
 async function isPicketManagerUser(userId) {
   await ensurePicketTables();
   const student = await resolveStudentRecord(userId);
@@ -656,10 +1044,10 @@ async function fetchCandidateStudents({ date, excludeOnLeave, gapDays }) {
     ? `
       AND NOT EXISTS (
         SELECT 1
-        FROM picket_assignments recent
+        FROM picket_schedules recent
         WHERE recent.student_id = s.id
-          AND recent.date < $1::date
-          AND recent.date >= ($1::date - ($2::int * INTERVAL '1 day'))
+          AND recent.schedule_date < $1::date
+          AND recent.schedule_date >= ($1::date - ($2::int * INTERVAL '1 day'))
       )
     `
     : "";
@@ -675,9 +1063,9 @@ async function fetchCandidateStudents({ date, excludeOnLeave, gapDays }) {
       AND u.is_active = TRUE
       AND NOT EXISTS (
         SELECT 1
-        FROM picket_assignments existing
+        FROM picket_schedules existing
         WHERE existing.student_id = s.id
-          AND existing.date = $1::date
+          AND existing.schedule_date = $1::date
       )
       AND (
         $${leaveParam}::boolean = FALSE
@@ -703,9 +1091,9 @@ async function chooseTaskForStudent(studentId, activeTasks) {
   const previous = await query(
     `
     SELECT task_id
-    FROM picket_assignments
+    FROM picket_schedules
     WHERE student_id = $1 AND task_id IS NOT NULL
-    ORDER BY date DESC, generated_at DESC
+    ORDER BY schedule_date DESC, generated_at DESC
     LIMIT 1
     `,
     [studentId]
@@ -719,17 +1107,21 @@ async function fetchAssignmentsByDate(date, executor = query) {
   const result = await runQuery(
     executor,
     `
-    SELECT pa.id, TO_CHAR(pa.date, 'YYYY-MM-DD') AS date_text, pa.student_id,
-           pa.task_id, pa.status, pa.generated_by, pa.generated_at,
+    SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
+           pa.schedule_date, pa.day_id, pd.name AS day_name,
+           pa.student_id, pa.task_id, pa.status, pa.notes,
+           pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
+           pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
            ps.id AS submission_id, ps.status AS submission_status
-    FROM picket_assignments pa
+    FROM picket_schedules pa
+    JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
-    LEFT JOIN picket_submissions ps ON ps.assignment_id = pa.id
-    WHERE pa.date = $1::date
+    LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
+    WHERE pa.schedule_date = $1::date
     ORDER BY u.name ASC
     `,
     [date]
@@ -780,22 +1172,22 @@ async function generateManualPicketSchedule({ date, studentIds, activeTasks, gen
 
   try {
     await client.query("BEGIN");
-    await client.query("DELETE FROM picket_assignments WHERE date = $1::date", [targetDate]);
+    await client.query("DELETE FROM picket_schedules WHERE schedule_date = $1::date", [targetDate]);
 
     for (let index = 0; index < manualStudentIds.length; index += 1) {
       const studentId = manualStudentIds[index];
       const task = activeTasks.length > 1
         ? activeTasks[index % activeTasks.length]
         : await chooseTaskForStudent(studentId, activeTasks);
-      const id = buildId("PKT-ASG");
+      const id = buildId("PKT-SCH");
 
       const result = await client.query(
         `
-        INSERT INTO picket_assignments (id, date, student_id, task_id, status, generated_by)
-        VALUES ($1, $2::date, $3, $4, 'Ditugaskan', $5)
+        INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
+        VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
         RETURNING id
         `,
-        [id, targetDate, studentId, task.id, generatedBy]
+        [id, targetDate, getJakartaDayOfWeek(targetDate), studentId, task.id, generatedBy]
       );
       createdIds.push(result.rows[0].id);
     }
@@ -904,15 +1296,15 @@ async function generatePicketSchedule({
 
   for (const student of selected) {
     const task = await chooseTaskForStudent(student.id, activeTasks);
-    const id = buildId("PKT-ASG");
+    const id = buildId("PKT-SCH");
     const result = await query(
       `
-      INSERT INTO picket_assignments (id, date, student_id, task_id, status, generated_by)
-      VALUES ($1, $2::date, $3, $4, 'Ditugaskan', $5)
-      ON CONFLICT (date, student_id) DO NOTHING
+      INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
+      VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
+      ON CONFLICT (schedule_date, student_id) DO NOTHING
       RETURNING id
       `,
-      [id, targetDate, student.id, task.id, generatedBy]
+      [id, targetDate, getJakartaDayOfWeek(targetDate), student.id, task.id, generatedBy]
     );
     if (result.rowCount > 0) createdIds.push(result.rows[0].id);
   }
@@ -951,11 +1343,11 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
                  PARTITION BY pa.student_id
                  ORDER BY (ps.id IS NOT NULL) DESC, pa.generated_at DESC, pa.created_at DESC, pa.id ASC
                ) AS student_rank
-        FROM picket_assignments pa
-        LEFT JOIN picket_submissions ps ON ps.assignment_id = pa.id
-        WHERE pa.date = $1::date
+        FROM picket_schedules pa
+        LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
+        WHERE pa.schedule_date = $1::date
       )
-      DELETE FROM picket_assignments pa
+      DELETE FROM picket_schedules pa
       USING ranked
       WHERE pa.id = ranked.id
         AND (
@@ -971,8 +1363,8 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
       client,
       `
       SELECT id, student_id
-      FROM picket_assignments
-      WHERE date = $1::date
+      FROM picket_schedules
+      WHERE schedule_date = $1::date
         AND student_id = ANY($2::text[])
       FOR UPDATE
       `,
@@ -1007,11 +1399,12 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
         const result = await runQuery(
           client,
           `
-          UPDATE picket_assignments
+          UPDATE picket_schedules
           SET task_id = $2,
               status = 'Ditugaskan',
               generated_by = $3,
               generated_at = NOW(),
+              updated_by = $3,
               updated_at = NOW()
           WHERE id = $1
           RETURNING id
@@ -1022,21 +1415,22 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
         continue;
       }
 
-      const id = buildId("PKT-ASG");
+      const id = buildId("PKT-SCH");
       const result = await runQuery(
         client,
         `
-        INSERT INTO picket_assignments (id, date, student_id, task_id, status, generated_by)
-        VALUES ($1, $2::date, $3, $4, 'Ditugaskan', $5)
-        ON CONFLICT (date, student_id)
+        INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
+        VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
+        ON CONFLICT (schedule_date, student_id)
         DO UPDATE SET task_id = EXCLUDED.task_id,
                       status = 'Ditugaskan',
                       generated_by = EXCLUDED.generated_by,
                       generated_at = NOW(),
+                      updated_by = EXCLUDED.updated_by,
                       updated_at = NOW()
         RETURNING id
         `,
-        [id, targetDate, studentId, task.id, generatedBy]
+        [id, targetDate, dayOfWeek, studentId, task.id, generatedBy]
       );
       createdIds.push(result.rows[0].id);
     }
@@ -1104,6 +1498,7 @@ async function getPicketOverview(date) {
   ]);
   return {
     date: targetDate,
+    schedules: sync.assignments,
     assignments: sync.assignments,
     submissions,
     leaveRequests,
@@ -1118,17 +1513,21 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
   const result = await query(
     `
-    SELECT pa.id, TO_CHAR(pa.date, 'YYYY-MM-DD') AS date_text, pa.student_id,
-           pa.task_id, pa.status, pa.generated_by, pa.generated_at,
+    SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
+           pa.schedule_date, pa.day_id, pd.name AS day_name,
+           pa.student_id, pa.task_id, pa.status, pa.notes,
+           pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
+           pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
            ps.id AS submission_id, ps.status AS submission_status
-    FROM picket_assignments pa
+    FROM picket_schedules pa
+    JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
-    LEFT JOIN picket_submissions ps ON ps.assignment_id = pa.id
-    WHERE pa.student_id = $1 AND pa.date = $2::date
+    LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
+    WHERE pa.student_id = $1 AND pa.schedule_date = $2::date
     LIMIT 1
     `,
     [studentId, targetDate]
@@ -1142,37 +1541,42 @@ async function getPicketHistory(studentIdOrUserId) {
   if (!studentId) return [];
   const result = await query(
     `
-    SELECT pa.id, TO_CHAR(pa.date, 'YYYY-MM-DD') AS date_text, pa.student_id,
-           pa.task_id, pa.status, pa.generated_by, pa.generated_at,
+    SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
+           pa.schedule_date, pa.day_id, pd.name AS day_name,
+           pa.student_id, pa.task_id, pa.status, pa.notes,
+           pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
+           pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
            ps.id AS submission_id, ps.status AS submission_status
-    FROM picket_assignments pa
+    FROM picket_schedules pa
+    JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
-    LEFT JOIN picket_submissions ps ON ps.assignment_id = pa.id
+    LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
     WHERE pa.student_id = $1
-    ORDER BY pa.date DESC
+    ORDER BY pa.schedule_date DESC
     `,
     [studentId]
   );
   return result.rows.map(mapAssignment);
 }
 
-async function hasApprovedPicketLeave({ assignmentId, studentId, date }) {
+async function hasApprovedPicketLeave({ scheduleId, assignmentId, studentId, date }) {
   await ensurePicketTables();
+  const effectiveScheduleId = scheduleId || assignmentId || null;
   const result = await query(
     `
     SELECT 1
     FROM picket_leave_requests
     WHERE status = 'Disetujui'
-      AND ($1::text IS NULL OR assignment_id = $1)
+      AND ($1::text IS NULL OR schedule_id = $1 OR assignment_id = $1)
       AND ($2::text IS NULL OR student_id = $2)
       AND ($3::date IS NULL OR date = $3::date)
     LIMIT 1
     `,
-    [assignmentId || null, studentId || null, date || null]
+    [effectiveScheduleId, studentId || null, date || null]
   );
   return result.rowCount > 0;
 }
@@ -1185,7 +1589,7 @@ async function getPicketCheckoutRequirement(studentIdOrUserId, date = getJakarta
   }
 
   const approvedLeave = await hasApprovedPicketLeave({
-    assignmentId: assignment.id,
+    scheduleId: assignment.id,
     studentId: assignment.studentId,
     date: assignment.date
   });
@@ -1201,37 +1605,37 @@ async function getPicketCheckoutRequirement(studentIdOrUserId, date = getJakarta
 
 async function createPicketSubmission(payload = {}) {
   await ensurePicketTables();
-  const assignmentId = String(payload.assignmentId || payload.assignment_id || "").trim();
+  const scheduleId = getScheduleId(payload);
   const studentId = await resolveStudentId(payload.studentId || payload.student_id);
   const date = normalizeIsoDate(payload.date, getJakartaDateIso());
-  if (!assignmentId || !studentId) {
-    const error = new Error("assignmentId dan studentId wajib diisi.");
+  if (!scheduleId || !studentId) {
+    const error = new Error("scheduleId dan studentId wajib diisi.");
     error.statusCode = 400;
     throw error;
   }
 
-  const assignment = await query(
+  const schedule = await query(
     `
-    SELECT id, student_id, TO_CHAR(date, 'YYYY-MM-DD') AS date_text, task_id
-    FROM picket_assignments
+    SELECT id, student_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text, task_id
+    FROM picket_schedules
     WHERE id = $1
     LIMIT 1
     `,
-    [assignmentId]
+    [scheduleId]
   );
-  if (assignment.rowCount === 0) {
-    const error = new Error("Assignment piket tidak ditemukan.");
+  if (schedule.rowCount === 0) {
+    const error = new Error("Jadwal piket tidak ditemukan.");
     error.statusCode = 404;
     throw error;
   }
-  if (assignment.rows[0].student_id !== studentId || assignment.rows[0].date_text !== date) {
-    const error = new Error("Assignment piket tidak sesuai dengan studentId/date.");
+  if (schedule.rows[0].student_id !== studentId || schedule.rows[0].date_text !== date) {
+    const error = new Error("Jadwal piket tidak sesuai dengan studentId/date.");
     error.statusCode = 400;
     throw error;
   }
   const taskId = String(payload.taskId || payload.task_id || "").trim();
-  if (taskId && assignment.rows[0].task_id !== taskId) {
-    const error = new Error("taskId tidak sesuai dengan assignment piket.");
+  if (taskId && schedule.rows[0].task_id !== taskId) {
+    const error = new Error("taskId tidak sesuai dengan jadwal piket.");
     error.statusCode = 400;
     throw error;
   }
@@ -1240,11 +1644,12 @@ async function createPicketSubmission(payload = {}) {
   const result = await query(
     `
     INSERT INTO picket_submissions (
-      id, assignment_id, student_id, date, photo_url, file_url, photo_file_name, source, status
+      id, schedule_id, assignment_id, student_id, date, photo_url, file_url, photo_file_name, source, status
     )
-    VALUES ($1, $2, $3, $4::date, $5, $5, $6, $7, 'Terkirim')
-    ON CONFLICT (assignment_id)
+    VALUES ($1, $2, $2, $3, $4::date, $5, $5, $6, $7, 'Terkirim')
+    ON CONFLICT (schedule_id)
     DO UPDATE SET photo_url = EXCLUDED.photo_url,
+                  assignment_id = EXCLUDED.assignment_id,
                   file_url = EXCLUDED.file_url,
                   photo_file_name = EXCLUDED.photo_file_name,
                   source = EXCLUDED.source,
@@ -1257,7 +1662,7 @@ async function createPicketSubmission(payload = {}) {
     `,
     [
       buildId("PKT-SUB"),
-      assignmentId,
+      scheduleId,
       studentId,
       date,
       photoUrl,
@@ -1334,37 +1739,38 @@ async function listPicketLeaveRequests({ studentId = null, date = null } = {}) {
 
 async function createPicketLeaveRequest(payload = {}) {
   await ensurePicketTables();
-  const assignmentId = String(payload.assignmentId || payload.assignment_id || "").trim();
+  const scheduleId = getScheduleId(payload);
   const studentId = await resolveStudentId(payload.studentId || payload.student_id);
   const date = normalizeIsoDate(payload.date, getJakartaDateIso());
   const reason = String(payload.reason || "").trim();
-  if (!assignmentId || !studentId || !reason) {
-    const error = new Error("assignmentId, studentId, date, dan reason wajib diisi.");
+  if (!scheduleId || !studentId || !reason) {
+    const error = new Error("scheduleId, studentId, date, dan reason wajib diisi.");
     error.statusCode = 400;
     throw error;
   }
 
-  const assignment = await query(
-    "SELECT id, student_id, TO_CHAR(date, 'YYYY-MM-DD') AS date_text FROM picket_assignments WHERE id = $1 LIMIT 1",
-    [assignmentId]
+  const schedule = await query(
+    "SELECT id, student_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text FROM picket_schedules WHERE id = $1 LIMIT 1",
+    [scheduleId]
   );
-  if (assignment.rowCount === 0) {
-    const error = new Error("Assignment piket tidak ditemukan.");
+  if (schedule.rowCount === 0) {
+    const error = new Error("Jadwal piket tidak ditemukan.");
     error.statusCode = 404;
     throw error;
   }
-  if (assignment.rows[0].student_id !== studentId || assignment.rows[0].date_text !== date) {
-    const error = new Error("Assignment piket tidak sesuai dengan studentId/date.");
+  if (schedule.rows[0].student_id !== studentId || schedule.rows[0].date_text !== date) {
+    const error = new Error("Jadwal piket tidak sesuai dengan studentId/date.");
     error.statusCode = 400;
     throw error;
   }
 
   const result = await query(
     `
-    INSERT INTO picket_leave_requests (id, assignment_id, student_id, date, reason, status)
-    VALUES ($1, $2, $3, $4::date, $5, 'Menunggu')
-    ON CONFLICT (assignment_id, student_id)
+    INSERT INTO picket_leave_requests (id, schedule_id, assignment_id, student_id, date, reason, status)
+    VALUES ($1, $2, $2, $3, $4::date, $5, 'Menunggu')
+    ON CONFLICT (schedule_id, student_id)
     DO UPDATE SET reason = EXCLUDED.reason,
+                  assignment_id = EXCLUDED.assignment_id,
                   status = 'Menunggu',
                   reviewed_by = NULL,
                   reviewed_at = NULL,
@@ -1372,7 +1778,7 @@ async function createPicketLeaveRequest(payload = {}) {
                   updated_at = NOW()
     RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text
     `,
-    [buildId("PKT-LV"), assignmentId, studentId, date, reason]
+    [buildId("PKT-LV"), scheduleId, studentId, date, reason]
   );
   return mapLeaveRequest(result.rows[0]);
 }
@@ -1404,8 +1810,10 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
 
 module.exports = {
   createPicketLeaveRequest,
+  createPicketSchedule,
   createPicketSubmission,
   createPicketTask,
+  deletePicketSchedule,
   deletePicketTask,
   ensurePicketTables,
   generatePicketSchedule,
@@ -1415,13 +1823,16 @@ module.exports = {
   getPicketSettings,
   getPicketTodayForStudent,
   isPicketManagerUser,
+  listPicketDays,
   listPicketLeaveRequests,
   listPicketManagers,
+  listPicketSchedules,
   listPicketTasks,
   replacePicketManagers,
   resyncPicketSchedule,
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
+  updatePicketSchedule,
   updatePicketSettings,
   updatePicketTask
 };

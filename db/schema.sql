@@ -391,22 +391,48 @@ INSERT INTO picket_settings (id, people_per_day, randomize_enabled)
 VALUES ('default', 2, TRUE)
 ON CONFLICT (id) DO NOTHING;
 
-CREATE TABLE IF NOT EXISTS picket_assignments (
+CREATE TABLE IF NOT EXISTS picket_days (
+  id SMALLINT PRIMARY KEY,
+  name TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO picket_days (id, name)
+VALUES
+  (0, 'Minggu'),
+  (1, 'Senin'),
+  (2, 'Selasa'),
+  (3, 'Rabu'),
+  (4, 'Kamis'),
+  (5, 'Jumat'),
+  (6, 'Sabtu')
+ON CONFLICT (id) DO UPDATE
+SET name = EXCLUDED.name,
+    updated_at = NOW();
+
+CREATE TABLE IF NOT EXISTS picket_schedules (
   id TEXT PRIMARY KEY,
-  date DATE NOT NULL,
+  schedule_date DATE NOT NULL,
+  day_id SMALLINT NOT NULL REFERENCES picket_days(id),
   student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
   task_id TEXT REFERENCES picket_tasks(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'Ditugaskan',
+  notes TEXT,
   generated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(date, student_id)
+  UNIQUE(schedule_date, student_id)
 );
 
 CREATE TABLE IF NOT EXISTS picket_submissions (
   id TEXT PRIMARY KEY,
-  assignment_id TEXT NOT NULL REFERENCES picket_assignments(id) ON DELETE CASCADE,
+  schedule_id TEXT NOT NULL REFERENCES picket_schedules(id) ON DELETE CASCADE,
+  assignment_id TEXT NOT NULL,
   student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
   date DATE NOT NULL,
   photo_url TEXT NOT NULL,
@@ -418,12 +444,13 @@ CREATE TABLE IF NOT EXISTS picket_submissions (
   reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   reviewed_at TIMESTAMPTZ,
   review_note TEXT,
-  UNIQUE(assignment_id)
+  UNIQUE(schedule_id)
 );
 
 CREATE TABLE IF NOT EXISTS picket_leave_requests (
   id TEXT PRIMARY KEY,
-  assignment_id TEXT NOT NULL REFERENCES picket_assignments(id) ON DELETE CASCADE,
+  schedule_id TEXT NOT NULL REFERENCES picket_schedules(id) ON DELETE CASCADE,
+  assignment_id TEXT NOT NULL,
   student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
   date DATE NOT NULL,
   reason TEXT NOT NULL,
@@ -433,7 +460,7 @@ CREATE TABLE IF NOT EXISTS picket_leave_requests (
   review_note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(assignment_id, student_id)
+  UNIQUE(schedule_id, student_id)
 );
 
 CREATE TABLE IF NOT EXISTS picket_managers (
@@ -523,8 +550,8 @@ CREATE INDEX IF NOT EXISTS idx_logbook_comments_entry_created ON logbook_comment
 CREATE INDEX IF NOT EXISTS idx_draft_reports_student_upload ON draft_reports(student_id, upload_date DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_attendance_records_student_date ON attendance_records(student_id, attendance_date DESC);
 CREATE INDEX IF NOT EXISTS idx_student_access_locks_active ON student_access_locks(student_id, active, lock_date DESC);
-CREATE INDEX IF NOT EXISTS idx_picket_assignments_date ON picket_assignments(date);
-CREATE INDEX IF NOT EXISTS idx_picket_assignments_student_date ON picket_assignments(student_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_picket_schedules_date ON picket_schedules(schedule_date);
+CREATE INDEX IF NOT EXISTS idx_picket_schedules_student_date ON picket_schedules(student_id, schedule_date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_logged_at ON audit_logs(logged_at DESC);

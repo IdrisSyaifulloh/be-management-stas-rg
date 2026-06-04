@@ -70,6 +70,9 @@ var corsOptions = {
       }
       return callback(null, true);
     }
+    if (env.nodeEnv !== "production" && isLocalOrigin(origin)) {
+      return callback(null, true);
+    }
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
@@ -89,21 +92,6 @@ var corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
-
-// ======================================================
-// RATE LIMITING
-// ======================================================
-var loginRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit." },
-  keyGenerator: function (req) {
-    return req.ip + ":" + String(req.body && req.body.identifier || "").slice(0, 80);
-  }
-});
 app.options(/.*/, cors(corsOptions));
 
 // ======================================================
