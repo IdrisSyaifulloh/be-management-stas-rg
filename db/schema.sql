@@ -64,6 +64,40 @@ CREATE TABLE IF NOT EXISTS student_documents (
   UNIQUE (student_id, document_type)
 );
 
+CREATE TABLE IF NOT EXISTS graduation_submissions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'Dikirim'
+    CHECK (status IN ('Draft', 'Dikirim', 'Valid', 'Revisi')),
+  submitted_at TIMESTAMPTZ,
+  reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMPTZ,
+  review_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (student_id)
+);
+
+CREATE TABLE IF NOT EXISTS graduation_submission_projects (
+  id TEXT PRIMARY KEY,
+  submission_id TEXT NOT NULL REFERENCES graduation_submissions(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  project_title TEXT,
+  position_label TEXT,
+  report_url TEXT NOT NULL,
+  product_photo_folder_url TEXT NOT NULL,
+  manual_book_url TEXT NOT NULL,
+  demo_video_url TEXT NOT NULL,
+  repository_url TEXT,
+  deployed_url TEXT,
+  dataset_model_url TEXT,
+  design_documentation_url TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (submission_id, project_id)
+);
 CREATE TABLE IF NOT EXISTS lecturers (
   id TEXT PRIMARY KEY,
   user_id TEXT UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -560,6 +594,8 @@ CREATE INDEX IF NOT EXISTS idx_research_board_subtasks_task ON research_board_ta
 CREATE INDEX IF NOT EXISTS idx_research_board_attachments_task ON research_board_task_attachments(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_board_comments_task ON research_board_task_comments(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_student_documents_student ON student_documents(student_id, document_type);
+CREATE INDEX IF NOT EXISTS idx_graduation_submissions_student ON graduation_submissions(student_id, submitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_graduation_submission_projects_student ON graduation_submission_projects(student_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_logbook_entries_student_date ON logbook_entries(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_logbook_comments_entry_created ON logbook_comments(logbook_entry_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_draft_reports_student_upload ON draft_reports(student_id, upload_date DESC, updated_at DESC);

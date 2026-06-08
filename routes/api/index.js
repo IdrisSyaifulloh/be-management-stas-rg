@@ -29,6 +29,7 @@ const studentAccessLocksRouter = require("./studentAccessLocks");
 const userUiStateRouter = require("./userUiState");
 const activitiesRouter = require("./activities");
 const picketRouter = require("./picket");
+const graduationSubmissionsRouter = require("./graduationSubmissions");
 const { requireRoleStrict } = require("../../utils/roleGuard");
 
 const router = express.Router();
@@ -64,5 +65,6 @@ router.use("/monitoring", requireRoleStrict(["operator"]), monitoringRouter);
 router.use("/withdrawal-requests", requireRoleStrict(["operator", "mahasiswa", "dosen"]), withdrawalRequestsRouter);
 router.use("/activities", requireRoleStrict(["operator"]), activitiesRouter);
 router.use("/picket", picketRouter);
+router.use("/graduation-submissions", requireRoleStrict(["mahasiswa"]), graduationSubmissionsRouter);
 
 module.exports = router;
