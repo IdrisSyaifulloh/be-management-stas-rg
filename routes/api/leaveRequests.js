@@ -47,7 +47,8 @@ async function ensureLeaveColumns() {
         ADD COLUMN IF NOT EXISTS counts_against_wfh_quota BOOLEAN NOT NULL DEFAULT FALSE,
         ADD COLUMN IF NOT EXISTS file_url TEXT,
         ADD COLUMN IF NOT EXISTS file_name TEXT,
-        ADD COLUMN IF NOT EXISTS file_size BIGINT
+        ADD COLUMN IF NOT EXISTS file_size BIGINT,
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       `);
 
       await query(`
@@ -202,7 +203,9 @@ function mapLeaveRequestRow(row) {
     file_url: row.file_url || null,
     fileUrl: row.file_url || null,
     file_name: row.file_name || null,
-    fileName: row.file_name || null
+    fileName: row.file_name || null,
+    created_at: row.created_at || null,
+    createdAt: row.created_at || null
   };
 }
 
@@ -276,6 +279,7 @@ router.get(
         lr.alasan,
         lr.catatan,
         lr.tanggal_pengajuan,
+        lr.created_at,
         lr.status,
         lr.reviewed_by,
         ru.name AS reviewed_by_name,
@@ -290,7 +294,7 @@ router.get(
       LEFT JOIN research_projects rp ON rp.id = lr.project_id
       LEFT JOIN users ru ON ru.id = lr.reviewed_by
       ${whereClause}
-      ORDER BY lr.tanggal_pengajuan DESC, lr.id DESC
+      ORDER BY lr.created_at DESC, lr.tanggal_pengajuan DESC, lr.id DESC
       LIMIT 200
       `,
       params
@@ -328,6 +332,7 @@ router.get(
         lr.alasan,
         lr.catatan,
         lr.tanggal_pengajuan,
+        lr.created_at,
         lr.status,
         lr.reviewed_by,
         ru.name AS reviewed_by_name,
