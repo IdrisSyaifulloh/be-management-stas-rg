@@ -20,6 +20,7 @@ const { requireSafeId } = require("../../utils/securityValidation");
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 const { findNonWorkingDayForDate } = require("../../utils/holidays");
 const { ensureStudentDocumentsTable, fetchStudentDocuments } = require("../../utils/studentDocuments");
+const { ensurePicketTables } = require("../../utils/picketService");
 
 const router = express.Router();
 
@@ -51,6 +52,27 @@ function getJakartaNowParts(date = new Date()) {
 
 function isAfterAttendanceCutoff(time) {
   return String(time || "") >= ATTENDANCE_ABSENT_VISIBLE_AFTER;
+}
+
+function addIsoDays(isoDate, days) {
+  const [year, month, day] = String(isoDate || "").split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+}
+
+function getSundayBasedJakartaWeekBounds(date = new Date()) {
+  const { date: today } = getJakartaNowParts(date);
+  const [year, month, day] = today.split("-").map(Number);
+  const dayIndex = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  const weekStart = addIsoDays(today, -dayIndex);
+  const weekEnd = addIsoDays(weekStart, 6);
+
+  return {
+    today,
+    weekStart,
+    weekEnd,
+    queryEnd: today < weekEnd ? today : weekEnd
+  };
 }
 
 function normalizeSearchValue(value) {
@@ -119,6 +141,78 @@ router.get(
       cutiMenunggu: leavePending.rows[0].total,
       suratMenunggu: lettersPending.rows[0].total,
       logbookTerbaru: latestLogbooks.rows
+    });
+  })
+);
+
+router.get(
+  "/picket-weekly-misses",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+
+    if (!["operator", "admin"].includes(role)) {
+      return res.status(403).json({
+        message: "Akses ditolak. Dashboard pelanggaran piket hanya untuk operator/admin."
+      });
+    }
+
+    await ensurePicketTables();
+
+    const { weekStart, weekEnd, queryEnd } = getSundayBasedJakartaWeekBounds();
+
+    const result = await query(
+      `
+      SELECT
+        psch.student_id,
+        u.name AS student_name,
+        u.initials AS student_initials,
+        s.nim,
+        COUNT(*)::int AS missed_count,
+        ARRAY_AGG(TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') ORDER BY psch.schedule_date ASC, psch.id ASC) AS missed_dates,
+        ARRAY_AGG(COALESCE(pt.name, 'Piket') ORDER BY psch.schedule_date ASC, psch.id ASC) AS task_names,
+        TO_CHAR(MAX(psch.schedule_date), 'YYYY-MM-DD') AS last_missed_date
+      FROM picket_schedules psch
+      JOIN students s ON s.id = psch.student_id
+      JOIN users u ON u.id = s.user_id
+      LEFT JOIN picket_tasks pt ON pt.id = psch.task_id
+      WHERE psch.schedule_date BETWEEN $1::date AND $2::date
+        AND NOT EXISTS (
+          SELECT 1
+          FROM picket_leave_requests plr
+          WHERE plr.schedule_id = psch.id
+            AND plr.student_id = psch.student_id
+            AND plr.status = 'Disetujui'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM picket_submissions psub
+          WHERE psub.schedule_id = psch.id
+            AND psub.student_id = psch.student_id
+            AND psub.status <> 'Bermasalah'
+        )
+      GROUP BY psch.student_id, u.name, u.initials, s.nim
+      ORDER BY missed_count DESC, MAX(psch.schedule_date) DESC, u.name ASC
+      `,
+      [weekStart, queryEnd]
+    );
+
+    const items = result.rows.map((row) => ({
+      studentId: row.student_id,
+      studentName: row.student_name,
+      studentInitials: row.student_initials,
+      nim: row.nim,
+      missedCount: Number(row.missed_count) || 0,
+      missedDates: row.missed_dates || [],
+      taskNames: row.task_names || [],
+      lastMissedDate: row.last_missed_date,
+      status: "Belum Submit"
+    }));
+
+    return res.json({
+      weekStart,
+      weekEnd,
+      resetDay: "Minggu",
+      items
     });
   })
 );
