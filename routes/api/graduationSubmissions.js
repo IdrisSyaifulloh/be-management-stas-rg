@@ -1,6 +1,7 @@
 const express = require("express");
 const crypto = require("crypto");
 const asyncHandler = require("../../utils/asyncHandler");
+const { createNotification } = require("../../utils/notificationService");
 const { pool, query } = require("../../db/pool");
 const {
   ensureGraduationSubmissionsTables,
@@ -19,9 +20,46 @@ const COMMON_FIELD_LABELS = Object.freeze({
   demoVideoUrl: "Link Video Demo Project"
 });
 
+async function notifyOperatorsGraduationSubmission({ student, projectRows, senderUserId }) {
+  const operatorsResult = await query(
+    "SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE"
+  );
+
+  if (operatorsResult.rowCount === 0) return;
+
+  const studentName = student?.name || student?.nim || "Mahasiswa";
+  const projectNames = (projectRows || [])
+    .map((item) => item.projectTitle || item.projectId)
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(", ");
+  const suffix = projectNames ? ` untuk ${projectNames}` : "";
+
+  await Promise.all(
+    operatorsResult.rows.map((row) =>
+      createNotification({
+        recipientUserId: row.id,
+        senderUserId,
+        type: "kelulusan",
+        title: "Berkas Kelulusan Baru",
+        body: `${studentName} mengirim form berkas kelulusan${suffix}.`,
+        eventId: "graduation_submission"
+      }).catch(() => null)
+    )
+  );
+}
+
 function requireMahasiswa(req, res) {
   if (req.authUser?.role !== "mahasiswa") {
     res.status(403).json({ message: "Akses hanya untuk mahasiswa." });
+    return false;
+  }
+  return true;
+}
+
+function requireOperator(req, res) {
+  if (req.authUser?.role !== "operator") {
+    res.status(403).json({ message: "Akses hanya untuk admin/operator." });
     return false;
   }
   return true;
@@ -177,10 +215,57 @@ function buildProjectResponse({ student, submission, activeProjects, savedProjec
   };
 }
 
+function mapOperatorSubmissionRow(row) {
+  const submission = mapSubmissionRow(row);
+
+  return {
+    ...submission,
+    reviewedByName: row.reviewed_by_name || null,
+    reviewed_by_name: row.reviewed_by_name || null,
+    projectCount: Number(row.project_count || 0),
+    project_count: Number(row.project_count || 0),
+    projectSummary: row.project_summary || "",
+    project_summary: row.project_summary || "",
+    student: {
+      id: row.student_id,
+      userId: row.user_id,
+      user_id: row.user_id,
+      nim: row.nim,
+      name: row.student_name,
+      initials: row.student_initials,
+      status: row.student_status,
+      tipe: row.student_tipe
+    }
+  };
+}
+
 function getPayloadProjectValue(project, key) {
   const snakeKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
   return project?.[key] ?? project?.[snakeKey] ?? "";
 }
+
+const graduationSubmissionListSelect = `
+  SELECT gs.*,
+         s.nim,
+         s.status AS student_status,
+         s.tipe AS student_tipe,
+         u.name AS student_name,
+         u.initials AS student_initials,
+         ru.name AS reviewed_by_name,
+         COALESCE(gp.project_count, 0)::int AS project_count,
+         COALESCE(gp.project_summary, '') AS project_summary
+  FROM graduation_submissions gs
+  JOIN students s ON s.id = gs.student_id
+  JOIN users u ON u.id = gs.user_id
+  LEFT JOIN users ru ON ru.id = gs.reviewed_by
+  LEFT JOIN (
+    SELECT submission_id,
+           COUNT(*)::int AS project_count,
+           STRING_AGG(COALESCE(project_title, project_id), ', ' ORDER BY COALESCE(project_title, project_id)) AS project_summary
+    FROM graduation_submission_projects
+    GROUP BY submission_id
+  ) gp ON gp.submission_id = gs.id
+`;
 
 function validateSubmissionProjects(payloadProjects, expectedProjects) {
   if (!Array.isArray(payloadProjects)) {
@@ -237,6 +322,40 @@ function validateSubmissionProjects(payloadProjects, expectedProjects) {
   return rows;
 }
 
+router.get("/", asyncHandler(async (req, res) => {
+  if (!requireOperator(req, res)) return;
+
+  await ensureGraduationSubmissionsTables();
+
+  const clauses = [];
+  const params = [];
+  const status = String(req.query.status || "").trim();
+  const search = String(req.query.q || req.query.search || "").trim();
+
+  if (status && status !== "Semua") {
+    params.push(status);
+    clauses.push(`gs.status = $${params.length}`);
+  }
+
+  if (search) {
+    params.push(`%${search}%`);
+    clauses.push(`(u.name ILIKE $${params.length} OR s.nim ILIKE $${params.length} OR COALESCE(gp.project_summary, '') ILIKE $${params.length})`);
+  }
+
+  const whereClause = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const result = await query(
+    `
+    ${graduationSubmissionListSelect}
+    ${whereClause}
+    ORDER BY gs.submitted_at DESC NULLS LAST, gs.updated_at DESC
+    LIMIT 300
+    `,
+    params
+  );
+
+  res.json(result.rows.map(mapOperatorSubmissionRow));
+}));
+
 router.get(
   "/me",
   asyncHandler(async (req, res) => {
@@ -262,6 +381,41 @@ router.get(
     }));
   })
 );
+
+router.get("/:id", asyncHandler(async (req, res) => {
+  if (!requireOperator(req, res)) return;
+
+  await ensureGraduationSubmissionsTables();
+
+  const submissionId = String(req.params.id || "").trim();
+  const result = await query(
+    `
+    ${graduationSubmissionListSelect}
+    WHERE gs.id = $1
+    LIMIT 1
+    `,
+    [submissionId]
+  );
+
+  if (result.rowCount === 0) {
+    return res.status(404).json({ message: "Submit berkas kelulusan tidak ditemukan." });
+  }
+
+  const projectsResult = await query(
+    `
+    SELECT *
+    FROM graduation_submission_projects
+    WHERE submission_id = $1
+    ORDER BY project_title ASC, project_id ASC
+    `,
+    [submissionId]
+  );
+
+  res.json({
+    ...mapOperatorSubmissionRow(result.rows[0]),
+    projects: projectsResult.rows.map(mapSubmissionProjectRow)
+  });
+}));
 
 router.post(
   "/me",
@@ -410,6 +564,12 @@ router.post(
     }
     const refreshedStudent = await getStudentByUserId(req.authUser.id);
     const refreshedSaved = await getSavedSubmission(student.id);
+
+    await notifyOperatorsGraduationSubmission({
+      student: refreshedStudent || { ...student, status: "Alumni" },
+      projectRows,
+      senderUserId: req.authUser.id
+    }).catch(() => null);
 
     res.status(201).json({
       message: "Berkas kelulusan berhasil dikirim. Status Anda sekarang Alumni dan akan diperiksa admin dalam 2-3 hari kerja.",
