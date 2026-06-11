@@ -1,4 +1,4 @@
-BEGIN;
+﻿BEGIN;
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS graduation_submissions (
   reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   reviewed_at TIMESTAMPTZ,
   review_note TEXT,
+  graduation_allowed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  graduation_allowed_at TIMESTAMPTZ,
+  graduation_completed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  graduation_completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (student_id)
@@ -94,6 +98,7 @@ CREATE TABLE IF NOT EXISTS graduation_submission_projects (
   deployed_url TEXT,
   dataset_model_url TEXT,
   design_documentation_url TEXT,
+  field_reviews JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (submission_id, project_id)
@@ -622,3 +627,5 @@ CREATE INDEX IF NOT EXISTS idx_jwt_sessions_user_active ON jwt_sessions(user_id,
 CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_at);
 
 COMMIT;
+
+

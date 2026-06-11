@@ -1,4 +1,4 @@
-const { query } = require("../db/pool");
+﻿const { query } = require("../db/pool");
 
 const COMMON_GRADUATION_FIELDS = Object.freeze([
   "reportUrl",
@@ -50,6 +50,10 @@ async function ensureGraduationSubmissionsTables() {
           reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           reviewed_at TIMESTAMPTZ,
           review_note TEXT,
+          graduation_allowed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          graduation_allowed_at TIMESTAMPTZ,
+          graduation_completed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          graduation_completed_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE (student_id)
@@ -70,6 +74,7 @@ async function ensureGraduationSubmissionsTables() {
           deployed_url TEXT,
           dataset_model_url TEXT,
           design_documentation_url TEXT,
+          field_reviews JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE (submission_id, project_id)
@@ -85,6 +90,10 @@ async function ensureGraduationSubmissionsTables() {
           ADD COLUMN IF NOT EXISTS reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
           ADD COLUMN IF NOT EXISTS review_note TEXT,
+          ADD COLUMN IF NOT EXISTS graduation_allowed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS graduation_allowed_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS graduation_completed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS graduation_completed_at TIMESTAMPTZ,
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
@@ -102,6 +111,7 @@ async function ensureGraduationSubmissionsTables() {
           ADD COLUMN IF NOT EXISTS deployed_url TEXT,
           ADD COLUMN IF NOT EXISTS dataset_model_url TEXT,
           ADD COLUMN IF NOT EXISTS design_documentation_url TEXT,
+          ADD COLUMN IF NOT EXISTS field_reviews JSONB NOT NULL DEFAULT '{}'::jsonb,
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
       `);
@@ -193,6 +203,14 @@ function mapSubmissionRow(row) {
     reviewed_at: row.reviewed_at,
     reviewNote: row.review_note,
     review_note: row.review_note,
+    graduationAllowedBy: row.graduation_allowed_by,
+    graduation_allowed_by: row.graduation_allowed_by,
+    graduationAllowedAt: row.graduation_allowed_at,
+    graduation_allowed_at: row.graduation_allowed_at,
+    graduationCompletedBy: row.graduation_completed_by,
+    graduation_completed_by: row.graduation_completed_by,
+    graduationCompletedAt: row.graduation_completed_at,
+    graduation_completed_at: row.graduation_completed_at,
     createdAt: row.created_at,
     created_at: row.created_at,
     updatedAt: row.updated_at,
@@ -200,8 +218,14 @@ function mapSubmissionRow(row) {
   };
 }
 
+function normalizeFieldReviews(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+
 function mapSubmissionProjectRow(row) {
   const specialFields = getRequiredSpecialFieldsForRole(row.position_label);
+  const fieldReviews = normalizeFieldReviews(row.field_reviews);
 
   return {
     id: row.id,
@@ -231,6 +255,8 @@ function mapSubmissionProjectRow(row) {
     dataset_model_url: row.dataset_model_url || "",
     designDocumentationUrl: row.design_documentation_url || "",
     design_documentation_url: row.design_documentation_url || "",
+    fieldReviews,
+    field_reviews: fieldReviews,
     requiredSpecialFields: specialFields,
     required_special_fields: specialFields
   };
@@ -242,6 +268,9 @@ module.exports = {
   ensureGraduationSubmissionsTables,
   getRequiredSpecialFieldsForRole,
   assertHttpUrl,
+  normalizeFieldReviews,
   mapSubmissionRow,
   mapSubmissionProjectRow
 };
+
+
