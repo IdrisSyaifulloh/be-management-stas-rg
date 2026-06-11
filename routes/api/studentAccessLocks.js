@@ -6,7 +6,6 @@ const {
   listAccessLocks,
   mapAccessLockRow,
   createStudentAccessLocks,
-  ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
   unlockAccessLock
 } = require("../../utils/studentAccessLocks");
@@ -28,6 +27,8 @@ router.get(
     if (!lock) {
       return res.json({
         locked: false,
+        active: false,
+        status: "UNLOCKED",
         reason: null,
         reasonLabel: null,
         reasonDetail: null,
@@ -74,11 +75,10 @@ router.post(
       .trim()
       .slice(0, 10);
 
-    if (
-      reason !== ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID &&
-      reason !== ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
-    ) {
-      return res.status(400).json({ message: "reason tidak didukung untuk endpoint ini." });
+    if (reason !== ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING) {
+      return res.status(400).json({
+        message: "reason tidak didukung untuk endpoint ini. PICKET_SUBMISSION_INVALID hanya dibuat lewat review submission Bermasalah."
+      });
     }
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {

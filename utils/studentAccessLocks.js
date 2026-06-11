@@ -176,7 +176,17 @@ async function createStudentAccessLocks({ studentIds, date, reason }) {
           AND existing.locked = TRUE
           AND existing.status = 'LOCKED'
       )
-      ON CONFLICT (student_id, lock_date, reason) DO NOTHING
+      ON CONFLICT (student_id, lock_date, reason)
+      DO UPDATE SET status = 'LOCKED',
+                    locked = TRUE,
+                    active = TRUE,
+                    locked_at = NOW(),
+                    unlocked_at = NULL,
+                    unlocked_by = NULL,
+                    updated_at = NOW()
+      WHERE student_access_locks.active = FALSE
+         OR student_access_locks.locked = FALSE
+         OR student_access_locks.status <> 'LOCKED'
       RETURNING id
       `,
       [id, studentId, date, reason]
@@ -303,6 +313,42 @@ async function createPicketSubmissionMissingLocks({ studentIds, date }) {
     date,
     reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
   });
+}
+
+async function deactivateAccessLocksForStudentDateReason({
+  studentId,
+  date,
+  reason,
+  unlockedBy = null
+} = {}) {
+  await ensureStudentAccessLockTable();
+  const normalizedDate = normalizeHolidayDate(date);
+  const normalizedStudentId = String(studentId || "").trim();
+  const normalizedReason = String(reason || "").trim();
+
+  if (!normalizedStudentId || !normalizedDate || !normalizedReason) return [];
+
+  const result = await query(
+    `
+    UPDATE student_access_locks
+    SET status = 'UNLOCKED',
+        locked = FALSE,
+        active = FALSE,
+        unlocked_at = COALESCE(unlocked_at, NOW()),
+        unlocked_by = COALESCE($4, unlocked_by),
+        updated_at = NOW()
+    WHERE student_id = $1
+      AND lock_date = $2::date
+      AND reason = $3
+      AND active = TRUE
+      AND locked = TRUE
+      AND status = 'LOCKED'
+    RETURNING id
+    `,
+    [normalizedStudentId, normalizedDate, normalizedReason, unlockedBy || null]
+  );
+
+  return result.rows.map((row) => row.id);
 }
 
 async function createOverduePicketSubmissionMissingLocksForStudent(studentId, referenceDate = getJakartaDateIso()) {
@@ -485,6 +531,8 @@ async function studentAccessLockMiddleware(req, res, next) {
     path.startsWith("/api/v1/profile") ||
     path.startsWith("/api/user-ui-state") ||
     path.startsWith("/api/v1/user-ui-state") ||
+    (method === "GET" && (path === "/api/picket/today" || path === "/api/v1/picket/today")) ||
+    (method === "POST" && (path === "/api/picket/submissions" || path === "/api/v1/picket/submissions")) ||
     (method === "GET" && (path === "/api/student-access-locks/me" || path === "/api/v1/student-access-locks/me"));
 
   if (allowed) return next();
@@ -518,6 +566,7 @@ module.exports = {
   ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
   createCheckoutMissing22Locks,
   createAttendanceAbsentLocks,
+  deactivateAccessLocksForStudentDateReason,
   createOverduePicketSubmissionMissingLocksForStudent,
   createPicketSubmissionInvalidLocks,
   createPicketSubmissionMissingLocks,

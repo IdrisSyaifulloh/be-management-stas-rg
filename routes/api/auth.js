@@ -15,10 +15,56 @@ const {
 
 const router = express.Router();
 
+const INACTIVE_ACCOUNT_MESSAGE = "Akun Anda tidak aktif. Silakan hubungi administrator.";
+
 const loginSchema = z.object({
-  identifier: z.string().min(1).max(160),
-  password: z.string().min(6).max(200)
+  identifier: z.preprocess(
+    (value) => (value == null ? undefined : value),
+    z.string().trim().min(1).max(160)
+  ).optional(),
+  email: z.preprocess(
+    (value) => (value == null ? undefined : value),
+    z.string().trim().min(1).max(160)
+  ).optional(),
+  password: z.string().min(1).max(200)
+}).superRefine((value, ctx) => {
+  if (!value.identifier && !value.email) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["email"],
+      message: "Email wajib diisi"
+    });
+  }
 });
+
+function sendLoginError(res, statusCode, message, extra = {}) {
+  return res.status(statusCode).json({
+    status: "error",
+    message,
+    ...extra
+  });
+}
+
+function formatLoginValidationErrors(error) {
+  const errors = {};
+
+  for (const issue of error.issues || []) {
+    const field = issue.path[0] === "identifier" ? "email" : issue.path[0];
+    if (!field) continue;
+
+    if (!errors[field]) errors[field] = [];
+
+    if (field === "password") {
+      errors[field].push(issue.code === "too_big" ? "Password terlalu panjang" : "Password wajib diisi");
+    } else if (field === "email") {
+      errors[field].push(issue.code === "too_big" ? "Email terlalu panjang" : "Email wajib diisi");
+    } else {
+      errors[field].push(issue.message || "Input tidak valid");
+    }
+  }
+
+  return errors;
+}
 
 function clearAuthCookies(res) {
   const cookieOptions = getAuthCookieOptions();
@@ -39,10 +85,14 @@ router.post(
   asyncHandler(async (req, res) => {
     const validation = loginSchema.safeParse(req.body);
     if (!validation.success) {
-      return res.status(400).json({ message: "Input tidak valid." });
+      return res.status(400).json({
+        status: "error",
+        errors: formatLoginValidationErrors(validation.error)
+      });
     }
 
-    const { identifier, password } = validation.data;
+    const { password } = validation.data;
+    const identifier = validation.data.identifier || validation.data.email;
 
     const result = await query(
       `
@@ -59,7 +109,7 @@ router.post(
     );
 
     if (result.rowCount === 0) {
-      return res.status(401).json({ message: "Identifier atau password salah." });
+      return sendLoginError(res, 401, "Identifier atau password salah.");
     }
 
     const user = result.rows[0];
@@ -69,20 +119,19 @@ router.post(
       const daysSinceWithdrawal = Math.floor((now - withdrawalDate) / (1000 * 60 * 60 * 24));
 
       if (daysSinceWithdrawal < 30) {
-        return res.status(403).json({
-          message: "Akun Anda dalam status Temporary HOLD karena telah mengundurkan diri. Akun akan dihapus setelah 30 hari.",
+        return sendLoginError(res, 403, "Akun Anda dalam status Temporary HOLD karena telah mengundurkan diri. Akun akan dihapus setelah 30 hari.", {
           days_remaining: 30 - daysSinceWithdrawal
         });
       }
     }
 
     if (user.is_active === false) {
-      return res.status(403).json({ message: "Akun Anda tidak aktif. Hubungi administrator untuk bantuan." });
+      return sendLoginError(res, 403, INACTIVE_ACCOUNT_MESSAGE);
     }
 
     const validPassword = user.password_hash ? await bcrypt.compare(password, user.password_hash) : false;
     if (!validPassword) {
-      return res.status(401).json({ message: "Identifier atau password salah." });
+      return sendLoginError(res, 401, "Identifier atau password salah.");
     }
 
     const sessionId = generateSessionId();

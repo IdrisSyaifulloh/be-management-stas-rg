@@ -33,6 +33,14 @@ const {
 
 const router = express.Router();
 
+function scheduleResponse(item) {
+  const schedule = item?.schedule || item;
+  const assignment = item?.assignment || item;
+  const response = { schedule, assignment };
+  if (item?.task) response.task = item.task;
+  return response;
+}
+
 router.use((req, res, next) => {
   if (!extractRole(req)) {
     return res.status(403).json({ message: "Akses piket membutuhkan autentikasi." });
@@ -203,7 +211,7 @@ router.post(
       createdBy: req.authUser?.id || null,
       updatedBy: req.authUser?.id || null
     });
-    return res.status(201).json(item);
+    return res.status(201).json(scheduleResponse(item));
   })
 );
 
@@ -230,7 +238,7 @@ router.patch(
       updatedBy: req.authUser?.id || null
     });
     if (!item) return res.status(404).json({ message: "Jadwal piket tidak ditemukan." });
-    return res.json(item);
+    return res.json(scheduleResponse(item));
   })
 );
 

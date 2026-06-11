@@ -6,7 +6,9 @@ const { getJakartaDateIso } = require("./attendanceHistory");
 const { resolveStudentId, resolveStudentRecord } = require("./studentResolver");
 const {
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
-  createPicketSubmissionInvalidLocks
+  ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
+  createPicketSubmissionInvalidLocks,
+  deactivateAccessLocksForStudentDateReason
 } = require("./studentAccessLocks");
 
 const PICKET_UPLOAD_DIR = path.join(__dirname, "../public/uploads/picket");
@@ -808,6 +810,76 @@ async function ensureTaskCanBeScheduled(taskId) {
   return taskId;
 }
 
+function getManualTaskName(payload = {}) {
+  if (Object.prototype.hasOwnProperty.call(payload, "taskName")) return String(payload.taskName || "").trim();
+  if (Object.prototype.hasOwnProperty.call(payload, "manualTaskName")) return String(payload.manualTaskName || "").trim();
+  if (Object.prototype.hasOwnProperty.call(payload, "task_name")) return String(payload.task_name || "").trim();
+  if (Object.prototype.hasOwnProperty.call(payload, "manual_task_name")) return String(payload.manual_task_name || "").trim();
+  return null;
+}
+
+function getManualTaskDescription(payload = {}) {
+  const value = payload.taskDescription ?? payload.task_description ?? payload.manualTaskDescription ?? payload.manual_task_description;
+  const text = value == null ? "" : String(value).trim();
+  return text || null;
+}
+
+async function createInlinePicketTask(payload = {}) {
+  const taskName = getManualTaskName(payload);
+  if (taskName === null) return null;
+  if (!taskName) {
+    const error = new Error("taskName/manualTaskName wajib diisi saat taskId kosong.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return createPicketTask({
+    name: taskName,
+    description: getManualTaskDescription(payload),
+    active: true
+  });
+}
+
+function createDuplicatePicketScheduleError(scheduleDate, studentId) {
+  const error = new Error(`Jadwal piket untuk mahasiswa ${studentId} pada tanggal ${scheduleDate} sudah ada.`);
+  error.statusCode = 409;
+  return error;
+}
+
+async function ensureNoDuplicatePicketSchedule(scheduleDate, studentId, excludeId = null) {
+  const result = await query(
+    `
+    SELECT id
+    FROM picket_schedules
+    WHERE schedule_date = $1::date
+      AND student_id = $2
+      AND ($3::text IS NULL OR id <> $3)
+    LIMIT 1
+    `,
+    [scheduleDate, studentId, excludeId]
+  );
+  if (result.rowCount > 0) {
+    throw createDuplicatePicketScheduleError(scheduleDate, studentId);
+  }
+}
+
+function rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId) {
+  const constraint = String(error?.constraint || "");
+  const detail = String(error?.detail || "");
+  const isScheduleStudentDuplicate =
+    error?.code === "23505" &&
+    (
+      constraint === "picket_schedules_schedule_date_student_id_key" ||
+      constraint.includes("schedule_date_student_id") ||
+      detail.includes("(schedule_date, student_id)")
+    );
+
+  if (isScheduleStudentDuplicate) {
+    throw createDuplicatePicketScheduleError(scheduleDate, studentId);
+  }
+  throw error;
+}
+
 function getScheduleId(payload = {}) {
   return String(payload.scheduleId || payload.schedule_id || payload.assignmentId || payload.assignment_id || "").trim();
 }
@@ -891,39 +963,59 @@ async function createPicketSchedule(payload = {}) {
   await ensurePicketTables();
   const scheduleDate = normalizeIsoDate(payload.scheduleDate || payload.schedule_date || payload.date, getJakartaDateIso());
   const studentId = await resolveStudentId(payload.studentId || payload.student_id);
-  const taskId = String(payload.taskId || payload.task_id || "").trim();
+  let taskId = String(payload.taskId || payload.task_id || "").trim();
   const status = String(payload.status || "Ditugaskan").trim() || "Ditugaskan";
-  if (!studentId || !taskId) {
-    const error = new Error("scheduleDate/date, studentId, dan taskId wajib diisi.");
+  if (!studentId) {
+    const error = new Error("scheduleDate/date dan studentId wajib diisi.");
     error.statusCode = 400;
     throw error;
   }
   await ensureStudentCanBeScheduled(studentId);
+  await ensureNoDuplicatePicketSchedule(scheduleDate, studentId);
+
+  let createdTask = null;
+  if (!taskId) {
+    createdTask = await createInlinePicketTask(payload);
+    taskId = createdTask?.id || "";
+  }
+  if (!taskId) {
+    const error = new Error("taskId wajib diisi atau kirim taskName/manualTaskName untuk membuat tugas manual.");
+    error.statusCode = 400;
+    throw error;
+  }
   await ensureTaskCanBeScheduled(taskId);
 
   const id = buildId("PKT-SCH");
   const dayId = getJakartaDayOfWeek(scheduleDate);
-  const result = await query(
-    `
-    INSERT INTO picket_schedules (
-      id, schedule_date, day_id, student_id, task_id, status, notes,
-      generated_by, created_by, updated_by
-    )
-    VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $8, $8)
-    RETURNING id
-    `,
-    [
-      id,
-      scheduleDate,
-      dayId,
-      studentId,
-      taskId,
-      status,
-      payload.notes == null ? null : String(payload.notes),
-      payload.createdBy || payload.created_by || payload.updatedBy || payload.updated_by || null
-    ]
-  );
-  return getPicketScheduleById(result.rows[0].id);
+  let result;
+  try {
+    result = await query(
+      `
+      INSERT INTO picket_schedules (
+        id, schedule_date, day_id, student_id, task_id, status, notes,
+        generated_by, created_by, updated_by
+      )
+      VALUES ($1, $2::date, $3, $4, $5, $6, $7, NULL, $8, $8)
+      RETURNING id
+      `,
+      [
+        id,
+        scheduleDate,
+        dayId,
+        studentId,
+        taskId,
+        status,
+        payload.notes == null ? null : String(payload.notes),
+        payload.createdBy || payload.created_by || payload.updatedBy || payload.updated_by || null
+      ]
+    );
+  } catch (error) {
+    rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId);
+  }
+  const schedule = await getPicketScheduleById(result.rows[0].id);
+  return createdTask
+    ? { schedule, assignment: schedule, task: createdTask }
+    : schedule;
 }
 
 async function updatePicketSchedule(id, payload = {}) {
@@ -939,9 +1031,13 @@ async function updatePicketSchedule(id, payload = {}) {
     : current.studentId;
   const hasTaskPayload = Object.prototype.hasOwnProperty.call(payload, "taskId") ||
     Object.prototype.hasOwnProperty.call(payload, "task_id");
-  const taskId = hasTaskPayload
+  let taskId = hasTaskPayload
     ? String(payload.taskId ?? payload.task_id ?? "").trim()
     : current.taskId;
+  const hasManualTaskPayload = getManualTaskName(payload) !== null;
+  if (hasManualTaskPayload && (!hasTaskPayload || !taskId)) {
+    taskId = "";
+  }
   const status = payload.status == null ? current.status : String(payload.status).trim();
 
   if (!studentId) {
@@ -950,35 +1046,56 @@ async function updatePicketSchedule(id, payload = {}) {
     throw error;
   }
   await ensureStudentCanBeScheduled(studentId);
+  await ensureNoDuplicatePicketSchedule(scheduleDate, studentId, id);
+
+  let createdTask = null;
+  if (hasTaskPayload && !taskId && !hasManualTaskPayload) {
+    const error = new Error("taskId wajib diisi atau kirim taskName/manualTaskName untuk membuat tugas manual.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!taskId) {
+    createdTask = await createInlinePicketTask(payload);
+    taskId = createdTask?.id || "";
+  }
   await ensureTaskCanBeScheduled(taskId);
 
-  const result = await query(
-    `
-    UPDATE picket_schedules
-    SET schedule_date = $2::date,
-        day_id = $3,
-        student_id = $4,
-        task_id = $5,
-        status = $6,
-        notes = CASE WHEN $7::boolean THEN $8 ELSE notes END,
-        updated_by = $9,
-        updated_at = NOW()
-    WHERE id = $1
-    RETURNING id
-    `,
-    [
-      id,
-      scheduleDate,
-      getJakartaDayOfWeek(scheduleDate),
-      studentId,
-      taskId || null,
-      status || "Ditugaskan",
-      Object.prototype.hasOwnProperty.call(payload, "notes"),
-      payload.notes == null ? null : String(payload.notes),
-      payload.updatedBy || payload.updated_by || null
-    ]
-  );
-  return result.rows[0] ? getPicketScheduleById(result.rows[0].id) : null;
+  let result;
+  try {
+    result = await query(
+      `
+      UPDATE picket_schedules
+      SET schedule_date = $2::date,
+          day_id = $3,
+          student_id = $4,
+          task_id = $5,
+          status = $6,
+          notes = CASE WHEN $7::boolean THEN $8 ELSE notes END,
+          updated_by = $9,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING id
+      `,
+      [
+        id,
+        scheduleDate,
+        getJakartaDayOfWeek(scheduleDate),
+        studentId,
+        taskId || null,
+        status || "Ditugaskan",
+        Object.prototype.hasOwnProperty.call(payload, "notes"),
+        payload.notes == null ? null : String(payload.notes),
+        payload.updatedBy || payload.updated_by || null
+      ]
+    );
+  } catch (error) {
+    rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId);
+  }
+  if (!result.rows[0]) return null;
+  const schedule = await getPicketScheduleById(result.rows[0].id);
+  return createdTask
+    ? { schedule, assignment: schedule, task: createdTask }
+    : schedule;
 }
 
 async function deletePicketSchedule(id) {
@@ -1516,18 +1633,22 @@ async function listSubmissions({ date = null, studentId = null } = {}) {
 async function getPicketOverview(date) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  const sync = await reconcilePicketAssignmentsForDate({ date: targetDate });
-  const [submissions, leaveRequests] = await Promise.all([
+  const [assignments, submissions, leaveRequests] = await Promise.all([
+    fetchAssignmentsByDate(targetDate),
     listSubmissions({ date: targetDate }),
     listPicketLeaveRequests({ date: targetDate })
   ]);
   return {
     date: targetDate,
-    schedules: sync.assignments,
-    assignments: sync.assignments,
+    schedules: assignments,
+    assignments,
     submissions,
     leaveRequests,
-    sync
+    sync: {
+      date: targetDate,
+      skipped: true,
+      reason: "overview_read_only"
+    }
   };
 }
 
@@ -1695,7 +1816,23 @@ async function createPicketSubmission(payload = {}) {
       payload.source == null ? null : String(payload.source)
     ]
   );
-  return mapSubmission(result.rows[0]);
+  const submission = mapSubmission(result.rows[0]);
+  await deactivateAccessLocksForStudentDateReason({
+    studentId,
+    date,
+    reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+  });
+
+  const assignment = await getPicketScheduleById(scheduleId);
+  return {
+    ...submission,
+    submission,
+    assignment,
+    schedule: assignment,
+    submitted: assignment?.submitted === true,
+    submissionStatus: assignment?.submissionStatus || submission.status,
+    submission_status: assignment?.submission_status || submission.status
+  };
 }
 
 async function reviewPicketSubmission(id, payload = {}) {
@@ -1729,6 +1866,13 @@ async function reviewPicketSubmission(id, payload = {}) {
       date: submission.date
     });
     submission.accessLockReason = ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID;
+  } else if (status === "Valid") {
+    await deactivateAccessLocksForStudentDateReason({
+      studentId: submission.studentId,
+      date: submission.date,
+      reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+      unlockedBy: reviewedBy
+    });
   }
 
   return submission;

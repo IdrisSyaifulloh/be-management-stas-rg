@@ -19,6 +19,7 @@ var { revokeJwtSession, verifyJwtSession, extendJwtSessionIfNeeded, JWT_SESSION_
 var { getAuthCookieOptions } = require("./utils/authCookieOptions");
 
 var envValidationResult = validateEnv();
+var INACTIVE_ACCOUNT_MESSAGE = "Akun Anda tidak aktif. Silakan hubungi administrator.";
 
 if (!envValidationResult.isValid) {
   throw new Error(
@@ -102,9 +103,9 @@ var loginRateLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit." },
+  message: { status: "error", message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit." },
   keyGenerator: function (req) {
-    return rateLimit.ipKeyGenerator(req.ip) + ":" + String(req.body && req.body.identifier || "").slice(0, 80);
+    return rateLimit.ipKeyGenerator(req.ip) + ":" + String(req.body && (req.body.identifier || req.body.email) || "").slice(0, 80);
   }
 });
 
@@ -180,7 +181,8 @@ app.use(async function (req, res, next) {
         clearAuthCookieResponse(res);
 
         return res.status(403).json({
-          message: "Akun Anda tidak aktif. Hubungi administrator untuk bantuan."
+          status: "error",
+          message: INACTIVE_ACCOUNT_MESSAGE
         });
       }
 
