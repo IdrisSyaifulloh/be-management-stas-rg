@@ -1,4 +1,4 @@
-const { query } = require("../db/pool");
+﻿const { query } = require("../db/pool");
 const { getSettingsAsync } = require("../config/systemSettingsStore");
 const { getJakartaDateIso } = require("./attendanceHistory");
 const { findNonWorkingDayForDate, getHolidayRules, normalizeHolidayDate } = require("./holidays");
@@ -153,7 +153,7 @@ function mapAccessLockRow(row) {
   };
 }
 
-async function createStudentAccessLocks({ studentIds, date, reason }) {
+async function createStudentAccessLocks({ studentIds, date, reason, reactivateUnlocked = true }) {
   await ensureStudentAccessLockTable();
   const uniqueStudentIds = [...new Set((studentIds || []).filter(Boolean))];
   const created = [];
@@ -184,19 +184,21 @@ async function createStudentAccessLocks({ studentIds, date, reason }) {
                     unlocked_at = NULL,
                     unlocked_by = NULL,
                     updated_at = NOW()
-      WHERE student_access_locks.active = FALSE
-         OR student_access_locks.locked = FALSE
-         OR student_access_locks.status <> 'LOCKED'
+      WHERE $5::boolean = TRUE
+        AND (
+          student_access_locks.active = FALSE
+          OR student_access_locks.locked = FALSE
+          OR student_access_locks.status <> 'LOCKED'
+        )
       RETURNING id
       `,
-      [id, studentId, date, reason]
+      [id, studentId, date, reason, reactivateUnlocked === true]
     );
     if (result.rowCount > 0) created.push(result.rows[0].id);
   }
 
   return created;
 }
-
 async function deactivateAttendanceAbsentLocksForDate({ date, unlockedBy = null } = {}) {
   await ensureStudentAccessLockTable();
   const normalizedDate = normalizeHolidayDate(date);
@@ -307,14 +309,14 @@ async function createPicketSubmissionInvalidLocks({ studentIds, date }) {
   });
 }
 
-async function createPicketSubmissionMissingLocks({ studentIds, date }) {
+async function createPicketSubmissionMissingLocks({ studentIds, date, reactivateUnlocked = false }) {
   return createStudentAccessLocks({
     studentIds,
     date,
-    reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+    reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
+    reactivateUnlocked
   });
 }
-
 async function deactivateAccessLocksForStudentDateReason({
   studentId,
   date,
@@ -583,3 +585,8 @@ module.exports = {
   studentAccessLockMiddleware,
   unlockAccessLock
 };
+
+
+
+
+
