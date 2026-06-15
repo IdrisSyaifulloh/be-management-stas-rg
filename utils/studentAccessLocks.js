@@ -602,7 +602,10 @@ async function studentAccessLockMiddleware(req, res, next) {
     path.startsWith("/api/v1/profile") ||
     path.startsWith("/api/user-ui-state") ||
     path.startsWith("/api/v1/user-ui-state") ||
+    (method === "GET" && (path === "/api/picket/managers/me" || path === "/api/v1/picket/managers/me")) ||
+    (method === "GET" && (path === "/api/picket/students" || path === "/api/v1/picket/students")) ||
     (method === "GET" && (path === "/api/picket/today" || path === "/api/v1/picket/today")) ||
+    (method === "GET" && (path === "/api/picket/history" || path === "/api/v1/picket/history")) ||
     (method === "POST" && (path === "/api/picket/submissions" || path === "/api/v1/picket/submissions")) ||
     (method === "GET" && (path === "/api/student-access-locks/me" || path === "/api/v1/student-access-locks/me"));
 
@@ -655,5 +658,4 @@ module.exports = {
   studentAccessLockMiddleware,
   unlockAccessLock
 };
-
 
