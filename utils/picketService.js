@@ -491,6 +491,44 @@ function mapAssignment(row) {
     submissionId: row.submission_id || null,
     submission_status: row.submission_status || null,
     submissionStatus: row.submission_status || null,
+    photo_url: row.submission_photo_url || null,
+    photoUrl: row.submission_photo_url || null,
+    file_url: row.submission_file_url || row.submission_photo_url || null,
+    fileUrl: row.submission_file_url || row.submission_photo_url || null,
+    photo_file_name: row.submission_photo_file_name || null,
+    photoFileName: row.submission_photo_file_name || null,
+    submitted_at: row.submission_submitted_at || null,
+    submittedAt: row.submission_submitted_at || null,
+    reviewed_at: row.submission_reviewed_at || null,
+    reviewedAt: row.submission_reviewed_at || null,
+    reviewed_by: row.submission_reviewed_by || null,
+    reviewedBy: row.submission_reviewed_by || null,
+    review_note: row.submission_review_note || null,
+    reviewNote: row.submission_review_note || null,
+    submission: row.submission_id
+      ? {
+          id: row.submission_id,
+          schedule_id: row.id,
+          scheduleId: row.id,
+          assignment_id: row.submission_assignment_id || row.id,
+          assignmentId: row.submission_assignment_id || row.id,
+          status: row.submission_status || null,
+          photo_url: row.submission_photo_url || null,
+          photoUrl: row.submission_photo_url || null,
+          file_url: row.submission_file_url || row.submission_photo_url || null,
+          fileUrl: row.submission_file_url || row.submission_photo_url || null,
+          photo_file_name: row.submission_photo_file_name || null,
+          photoFileName: row.submission_photo_file_name || null,
+          submitted_at: row.submission_submitted_at || null,
+          submittedAt: row.submission_submitted_at || null,
+          reviewed_at: row.submission_reviewed_at || null,
+          reviewedAt: row.submission_reviewed_at || null,
+          reviewed_by: row.submission_reviewed_by || null,
+          reviewedBy: row.submission_reviewed_by || null,
+          review_note: row.submission_review_note || null,
+          reviewNote: row.submission_review_note || null
+        }
+      : null,
     notes: row.notes || null,
     generated_by: row.generated_by || null,
     generatedBy: row.generated_by || null,
@@ -1282,7 +1320,17 @@ async function fetchAssignmentsByDate(date, executor = query) {
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
-           ps.id AS submission_id, ps.status AS submission_status
+           ps.id AS submission_id,
+           ps.schedule_id AS submission_schedule_id,
+           ps.assignment_id AS submission_assignment_id,
+           ps.status AS submission_status,
+           ps.photo_url AS submission_photo_url,
+           ps.file_url AS submission_file_url,
+           ps.photo_file_name AS submission_photo_file_name,
+           ps.submitted_at AS submission_submitted_at,
+           ps.reviewed_at AS submission_reviewed_at,
+           ps.reviewed_by AS submission_reviewed_by,
+           ps.review_note AS submission_review_note
     FROM picket_schedules pa
     JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
@@ -1716,7 +1764,17 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
-           ps.id AS submission_id, ps.status AS submission_status
+           ps.id AS submission_id,
+           ps.schedule_id AS submission_schedule_id,
+           ps.assignment_id AS submission_assignment_id,
+           ps.status AS submission_status,
+           ps.photo_url AS submission_photo_url,
+           ps.file_url AS submission_file_url,
+           ps.photo_file_name AS submission_photo_file_name,
+           ps.submitted_at AS submission_submitted_at,
+           ps.reviewed_at AS submission_reviewed_at,
+           ps.reviewed_by AS submission_reviewed_by,
+           ps.review_note AS submission_review_note
     FROM picket_schedules pa
     JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
@@ -1744,7 +1802,17 @@ async function getPicketHistory(studentIdOrUserId) {
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
-           ps.id AS submission_id, ps.status AS submission_status
+           ps.id AS submission_id,
+           ps.schedule_id AS submission_schedule_id,
+           ps.assignment_id AS submission_assignment_id,
+           ps.status AS submission_status,
+           ps.photo_url AS submission_photo_url,
+           ps.file_url AS submission_file_url,
+           ps.photo_file_name AS submission_photo_file_name,
+           ps.submitted_at AS submission_submitted_at,
+           ps.reviewed_at AS submission_reviewed_at,
+           ps.reviewed_by AS submission_reviewed_by,
+           ps.review_note AS submission_review_note
     FROM picket_schedules pa
     JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
@@ -1752,7 +1820,7 @@ async function getPicketHistory(studentIdOrUserId) {
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
     LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
     WHERE pa.student_id = $1
-    ORDER BY pa.schedule_date DESC
+    ORDER BY pa.schedule_date DESC, pa.created_at DESC, pa.id ASC
     `,
     [studentId]
   );
