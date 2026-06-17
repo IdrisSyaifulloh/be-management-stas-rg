@@ -396,17 +396,17 @@ function buildPdfTablePage({
   pageWidth,
   pageHeight,
   margins,
-  columnWidths
+  columnWidths,
+  rowFontSize,
+  cellPadding,
+  lineHeight
 }) {
   const commands = [];
   const titleFontSize = 16;
   const textFontSize = 10;
-  const rowFontSize = 9;
   const normalizedHeaderRows = Array.isArray(headerRows) && headerRows.length ? headerRows : [headers];
-  const headerRowHeight = 22;
+  const headerRowHeight = Math.max(14, rowFontSize + cellPadding * 2 + 2);
   const headerHeight = headerRowHeight * normalizedHeaderRows.length;
-  const cellPadding = 4;
-  const LINE_HEIGHT = 11;
   const usableWidth = pageWidth - margins.left - margins.right;
 
   let cursorY = pageHeight - margins.top;
@@ -468,7 +468,7 @@ function buildPdfTablePage({
         commands.push(buildPdfTextCommand({
           text: stripLineBreaks(line),
           x: currentX + cellPadding,
-          y: rowTopY - cellPadding - (rowFontSize - 1) - lineIdx * 10,
+          y: rowTopY - cellPadding - (rowFontSize - 1) - lineIdx * lineHeight,
           font: "F2",
           fontSize: rowFontSize
         }));
@@ -494,7 +494,7 @@ function buildPdfTablePage({
       const innerWidth = Math.max(8, width - cellPadding * 2);
       const lines = wrapText(cell, innerWidth, rowFontSize);
       lines.forEach((line, lineIdx) => {
-        const textY = rowTopY - cellPadding - (rowFontSize - 1) - lineIdx * LINE_HEIGHT;
+        const textY = rowTopY - cellPadding - (rowFontSize - 1) - lineIdx * lineHeight;
         if (textY >= rowBottomY + 1) {
           commands.push(buildPdfTextCommand({
             text: line,
@@ -518,13 +518,16 @@ function buildPdfTablePage({
 function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = [], columnWeights = [], headerRows = null }) {
   const pageWidth = 842;
   const pageHeight = 595;
-  const margins = { top: 36, right: 36, bottom: 30, left: 36 };
+  const columnCount = Math.max(headers.length, 1);
+  const denseTable = columnCount > 14;
+  const margins = denseTable
+    ? { top: 28, right: 18, bottom: 24, left: 18 }
+    : { top: 36, right: 36, bottom: 30, left: 36 };
 
-  // PDF wrapping constants (kept in sync with buildPdfTablePage)
-  const ROW_FONT_SIZE = 9;
-  const CELL_PADDING = 4;
-  const LINE_HEIGHT = 11;
-  const MIN_ROW_HEIGHT = 20;
+  const ROW_FONT_SIZE = Math.max(5, Math.min(9, Math.floor(120 / columnCount)));
+  const CELL_PADDING = Math.max(1.5, Math.min(4, ROW_FONT_SIZE * 0.38));
+  const LINE_HEIGHT = Math.max(6, ROW_FONT_SIZE + 2);
+  const MIN_ROW_HEIGHT = Math.max(12, ROW_FONT_SIZE + CELL_PADDING * 2 + 2);
 
   const generatedAt = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
   const headerMetadata = metadata.length ? metadata : filtersSummary;
@@ -540,7 +543,7 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
   // Height budget per page: title block + metadata lines + table header
   const titleBlockH = 22 + 16 + 8;
   const metaH = headerMetadata.length * 14;
-  const tableHeaderH = 22 * normalizedHeaderRows.length;
+  const tableHeaderH = Math.max(14, ROW_FONT_SIZE + CELL_PADDING * 2 + 2) * normalizedHeaderRows.length;
   const availableBodyH = pageHeight - margins.top - margins.bottom - titleBlockH - metaH - tableHeaderH;
 
   // Paginate by accumulated row heights instead of a fixed row count
@@ -600,7 +603,10 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
       pageWidth,
       pageHeight,
       margins,
-      columnWidths
+      columnWidths,
+      rowFontSize: ROW_FONT_SIZE,
+      cellPadding: CELL_PADDING,
+      lineHeight: LINE_HEIGHT
     });
     const contentBuffer = Buffer.from(stream, "utf8");
 
