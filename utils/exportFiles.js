@@ -436,13 +436,19 @@ function buildPdfTablePage({
     if (index > 0) {
       commands.push(`${currentX.toFixed(2)} ${headerBottomY.toFixed(2)} m ${currentX.toFixed(2)} ${headerTopY.toFixed(2)} l S`);
     }
-    commands.push(buildPdfTextCommand({
-      text: stripLineBreaks(header),
-      x: currentX + cellPadding,
-      y: headerBottomY + 7,
-      font: "F2",
-      fontSize: rowFontSize
-    }));
+    const headerLines = normalizeCell(header)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    (headerLines.length ? headerLines : [""]).slice(0, 2).forEach((line, lineIdx) => {
+      commands.push(buildPdfTextCommand({
+        text: stripLineBreaks(line),
+        x: currentX + cellPadding,
+        y: headerTopY - cellPadding - (rowFontSize - 1) - lineIdx * 10,
+        font: "F2",
+        fontSize: rowFontSize
+      }));
+    });
     currentX += width;
   });
 

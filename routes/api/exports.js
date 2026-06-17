@@ -328,6 +328,111 @@ function buildCommonPdfMetadata(request, context) {
   return metadata;
 }
 
+function parseIsoDateUtc(isoDate) {
+  const [year, month, day] = String(isoDate || "").split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function formatIsoDateUtc(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addUtcDays(date, days) {
+  const next = new Date(date.getTime());
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function getAttendanceSheetDates(startDate, endDate) {
+  const dates = [];
+  let cursor = parseIsoDateUtc(startDate);
+  const last = parseIsoDateUtc(endDate);
+
+  while (cursor <= last && dates.length < 5) {
+    const day = cursor.getUTCDay();
+    if (day >= 1 && day <= 5) {
+      dates.push(formatIsoDateUtc(cursor));
+    }
+    cursor = addUtcDays(cursor, 1);
+  }
+
+  return dates;
+}
+
+function formatAttendanceSheetTime(value) {
+  return value && value !== "-" ? String(value).replace(":", ".") : "";
+}
+
+function getAttendanceSheetTimePair(item) {
+  if (!item || ["Belum Aktif", "Akan Aktif", "Libur"].includes(item.status)) {
+    return { checkIn: "", checkOut: "", present: false };
+  }
+
+  return {
+    checkIn: formatAttendanceSheetTime(item.in),
+    checkOut: formatAttendanceSheetTime(item.out),
+    present: ["Hadir", "WFH"].includes(item.status)
+  };
+}
+
+function buildAttendanceSheetHeaders() {
+  const headers = ["NAMA"];
+  for (let day = 1; day <= 5; day += 1) {
+    headers.push(`${day} Masuk`, `${day} Keluar`);
+  }
+  headers.push("TOTAL");
+  return headers;
+}
+
+function formatAttendanceSheetHeaderDate(isoDate, fallbackIndex) {
+  if (!isoDate) return String(fallbackIndex);
+  const [, month, day] = String(isoDate).split("-");
+  return `${day}/${month}`;
+}
+
+function buildAttendanceSheetHeadersForDates(sheetDates) {
+  const headers = ["NAMA"];
+  for (let index = 0; index < 5; index += 1) {
+    const label = formatAttendanceSheetHeaderDate(sheetDates[index], index + 1);
+    headers.push(`${label}\nMasuk`, "Keluar");
+  }
+  headers.push("TOTAL");
+  return headers;
+}
+
+function getAttendanceWeekOfMonth(startDate) {
+  const date = parseIsoDateUtc(startDate);
+  return Math.max(1, Math.ceil(date.getUTCDate() / 7));
+}
+
+function getIndonesianMonthName(startDate) {
+  return parseIsoDateUtc(startDate).toLocaleDateString("id-ID", {
+    month: "long",
+    timeZone: "UTC"
+  });
+}
+
+function buildAttendanceSheetMetadata(request, context) {
+  const metadata = ["ABSENSI MINGGUAN"];
+  const date = parseIsoDateUtc(request.startDate);
+  const week = getAttendanceWeekOfMonth(request.startDate);
+  const monthName = getIndonesianMonthName(request.startDate);
+  metadata.push(`Periode: Minggu ${week} Bulan ${monthName} Tahun ${date.getUTCFullYear()}`);
+
+  if (context.project) {
+    metadata.push(`Riset: ${context.project.project_name}`);
+  }
+
+  if (context.student) {
+    metadata.push(`Mahasiswa: ${context.student.name} (${context.student.nim})`);
+  }
+
+  return metadata;
+}
+
 function sendFile(res, payload) {
   res.setHeader("Content-Type", payload.mimeType);
   res.setHeader("Content-Disposition", `attachment; filename="${payload.filename}"`);
@@ -381,26 +486,32 @@ function buildFilePayload({ definition, format, headers, rows, filtersSummary, p
 
 const EXPORT_DEFINITIONS = {
   kehadiran: {
-    title: "Rekap Kehadiran",
-    description: "Data kehadiran mahasiswa beserta status check-in dan check-out.",
+    title: "ABSENSI RISET COE STAS-RG 2025/2026",
+    description: "Absensi mingguan mahasiswa riset dengan waktu masuk dan waktu keluar.",
     fileBaseName: "kehadiran",
-    sheetName: "Kehadiran",
+    sheetName: "Absensi Mingguan",
     filters: { student: true, project: true, dateRange: true },
     buildPdfOptions(request, context) {
+      if (context.student) {
+        return {
+          metadata: buildCommonPdfMetadata(request, context),
+          columnWeights: [1.4, 1.05, 1.1, 1.2, 0.95, 0.95]
+        };
+      }
+
       return {
-        metadata: buildCommonPdfMetadata(request, context),
-        columnWeights: context.student
-          ? [1.4, 1.05, 1.1, 1.2, 0.95, 0.95]
-          : [1.8, 1.15, 1.1, 1.2, 0.95, 0.95]
+        metadata: buildAttendanceSheetMetadata(request, context),
+        columnWeights: [2.2, 0.82, 0.72, 0.82, 0.72, 0.82, 0.72, 0.82, 0.72, 0.82, 0.72, 0.75]
       };
     },
     normalizeRequest(request) {
       const range = resolveAttendanceRange(request.startDate, request.endDate);
       return { ...request, ...range };
     },
-    async getDataset(request) {
+    async getDataset(request, context) {
       const studentClauses = [];
       const params = [];
+      const singleStudentMode = Boolean(context?.student || request.studentId);
 
       if (request.studentId) {
         params.push(request.studentId);
@@ -434,7 +545,9 @@ const EXPORT_DEFINITIONS = {
 
       if (studentsResult.rowCount === 0) {
         return {
-          headers: ["Nama", "NIM", "Tanggal", "Status", "Check-in", "Check-out"],
+          headers: singleStudentMode
+            ? ["Nama", "NIM", "Tanggal", "Status", "Check-in", "Check-out"]
+            : buildAttendanceSheetHeaders(),
           rows: []
         };
       }
@@ -445,6 +558,7 @@ const EXPORT_DEFINITIONS = {
         SELECT
           ar.student_id,
           TO_CHAR(ar.attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
+          ar.status,
           ar.check_in_at,
           ar.check_out_at
         FROM attendance_records ar
@@ -488,6 +602,9 @@ const EXPORT_DEFINITIONS = {
       const settings = await getSettingsAsync();
       const attendanceRules = settings?.attendanceRules || {};
       const rows = [];
+      const sheetDates = getAttendanceSheetDates(request.startDate, request.endDate);
+      const attendanceSheetHeaders = buildAttendanceSheetHeadersForDates(sheetDates);
+
       for (const student of studentsResult.rows) {
         const { history } = buildAttendanceHistory({
           startDate: request.startDate,
@@ -499,26 +616,56 @@ const EXPORT_DEFINITIONS = {
           excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays !== false
         });
 
-        history.forEach((item) => {
-          rows.push([
-            student.name,
-            student.nim,
-            item.isoDate,
-            item.status,
-            item.in,
-            item.out
-          ]);
+        if (singleStudentMode) {
+          history.forEach((item) => {
+            rows.push([
+              student.name,
+              student.nim,
+              item.isoDate,
+              item.status,
+              item.in,
+              item.out
+            ]);
+          });
+          continue;
+        }
+
+        const historyByDate = new Map(history.map((item) => [item.isoDate, item]));
+        const row = [student.name];
+        let total = 0;
+        sheetDates.forEach((isoDate) => {
+          const { checkIn, checkOut, present } = getAttendanceSheetTimePair(historyByDate.get(isoDate));
+          if (present) total += 1;
+          row.push(checkIn, checkOut);
         });
+
+        while (row.length < 11) {
+          row.push("", "");
+        }
+
+        row.push(total);
+        rows.push(row);
       }
 
-      rows.sort((left, right) => {
-        const dateCompare = String(right[2]).localeCompare(String(left[2]));
-        if (dateCompare !== 0) return dateCompare;
-        return String(left[0]).localeCompare(String(right[0]), "id");
-      });
+      if (singleStudentMode) {
+        rows.sort((left, right) => {
+          const dateCompare = String(right[2]).localeCompare(String(left[2]));
+          if (dateCompare !== 0) return dateCompare;
+          return String(left[0]).localeCompare(String(right[0]), "id");
+        });
+
+        return {
+          title: "Rekap Kehadiran",
+          sheetName: "Kehadiran",
+          headers: ["Nama", "NIM", "Tanggal", "Status", "Check-in", "Check-out"],
+          rows
+        };
+      }
+
+      rows.sort((left, right) => String(left[0]).localeCompare(String(right[0]), "id"));
 
       return {
-        headers: ["Nama", "NIM", "Tanggal", "Status", "Check-in", "Check-out"],
+        headers: attendanceSheetHeaders,
         rows
       };
     }
@@ -1276,14 +1423,20 @@ async function handleExport(req, res, typeOverride) {
       throw createHttpError(404, buildNoDataMessage(definition, resolvedRequest, context));
     }
 
+    const outputDefinition = {
+      ...definition,
+      title: dataset.title || definition.title,
+      sheetName: dataset.sheetName || definition.sheetName
+    };
+
     const payload = buildFilePayload({
-      definition,
+      definition: outputDefinition,
       format: resolvedRequest.format,
       headers: dataset.headers,
       rows: dataset.rows,
-      filtersSummary: buildFilterSummary(definition, resolvedRequest, context),
-      pdfOptions: definition.buildPdfOptions
-        ? definition.buildPdfOptions(resolvedRequest, context)
+      filtersSummary: buildFilterSummary(outputDefinition, resolvedRequest, context),
+      pdfOptions: outputDefinition.buildPdfOptions
+        ? outputDefinition.buildPdfOptions(resolvedRequest, context)
         : {}
     });
 
