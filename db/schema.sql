@@ -140,6 +140,13 @@ CREATE TABLE IF NOT EXISTS research_projects (
   funding TEXT,
   repositori TEXT,
   attachment_link TEXT,
+  research_type TEXT CHECK (research_type IN ('Internal', 'Eksternal')),
+  agreement_type TEXT CHECK (agreement_type IN ('PKS', 'MoU', 'MoA')),
+  agreement_start_date DATE,
+  agreement_end_date DATE,
+  agreement_file_url TEXT,
+  proposal_file_url TEXT,
+  rab_file_url TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -627,5 +634,3 @@ CREATE INDEX IF NOT EXISTS idx_jwt_sessions_user_active ON jwt_sessions(user_id,
 CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_at);
 
 COMMIT;
-
-

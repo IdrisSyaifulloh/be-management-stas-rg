@@ -18,6 +18,7 @@ const router = express.Router();
 const SUPPORTED_FORMATS = ["xlsx", "csv", "pdf"];
 const PDF_MAX_ROWS = 500;
 let ensureLecturerExportColumnsPromise = null;
+let ensureResearchExportColumnsPromise = null;
 
 async function ensureLecturerExportColumns() {
   if (!ensureLecturerExportColumnsPromise) {
@@ -48,6 +49,26 @@ async function ensureLecturerExportColumns() {
   }
 
   await ensureLecturerExportColumnsPromise;
+}
+
+async function ensureResearchExportColumns() {
+  if (!ensureResearchExportColumnsPromise) {
+    ensureResearchExportColumnsPromise = query(`
+      ALTER TABLE research_projects
+      ADD COLUMN IF NOT EXISTS research_type TEXT CHECK (research_type IN ('Internal', 'Eksternal')),
+      ADD COLUMN IF NOT EXISTS agreement_type TEXT CHECK (agreement_type IN ('PKS', 'MoU', 'MoA')),
+      ADD COLUMN IF NOT EXISTS agreement_start_date DATE,
+      ADD COLUMN IF NOT EXISTS agreement_end_date DATE,
+      ADD COLUMN IF NOT EXISTS agreement_file_url TEXT,
+      ADD COLUMN IF NOT EXISTS proposal_file_url TEXT,
+      ADD COLUMN IF NOT EXISTS rab_file_url TEXT
+    `).catch((error) => {
+      ensureResearchExportColumnsPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureResearchExportColumnsPromise;
 }
 
 
@@ -579,6 +600,8 @@ const EXPORT_DEFINITIONS = {
       };
     },
     async getDataset(request, context) {
+      await ensureResearchExportColumns();
+
       const clauses = [];
       const params = [];
 
@@ -612,6 +635,13 @@ const EXPORT_DEFINITIONS = {
           COALESCE(rp.period_text, '-') AS period_text,
           COALESCE(rp.mitra, '-') AS mitra,
           COALESCE(rp.category, '-') AS category,
+          COALESCE(rp.research_type, '-') AS research_type,
+          COALESCE(rp.agreement_type, '-') AS agreement_type,
+          COALESCE(TO_CHAR(rp.agreement_start_date, 'YYYY-MM-DD'), '-') AS agreement_start_date,
+          COALESCE(TO_CHAR(rp.agreement_end_date, 'YYYY-MM-DD'), '-') AS agreement_end_date,
+          COALESCE(rp.agreement_file_url, '-') AS agreement_file_url,
+          COALESCE(rp.proposal_file_url, '-') AS proposal_file_url,
+          COALESCE(rp.rab_file_url, '-') AS rab_file_url,
           COALESCE(supervisor_u.name, '-') AS supervisor_name,
           COALESCE(member_stats.member_count, 0) AS member_count,
           COALESCE(milestone_stats.total_milestones, 0) AS total_milestones,
@@ -640,7 +670,28 @@ const EXPORT_DEFINITIONS = {
       );
 
       return {
-        headers: ["ID Riset", "Judul", "Short Title", "Status", "Progress", "Periode", "Mitra", "Kategori", "Pembimbing", "Jumlah Anggota", "Total Milestone", "Milestone Selesai", "Tanggal Dibuat"],
+        headers: [
+          "ID Riset",
+          "Judul",
+          "Short Title",
+          "Status",
+          "Progress",
+          "Periode",
+          "Mitra",
+          "Kategori",
+          "Jenis Riset",
+          "Jenis PKS/MoU/MoA",
+          "Tanggal Mulai PKS/MoU/MoA",
+          "Tanggal Selesai PKS/MoU/MoA",
+          "File PKS/MoU/MoA",
+          "File Proposal",
+          "File RAB",
+          "Pembimbing",
+          "Jumlah Anggota",
+          "Total Milestone",
+          "Milestone Selesai",
+          "Tanggal Dibuat"
+        ],
         rows: result.rows.map((row) => [
           row.id,
           row.title,
@@ -650,6 +701,13 @@ const EXPORT_DEFINITIONS = {
           row.period_text,
           row.mitra,
           row.category,
+          row.research_type,
+          row.agreement_type,
+          row.agreement_start_date,
+          row.agreement_end_date,
+          row.agreement_file_url,
+          row.proposal_file_url,
+          row.rab_file_url,
           row.supervisor_name,
           row.member_count,
           row.total_milestones,

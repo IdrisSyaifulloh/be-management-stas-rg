@@ -19,6 +19,7 @@ const { requireSafeId } = require("../../utils/securityValidation");
 const router = express.Router();
 let ensureResearchAttachmentLinkPromise = null;
 let ensureResearchMembershipPeriodPromise = null;
+let ensureResearchDocumentFieldsPromise = null;
 
 async function ensureResearchAttachmentLinkColumn() {
   if (!ensureResearchAttachmentLinkPromise) {
@@ -48,10 +49,31 @@ async function ensureResearchMembershipPeriodColumn() {
   await ensureResearchMembershipPeriodPromise;
 }
 
+async function ensureResearchDocumentFieldsColumns() {
+  if (!ensureResearchDocumentFieldsPromise) {
+    ensureResearchDocumentFieldsPromise = query(`
+      ALTER TABLE research_projects
+      ADD COLUMN IF NOT EXISTS research_type TEXT CHECK (research_type IN ('Internal', 'Eksternal')),
+      ADD COLUMN IF NOT EXISTS agreement_type TEXT CHECK (agreement_type IN ('PKS', 'MoU', 'MoA')),
+      ADD COLUMN IF NOT EXISTS agreement_start_date DATE,
+      ADD COLUMN IF NOT EXISTS agreement_end_date DATE,
+      ADD COLUMN IF NOT EXISTS agreement_file_url TEXT,
+      ADD COLUMN IF NOT EXISTS proposal_file_url TEXT,
+      ADD COLUMN IF NOT EXISTS rab_file_url TEXT
+    `).catch((error) => {
+      ensureResearchDocumentFieldsPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureResearchDocumentFieldsPromise;
+}
+
 router.use(
   asyncHandler(async (req, res, next) => {
     await ensureResearchAttachmentLinkColumn();
     await ensureResearchMembershipPeriodColumn();
+    await ensureResearchDocumentFieldsColumns();
     next();
   })
 );
@@ -95,6 +117,114 @@ function buildResearchListFilters({ search, status }, params) {
 function appendWhere(baseFilters, extraFilters) {
   const filters = [...baseFilters, ...extraFilters];
   return filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function pickBodyValue(body, camelKey, snakeKey) {
+  if (hasOwn(body, camelKey)) return body[camelKey];
+  if (snakeKey && hasOwn(body, snakeKey)) return body[snakeKey];
+  return undefined;
+}
+
+function normalizeOptionalText(value) {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+}
+
+function normalizeOptionalEnum(value, allowedValues, label) {
+  const normalized = normalizeOptionalText(value);
+  if (!normalized) return null;
+  if (!allowedValues.includes(normalized)) {
+    const error = new Error(`${label} harus salah satu dari: ${allowedValues.join(", ")}.`);
+    error.status = 400;
+    throw error;
+  }
+  return normalized;
+}
+
+function normalizeOptionalDate(value, label) {
+  const normalized = normalizeOptionalText(value);
+  if (!normalized) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const error = new Error(`${label} harus menggunakan format YYYY-MM-DD.`);
+    error.status = 400;
+    throw error;
+  }
+  return normalized;
+}
+
+function formatDateOnly(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value.slice(0, 10);
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function withResearchDocumentFields(row) {
+  if (!row) return row;
+
+  const agreementStartDate = formatDateOnly(row.agreement_start_date);
+  const agreementEndDate = formatDateOnly(row.agreement_end_date);
+
+  return {
+    ...row,
+    research_type: row.research_type ?? null,
+    researchType: row.research_type ?? null,
+    agreement_type: row.agreement_type ?? null,
+    agreementType: row.agreement_type ?? null,
+    agreement_start_date: agreementStartDate,
+    agreementStartDate,
+    agreement_end_date: agreementEndDate,
+    agreementEndDate,
+    agreement_file_url: row.agreement_file_url ?? null,
+    agreementFileUrl: row.agreement_file_url ?? null,
+    proposal_file_url: row.proposal_file_url ?? null,
+    proposalFileUrl: row.proposal_file_url ?? null,
+    rab_file_url: row.rab_file_url ?? null,
+    rabFileUrl: row.rab_file_url ?? null
+  };
+}
+
+function normalizeResearchDocumentFields(body) {
+  const fields = {
+    researchType: normalizeOptionalEnum(
+      pickBodyValue(body, "researchType", "research_type"),
+      ["Internal", "Eksternal"],
+      "Jenis riset"
+    ),
+    agreementType: normalizeOptionalEnum(
+      pickBodyValue(body, "agreementType", "agreement_type"),
+      ["PKS", "MoU", "MoA"],
+      "Jenis PKS/MoU/MoA"
+    ),
+    agreementStartDate: normalizeOptionalDate(
+      pickBodyValue(body, "agreementStartDate", "agreement_start_date"),
+      "Tanggal mulai PKS/MoU/MoA"
+    ),
+    agreementEndDate: normalizeOptionalDate(
+      pickBodyValue(body, "agreementEndDate", "agreement_end_date"),
+      "Tanggal selesai PKS/MoU/MoA"
+    ),
+    agreementFileUrl: normalizeOptionalText(pickBodyValue(body, "agreementFileUrl", "agreement_file_url")),
+    proposalFileUrl: normalizeOptionalText(pickBodyValue(body, "proposalFileUrl", "proposal_file_url")),
+    rabFileUrl: normalizeOptionalText(pickBodyValue(body, "rabFileUrl", "rab_file_url"))
+  };
+
+  if (
+    fields.agreementStartDate &&
+    fields.agreementEndDate &&
+    fields.agreementEndDate < fields.agreementStartDate
+  ) {
+    const error = new Error("Tanggal selesai PKS/MoU/MoA tidak boleh sebelum tanggal mulai.");
+    error.status = 400;
+    throw error;
+  }
+
+  return fields;
 }
 
 function resolveRequesterUserId(req) {
@@ -351,7 +481,9 @@ router.get(
     if (role === "operator") {
       result = await query(
         `
-        SELECT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text
+        SELECT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text,
+               rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date,
+               rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url
         FROM research_projects rp
         ORDER BY rp.id ASC
         LIMIT 500
@@ -360,7 +492,9 @@ router.get(
     } else if (role === "dosen") {
       result = await query(
         `
-        SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text
+        SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text,
+               rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date,
+               rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url
         FROM research_projects rp
         LEFT JOIN research_memberships rm
           ON rm.project_id = rp.id AND rm.user_id = $1 AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
@@ -375,7 +509,9 @@ router.get(
     } else {
       result = await query(
         `
-        SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text
+        SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text,
+               rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date,
+               rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url
         FROM research_projects rp
         JOIN research_memberships rm ON rm.project_id = rp.id
         WHERE rm.user_id = $1
@@ -388,7 +524,7 @@ router.get(
       );
     }
 
-    res.json(result.rows);
+    res.json(result.rows.map(withResearchDocumentFields));
   })
 );
 
@@ -423,6 +559,8 @@ router.get(
         `
         SELECT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
                rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
+               rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date, rp.agreement_file_url,
+               rp.proposal_file_url, rp.rab_file_url,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
                ${meetingCols}
         FROM research_projects rp
@@ -445,6 +583,8 @@ router.get(
         `
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
                rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
+               rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date, rp.agreement_file_url,
+               rp.proposal_file_url, rp.rab_file_url,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
                ${meetingCols}
         FROM research_projects rp
@@ -469,6 +609,8 @@ router.get(
         `
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status,
                rp.progress, rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
+               rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date, rp.agreement_file_url,
+               rp.proposal_file_url, rp.rab_file_url,
                l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
                ${meetingCols}
         FROM research_projects rp
@@ -485,7 +627,7 @@ router.get(
       );
     }
 
-    res.json(result.rows);
+    res.json(result.rows.map(withResearchDocumentFields));
   })
 );
 
@@ -1363,12 +1505,16 @@ router.post(
       return res.status(400).json({ message: "id, title, status wajib diisi." });
     }
 
+    const documentFields = normalizeResearchDocumentFields(req.body);
+
     await query(
       `
       INSERT INTO research_projects (
         id, title, short_title, supervisor_lecturer_id, period_text,
-        mitra, status, progress, category, description, funding, repositori, attachment_link
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        mitra, status, progress, category, description, funding, repositori, attachment_link,
+        research_type, agreement_type, agreement_start_date,
+        agreement_end_date, agreement_file_url, proposal_file_url, rab_file_url
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
       `,
       [
         id,
@@ -1383,7 +1529,14 @@ router.post(
         description || null,
         funding || null,
         repositori || null,
-        attachmentLink || null
+        attachmentLink || null,
+        documentFields.researchType,
+        documentFields.agreementType,
+        documentFields.agreementStartDate,
+        documentFields.agreementEndDate,
+        documentFields.agreementFileUrl,
+        documentFields.proposalFileUrl,
+        documentFields.rabFileUrl
       ]
     );
 
@@ -1414,6 +1567,8 @@ router.put(
       attachmentLink
     } = req.body;
 
+    const documentFields = normalizeResearchDocumentFields(req.body);
+
     const result = await query(
       `
       UPDATE research_projects
@@ -1429,6 +1584,13 @@ router.put(
           funding = COALESCE($11, funding),
           repositori = COALESCE($12, repositori),
           attachment_link = COALESCE($13, attachment_link),
+          research_type = COALESCE($14, research_type),
+          agreement_type = COALESCE($15, agreement_type),
+          agreement_start_date = COALESCE($16, agreement_start_date),
+          agreement_end_date = COALESCE($17, agreement_end_date),
+          agreement_file_url = COALESCE($18, agreement_file_url),
+          proposal_file_url = COALESCE($19, proposal_file_url),
+          rab_file_url = COALESCE($20, rab_file_url),
           updated_at = NOW()
       WHERE id = $1
       RETURNING id
@@ -1446,7 +1608,14 @@ router.put(
         description,
         funding,
         repositori,
-        attachmentLink !== undefined ? attachmentLink : null
+        attachmentLink !== undefined ? attachmentLink : null,
+        documentFields.researchType,
+        documentFields.agreementType,
+        documentFields.agreementStartDate,
+        documentFields.agreementEndDate,
+        documentFields.agreementFileUrl,
+        documentFields.proposalFileUrl,
+        documentFields.rabFileUrl
       ]
     );
 
