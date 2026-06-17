@@ -351,7 +351,7 @@ function getAttendanceSheetDates(startDate, endDate) {
   let cursor = parseIsoDateUtc(startDate);
   const last = parseIsoDateUtc(endDate);
 
-  while (cursor <= last && dates.length < 5) {
+  while (cursor <= last) {
     const day = cursor.getUTCDay();
     if (day >= 1 && day <= 5) {
       dates.push(formatIsoDateUtc(cursor));
@@ -393,14 +393,51 @@ function formatAttendanceSheetHeaderDate(isoDate, fallbackIndex) {
   return `${day}/${month}`;
 }
 
-function buildAttendanceSheetHeadersForDates(sheetDates) {
-  const headers = ["NAMA"];
-  for (let index = 0; index < 5; index += 1) {
-    const label = formatAttendanceSheetHeaderDate(sheetDates[index], index + 1);
-    headers.push(`${label}\nMasuk`, "Keluar");
+function buildAttendanceSheetHeaderRowsForDates(sheetDates) {
+  const dateRow = ["NAMA"];
+  const timeRow = [""];
+
+  sheetDates.forEach((isoDate, index) => {
+    dateRow.push(formatAttendanceSheetHeaderDate(isoDate, index + 1), "");
+    timeRow.push("Masuk", "Keluar");
+  });
+
+  dateRow.push("TOTAL");
+  timeRow.push("");
+
+  return [dateRow, timeRow];
+}
+
+function buildAttendanceSheetHeadersFromRows(headerRows) {
+  const [dateRow, timeRow] = headerRows;
+  return dateRow.map((value, index) => {
+    if (index === 0 || index === dateRow.length - 1) return value;
+    return [value, timeRow[index]].filter(Boolean).join(" ");
+  });
+}
+
+function buildAttendanceSheetMerges(sheetDates) {
+  const merges = ["A1:A2"];
+  sheetDates.forEach((_, index) => {
+    const startColumnIndex = 1 + index * 2;
+    const start = columnLetterForExport(startColumnIndex);
+    const end = columnLetterForExport(startColumnIndex + 1);
+    merges.push(`${start}1:${end}1`);
+  });
+  const totalColumn = columnLetterForExport(1 + sheetDates.length * 2);
+  merges.push(`${totalColumn}1:${totalColumn}2`);
+  return merges;
+}
+
+function columnLetterForExport(index) {
+  let current = index + 1;
+  let label = "";
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    current = Math.floor((current - 1) / 26);
   }
-  headers.push("TOTAL");
-  return headers;
+  return label;
 }
 
 function getAttendanceWeekOfMonth(startDate) {
@@ -441,7 +478,7 @@ function sendFile(res, payload) {
   res.send(payload.buffer);
 }
 
-function buildFilePayload({ definition, format, headers, rows, filtersSummary, pdfOptions = {} }) {
+function buildFilePayload({ definition, format, headers, rows, filtersSummary, pdfOptions = {}, headerRows = null, xlsxMerges = [] }) {
   const stamp = new Date().toISOString().slice(0, 10);
   const filenameBase = `${slugify(definition.fileBaseName || definition.title)}-${stamp}`;
 
@@ -449,7 +486,7 @@ function buildFilePayload({ definition, format, headers, rows, filtersSummary, p
     return {
       filename: `${filenameBase}.csv`,
       mimeType: CSV_MIME,
-      buffer: buildCsvBuffer(headers, rows)
+      buffer: buildCsvBuffer(headers, rows, headerRows)
     };
   }
 
@@ -461,7 +498,9 @@ function buildFilePayload({ definition, format, headers, rows, filtersSummary, p
         title: definition.title,
         sheetName: definition.sheetName || definition.title,
         headers,
-        rows
+        rows,
+        headerRows,
+        merges: xlsxMerges
       })
     };
   }
@@ -479,7 +518,8 @@ function buildFilePayload({ definition, format, headers, rows, filtersSummary, p
       rows,
       filtersSummary,
       metadata: pdfOptions.metadata,
-      columnWeights: pdfOptions.columnWeights
+      columnWeights: pdfOptions.columnWeights,
+      headerRows
     })
   };
 }
@@ -501,7 +541,11 @@ const EXPORT_DEFINITIONS = {
 
       return {
         metadata: buildAttendanceSheetMetadata(request, context),
-        columnWeights: [2.2, 0.82, 0.72, 0.82, 0.72, 0.82, 0.72, 0.82, 0.72, 0.82, 0.72, 0.75]
+        columnWeights: [
+          2.2,
+          ...getAttendanceSheetDates(request.startDate, request.endDate).flatMap(() => [0.72, 0.72]),
+          0.75
+        ]
       };
     },
     normalizeRequest(request) {
@@ -603,7 +647,9 @@ const EXPORT_DEFINITIONS = {
       const attendanceRules = settings?.attendanceRules || {};
       const rows = [];
       const sheetDates = getAttendanceSheetDates(request.startDate, request.endDate);
-      const attendanceSheetHeaders = buildAttendanceSheetHeadersForDates(sheetDates);
+      const attendanceHeaderRows = buildAttendanceSheetHeaderRowsForDates(sheetDates);
+      const attendanceSheetHeaders = buildAttendanceSheetHeadersFromRows(attendanceHeaderRows);
+      const attendanceSheetMerges = buildAttendanceSheetMerges(sheetDates);
 
       for (const student of studentsResult.rows) {
         const { history } = buildAttendanceHistory({
@@ -639,10 +685,6 @@ const EXPORT_DEFINITIONS = {
           row.push(checkIn, checkOut);
         });
 
-        while (row.length < 11) {
-          row.push("", "");
-        }
-
         row.push(total);
         rows.push(row);
       }
@@ -666,6 +708,8 @@ const EXPORT_DEFINITIONS = {
 
       return {
         headers: attendanceSheetHeaders,
+        headerRows: attendanceHeaderRows,
+        xlsxMerges: attendanceSheetMerges,
         rows
       };
     }
@@ -1437,7 +1481,9 @@ async function handleExport(req, res, typeOverride) {
       filtersSummary: buildFilterSummary(outputDefinition, resolvedRequest, context),
       pdfOptions: outputDefinition.buildPdfOptions
         ? outputDefinition.buildPdfOptions(resolvedRequest, context)
-        : {}
+        : {},
+      headerRows: dataset.headerRows || null,
+      xlsxMerges: dataset.xlsxMerges || []
     });
 
     sendFile(res, payload);
