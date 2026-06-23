@@ -362,6 +362,28 @@ function getAttendanceSheetDates(startDate, endDate) {
   return dates;
 }
 
+function getAttendanceSheetWeeks(startDate, endDate) {
+  const weeks = [];
+  let currentWeek = [];
+  let cursor = parseIsoDateUtc(startDate);
+  const last = parseIsoDateUtc(endDate);
+
+  while (cursor <= last) {
+    const day = cursor.getUTCDay();
+    if (day === 1 && currentWeek.length) {
+      weeks.push(currentWeek);
+      currentWeek = [];
+    }
+    if (day >= 1 && day <= 5) {
+      currentWeek.push(formatIsoDateUtc(cursor));
+    }
+    cursor = addUtcDays(cursor, 1);
+  }
+
+  if (currentWeek.length) weeks.push(currentWeek);
+  return weeks;
+}
+
 function formatAttendanceSheetTime(value) {
   return value && value !== "-" ? String(value).replace(":", ".") : "";
 }
@@ -397,10 +419,11 @@ function buildAttendanceSheetHeaderRowsForDates(sheetDates) {
   const dateRow = ["NAMA"];
   const timeRow = [""];
 
-  sheetDates.forEach((isoDate, index) => {
+  for (let index = 0; index < 5; index += 1) {
+    const isoDate = sheetDates[index];
     dateRow.push(formatAttendanceSheetHeaderDate(isoDate, index + 1), "");
     timeRow.push("Masuk", "Keluar");
-  });
+  }
 
   dateRow.push("TOTAL");
   timeRow.push("");
@@ -418,13 +441,13 @@ function buildAttendanceSheetHeadersFromRows(headerRows) {
 
 function buildAttendanceSheetMerges(sheetDates) {
   const merges = ["A1:A2"];
-  sheetDates.forEach((_, index) => {
+  for (let index = 0; index < 5; index += 1) {
     const startColumnIndex = 1 + index * 2;
     const start = columnLetterForExport(startColumnIndex);
     const end = columnLetterForExport(startColumnIndex + 1);
     merges.push(`${start}1:${end}1`);
-  });
-  const totalColumn = columnLetterForExport(1 + sheetDates.length * 2);
+  }
+  const totalColumn = columnLetterForExport(11);
   merges.push(`${totalColumn}1:${totalColumn}2`);
   return merges;
 }
@@ -470,6 +493,21 @@ function buildAttendanceSheetMetadata(request, context) {
   return metadata;
 }
 
+function buildAttendanceWeekMetadata(request, context, weekDates, weekIndex) {
+  const metadata = ["ABSENSI MINGGUAN"];
+  const firstDate = weekDates[0] || request.startDate;
+  const lastDate = weekDates[weekDates.length - 1] || request.endDate;
+  const date = parseIsoDateUtc(firstDate);
+  const monthName = getIndonesianMonthName(firstDate);
+  metadata.push(`Periode: Minggu ${weekIndex + 1} (${formatAttendanceSheetHeaderDate(firstDate, weekIndex + 1)} - ${formatAttendanceSheetHeaderDate(lastDate, weekIndex + 1)}) Bulan ${monthName} Tahun ${date.getUTCFullYear()}`);
+
+  if (context.project) {
+    metadata.push(`Riset: ${context.project.project_name}`);
+  }
+
+  return metadata;
+}
+
 function sendFile(res, payload) {
   res.setHeader("Content-Type", payload.mimeType);
   res.setHeader("Content-Disposition", `attachment; filename="${payload.filename}"`);
@@ -478,7 +516,7 @@ function sendFile(res, payload) {
   res.send(payload.buffer);
 }
 
-function buildFilePayload({ definition, format, headers, rows, filtersSummary, pdfOptions = {}, headerRows = null, xlsxMerges = [] }) {
+function buildFilePayload({ definition, format, headers, rows, filtersSummary, pdfOptions = {}, headerRows = null, xlsxMerges = [], pdfSections = null }) {
   const stamp = new Date().toISOString().slice(0, 10);
   const filenameBase = `${slugify(definition.fileBaseName || definition.title)}-${stamp}`;
 
@@ -505,7 +543,11 @@ function buildFilePayload({ definition, format, headers, rows, filtersSummary, p
     };
   }
 
-  if (rows.length > PDF_MAX_ROWS) {
+  const pdfRowCount = Array.isArray(pdfSections) && pdfSections.length
+    ? pdfSections.reduce((sum, section) => sum + (section.rows?.length || 0), 0)
+    : rows.length;
+
+  if (pdfRowCount > PDF_MAX_ROWS) {
     throw createHttpError(422, `Export PDF ${definition.title} dibatasi maksimal ${PDF_MAX_ROWS} baris. Gunakan CSV atau XLSX untuk data besar.`);
   }
 
@@ -519,7 +561,8 @@ function buildFilePayload({ definition, format, headers, rows, filtersSummary, p
       filtersSummary,
       metadata: pdfOptions.metadata,
       columnWeights: pdfOptions.columnWeights,
-      headerRows
+      headerRows,
+      sections: pdfSections
     })
   };
 }
@@ -646,10 +689,7 @@ const EXPORT_DEFINITIONS = {
       const settings = await getSettingsAsync();
       const attendanceRules = settings?.attendanceRules || {};
       const rows = [];
-      const sheetDates = getAttendanceSheetDates(request.startDate, request.endDate);
-      const attendanceHeaderRows = buildAttendanceSheetHeaderRowsForDates(sheetDates);
-      const attendanceSheetHeaders = buildAttendanceSheetHeadersFromRows(attendanceHeaderRows);
-      const attendanceSheetMerges = buildAttendanceSheetMerges(sheetDates);
+      const studentHistories = new Map();
 
       for (const student of studentsResult.rows) {
         const { history } = buildAttendanceHistory({
@@ -661,6 +701,7 @@ const EXPORT_DEFINITIONS = {
           holidays: attendanceRules.holidays,
           excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays !== false
         });
+        studentHistories.set(student.id, history);
 
         if (singleStudentMode) {
           history.forEach((item) => {
@@ -675,18 +716,6 @@ const EXPORT_DEFINITIONS = {
           });
           continue;
         }
-
-        const historyByDate = new Map(history.map((item) => [item.isoDate, item]));
-        const row = [student.name];
-        let total = 0;
-        sheetDates.forEach((isoDate) => {
-          const { checkIn, checkOut, present } = getAttendanceSheetTimePair(historyByDate.get(isoDate));
-          if (present) total += 1;
-          row.push(checkIn, checkOut);
-        });
-
-        row.push(total);
-        rows.push(row);
       }
 
       if (singleStudentMode) {
@@ -704,12 +733,63 @@ const EXPORT_DEFINITIONS = {
         };
       }
 
-      rows.sort((left, right) => String(left[0]).localeCompare(String(right[0]), "id"));
+      const weekSections = getAttendanceSheetWeeks(request.startDate, request.endDate);
+      const pdfSections = [];
+      let attendanceSheetHeaders = buildAttendanceSheetHeaders();
+      let attendanceHeaderRows = [attendanceSheetHeaders];
+      let attendanceSheetMerges = [];
+
+      weekSections.forEach((weekDates, weekIndex) => {
+        const headerRows = buildAttendanceSheetHeaderRowsForDates(weekDates);
+        const headers = buildAttendanceSheetHeadersFromRows(headerRows);
+        const sectionRows = [];
+
+        studentsResult.rows.forEach((student) => {
+          const history = studentHistories.get(student.id) || [];
+          const historyByDate = new Map(history.map((item) => [item.isoDate, item]));
+          const row = [student.name];
+          let total = 0;
+
+          weekDates.forEach((isoDate) => {
+            const { checkIn, checkOut, present } = getAttendanceSheetTimePair(historyByDate.get(isoDate));
+            if (present) total += 1;
+            row.push(checkIn, checkOut);
+          });
+
+          while (row.length < 11) {
+            row.push("", "");
+          }
+
+          row.push(total);
+          sectionRows.push(row);
+        });
+
+        sectionRows.sort((left, right) => String(left[0]).localeCompare(String(right[0]), "id"));
+
+        if (weekIndex === 0) {
+          attendanceSheetHeaders = headers;
+          attendanceHeaderRows = headerRows;
+          attendanceSheetMerges = buildAttendanceSheetMerges(weekDates);
+        }
+
+        rows.push([`Minggu ${weekIndex + 1}`, ...Array(Math.max(0, headers.length - 1)).fill("")]);
+        rows.push(...sectionRows);
+
+        pdfSections.push({
+          title: "ABSENSI RISET COE STAS-RG 2025/2026",
+          metadata: buildAttendanceWeekMetadata(request, context, weekDates, weekIndex),
+          headers,
+          headerRows,
+          rows: sectionRows,
+          columnWeights: [2.2, ...weekDates.flatMap(() => [0.72, 0.72]), 0.75]
+        });
+      });
 
       return {
         headers: attendanceSheetHeaders,
         headerRows: attendanceHeaderRows,
         xlsxMerges: attendanceSheetMerges,
+        pdfSections,
         rows
       };
     }
@@ -1483,7 +1563,8 @@ async function handleExport(req, res, typeOverride) {
         ? outputDefinition.buildPdfOptions(resolvedRequest, context)
         : {},
       headerRows: dataset.headerRows || null,
-      xlsxMerges: dataset.xlsxMerges || []
+      xlsxMerges: dataset.xlsxMerges || [],
+      pdfSections: dataset.pdfSections || null
     });
 
     sendFile(res, payload);

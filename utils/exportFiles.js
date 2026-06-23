@@ -515,7 +515,7 @@ function buildPdfTablePage({
   return commands.join("\n");
 }
 
-function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = [], columnWeights = [], headerRows = null }) {
+function getPdfTableConfig({ headers, rows, columnWeights = [], headerRows = null, metadata = [], filtersSummary = [] }) {
   const pageWidth = 842;
   const pageHeight = 595;
   const columnCount = Math.max(headers.length, 1);
@@ -546,7 +546,22 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
   const tableHeaderH = Math.max(14, ROW_FONT_SIZE + CELL_PADDING * 2 + 2) * normalizedHeaderRows.length;
   const availableBodyH = pageHeight - margins.top - margins.bottom - titleBlockH - metaH - tableHeaderH;
 
-  // Paginate by accumulated row heights instead of a fixed row count
+  return {
+    pageWidth,
+    pageHeight,
+    margins,
+    rowFontSize: ROW_FONT_SIZE,
+    cellPadding: CELL_PADDING,
+    lineHeight: LINE_HEIGHT,
+    columnWidths,
+    rowHeights: allRowHeights,
+    headerMetadata,
+    normalizedHeaderRows,
+    availableBodyH
+  };
+}
+
+function paginateRows(rows, rowHeights, availableBodyH) {
   const pageChunks = [];
   const pageChunkHeights = [];
 
@@ -559,17 +574,60 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
       let accumulated = 0;
       let count = 0;
       while (offset + count < rows.length) {
-        const h = allRowHeights[offset + count];
+        const h = rowHeights[offset + count];
         if (count > 0 && accumulated + h > availableBodyH) break;
         accumulated += h;
         count++;
       }
       count = Math.max(1, count);
       pageChunks.push(rows.slice(offset, offset + count));
-      pageChunkHeights.push(allRowHeights.slice(offset, offset + count));
+      pageChunkHeights.push(rowHeights.slice(offset, offset + count));
       offset += count;
     }
   }
+
+  return { pageChunks, pageChunkHeights };
+}
+
+function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = [], columnWeights = [], headerRows = null, sections = null }) {
+  const generatedAt = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
+  const pdfSections = Array.isArray(sections) && sections.length
+    ? sections
+    : [{
+      title,
+      headers,
+      rows,
+      metadata,
+      filtersSummary,
+      columnWeights,
+      headerRows
+    }];
+
+  const pagePlans = [];
+  pdfSections.forEach((section) => {
+    const sectionHeaders = section.headers || headers;
+    const sectionRows = section.rows || [];
+    const config = getPdfTableConfig({
+      headers: sectionHeaders,
+      rows: sectionRows,
+      columnWeights: section.columnWeights || columnWeights,
+      headerRows: section.headerRows || headerRows,
+      metadata: section.metadata || metadata,
+      filtersSummary: section.filtersSummary || filtersSummary
+    });
+    const { pageChunks, pageChunkHeights } = paginateRows(sectionRows, config.rowHeights, config.availableBodyH);
+
+    pageChunks.forEach((chunk, sectionPageIndex) => {
+      pagePlans.push({
+        title: section.title || title,
+        headers: sectionHeaders,
+        rows: chunk,
+        rowHeights: pageChunkHeights[sectionPageIndex],
+        pageIndex: sectionPageIndex,
+        config
+      });
+    });
+  });
 
   const objects = [];
   objects.push("<< /Type /Catalog /Pages 2 0 R >>");
@@ -578,7 +636,7 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
   const contentObjectNumbers = [];
   let nextObjectNumber = 5;
 
-  pageChunks.forEach(() => {
+  pagePlans.forEach(() => {
     pageObjectNumbers.push(nextObjectNumber);
     contentObjectNumbers.push(nextObjectNumber + 1);
     nextObjectNumber += 2;
@@ -588,29 +646,30 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
   objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
   objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
 
-  pageChunks.forEach((chunk, index) => {
+  pagePlans.forEach((plan, index) => {
     const pageObjectNumber = pageObjectNumbers[index];
     const contentObjectNumber = contentObjectNumbers[index];
+    const { config } = plan;
     const stream = buildPdfTablePage({
-      title,
+      title: plan.title,
       generatedAt,
-      metadata: headerMetadata,
-      headers,
-      headerRows: normalizedHeaderRows,
-      rows: chunk,
-      rowHeights: pageChunkHeights[index],
-      pageIndex: index,
-      pageWidth,
-      pageHeight,
-      margins,
-      columnWidths,
-      rowFontSize: ROW_FONT_SIZE,
-      cellPadding: CELL_PADDING,
-      lineHeight: LINE_HEIGHT
+      metadata: config.headerMetadata,
+      headers: plan.headers,
+      headerRows: config.normalizedHeaderRows,
+      rows: plan.rows,
+      rowHeights: plan.rowHeights,
+      pageIndex: plan.pageIndex,
+      pageWidth: config.pageWidth,
+      pageHeight: config.pageHeight,
+      margins: config.margins,
+      columnWidths: config.columnWidths,
+      rowFontSize: config.rowFontSize,
+      cellPadding: config.cellPadding,
+      lineHeight: config.lineHeight
     });
     const contentBuffer = Buffer.from(stream, "utf8");
 
-    objects[pageObjectNumber - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`;
+    objects[pageObjectNumber - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${config.pageWidth} ${config.pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`;
     objects[contentObjectNumber - 1] = `<< /Length ${contentBuffer.length} >>\nstream\n${stream}\nendstream`;
   });
 
