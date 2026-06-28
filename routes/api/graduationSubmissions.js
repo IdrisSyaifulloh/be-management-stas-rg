@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const crypto = require("crypto");
 const asyncHandler = require("../../utils/asyncHandler");
 const { createNotification } = require("../../utils/notificationService");
@@ -304,6 +304,69 @@ function getPayloadProjectValue(project, key) {
 function getProjectFieldValue(project, fieldKey) {
   const dbColumn = FIELD_TO_DB_COLUMN[fieldKey];
   return String(project?.[fieldKey] ?? project?.[dbColumn] ?? "").trim();
+}
+
+function normalizeOptionalDraftUrl(value, label) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  return assertHttpUrl(normalized, label, false);
+}
+
+function buildDraftProjectRows(payloadProjects, expectedProjects, savedProjects = []) {
+  if (!Array.isArray(payloadProjects)) {
+    const error = new Error("Data proyek wajib berupa array.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const payloadByProject = new Map(
+    payloadProjects
+      .map((item) => [String(item?.projectId || item?.project_id || "").trim(), item])
+      .filter(([projectId]) => projectId)
+  );
+  const savedByProject = new Map(
+    savedProjects
+      .map(mapSubmissionProjectRow)
+      .map((item) => [String(item.projectId || item.project_id || "").trim(), item])
+      .filter(([projectId]) => projectId)
+  );
+
+  return expectedProjects.map((project) => {
+    const projectId = project.project_id || project.projectId;
+    const payload = payloadByProject.get(projectId) || savedByProject.get(projectId) || {};
+    const positionLabel = project.position_label || project.positionLabel || payload.positionLabel || payload.position_label || "Anggota";
+
+    return {
+      projectId,
+      projectTitle: project.project_title || project.projectTitle || project.full_title || payload.projectTitle || payload.project_title || projectId,
+      positionLabel,
+      reportUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "reportUrl"), COMMON_FIELD_LABELS.reportUrl),
+      productPhotoFolderUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "productPhotoFolderUrl"), COMMON_FIELD_LABELS.productPhotoFolderUrl),
+      manualBookUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "manualBookUrl"), COMMON_FIELD_LABELS.manualBookUrl),
+      demoVideoUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "demoVideoUrl"), COMMON_FIELD_LABELS.demoVideoUrl),
+      repositoryUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "repositoryUrl"), getFieldLabel("repositoryUrl")),
+      deployedUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "deployedUrl"), getFieldLabel("deployedUrl")),
+      datasetModelUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "datasetModelUrl"), getFieldLabel("datasetModelUrl")),
+      designDocumentationUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "designDocumentationUrl"), getFieldLabel("designDocumentationUrl"))
+    };
+  });
+}
+
+function removeReviewsForChangedFields(existingProject, nextProject) {
+  const reviews = normalizeFieldReviews(existingProject?.field_reviews || existingProject?.fieldReviews);
+  if (!existingProject || Object.keys(reviews).length === 0) return reviews;
+
+  const nextReviews = { ...reviews };
+  for (const key of REVIEWABLE_FIELD_KEYS) {
+    const dbColumn = FIELD_TO_DB_COLUMN[key];
+    const previousValue = String(existingProject?.[dbColumn] || "").trim();
+    const nextValue = String(nextProject?.[key] || "").trim();
+    if (previousValue !== nextValue) {
+      delete nextReviews[key];
+    }
+  }
+
+  return nextReviews;
 }
 
 function getReviewableFieldsForProject(project) {
@@ -772,6 +835,162 @@ router.post("/:id/allow-graduation", asyncHandler(async (req, res) => {
   });
 }));
 
+router.post("/me/draft", asyncHandler(async (req, res) => {
+  if (!requireMahasiswa(req, res)) return;
+
+  await ensureGraduationSubmissionsTables();
+
+  const student = await getStudentByUserId(req.authUser.id);
+  if (!student) {
+    return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
+  }
+
+  if (student.status === "Mengundurkan Diri") {
+    return res.status(400).json({ message: "Mahasiswa yang mengundurkan diri tidak bisa menyimpan berkas kelulusan." });
+  }
+
+  if (student.status === "Alumni") {
+    return res.status(400).json({ message: "Status Anda sudah Alumni STAS-RG." });
+  }
+
+  const [activeProjects, saved] = await Promise.all([
+    getActiveGraduationProjects(req.authUser.id),
+    getSavedSubmission(student.id)
+  ]);
+
+  if (saved.submission?.status === "Valid") {
+    return res.status(400).json({ message: "Berkas sudah ACC semua. Form draft dikunci." });
+  }
+
+  const fallbackSavedProjects = saved.projects.map(mapSubmissionProjectRow);
+  const expectedProjects = activeProjects.length > 0 ? activeProjects : fallbackSavedProjects;
+
+  if (expectedProjects.length === 0) {
+    return res.status(400).json({ message: "Belum ada riset/magang aktif untuk disimpan." });
+  }
+
+  const projectRows = buildDraftProjectRows(req.body?.projects || [], expectedProjects, saved.projects);
+  const submissionId = saved.submission?.id || `GRD-${crypto.randomUUID()}`;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `
+      INSERT INTO graduation_submissions (id, student_id, user_id, status, submitted_at)
+      VALUES ($1, $2, $3, 'Draft', NULL)
+      ON CONFLICT (student_id)
+      DO UPDATE SET status = CASE
+                        WHEN graduation_submissions.submitted_at IS NULL THEN 'Draft'
+                        ELSE graduation_submissions.status
+                      END,
+                    updated_at = NOW()
+      `,
+      [submissionId, student.id, req.authUser.id]
+    );
+
+    await client.query(
+      `
+      DELETE FROM graduation_submission_projects
+      WHERE submission_id = $1
+        AND NOT (project_id = ANY($2::text[]))
+      `,
+      [submissionId, projectRows.map((item) => item.projectId)]
+    );
+
+    for (const project of projectRows) {
+      const existingProjectResult = await client.query(
+        `
+        SELECT *
+        FROM graduation_submission_projects
+        WHERE submission_id = $1
+          AND project_id = $2
+        LIMIT 1
+        `,
+        [submissionId, project.projectId]
+      );
+      const nextReviews = removeReviewsForChangedFields(existingProjectResult.rows[0], project);
+
+      await client.query(
+        `
+        INSERT INTO graduation_submission_projects (
+          id, submission_id, student_id, project_id, project_title, position_label,
+          report_url, product_photo_folder_url, manual_book_url, demo_video_url,
+          repository_url, deployed_url, dataset_model_url, design_documentation_url, field_reviews
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
+        ON CONFLICT (submission_id, project_id)
+        DO UPDATE SET project_title = EXCLUDED.project_title,
+                      position_label = EXCLUDED.position_label,
+                      report_url = EXCLUDED.report_url,
+                      product_photo_folder_url = EXCLUDED.product_photo_folder_url,
+                      manual_book_url = EXCLUDED.manual_book_url,
+                      demo_video_url = EXCLUDED.demo_video_url,
+                      repository_url = EXCLUDED.repository_url,
+                      deployed_url = EXCLUDED.deployed_url,
+                      dataset_model_url = EXCLUDED.dataset_model_url,
+                      design_documentation_url = EXCLUDED.design_documentation_url,
+                      field_reviews = EXCLUDED.field_reviews,
+                      updated_at = NOW()
+        `,
+        [
+          `GRDP-${crypto.randomUUID()}`,
+          submissionId,
+          student.id,
+          project.projectId,
+          project.projectTitle,
+          project.positionLabel,
+          project.reportUrl,
+          project.productPhotoFolderUrl,
+          project.manualBookUrl,
+          project.demoVideoUrl,
+          project.repositoryUrl,
+          project.deployedUrl,
+          project.datasetModelUrl,
+          project.designDocumentationUrl,
+          JSON.stringify(nextReviews)
+        ]
+      );
+    }
+
+    await client.query(
+      `
+      INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+      VALUES ($1, $2, 'Mahasiswa', 'Update', 'graduation_submission_draft', $3)
+      `,
+      [
+        `AUD-${crypto.randomUUID()}`,
+        req.authUser.id,
+        JSON.stringify({
+          student_id: student.id,
+          submission_id: submissionId,
+          project_ids: projectRows.map((item) => item.projectId),
+          status: saved.submission?.status || "Draft"
+        })
+      ]
+    );
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const refreshedStudent = await getStudentByUserId(req.authUser.id);
+  const refreshedSaved = await getSavedSubmission(student.id);
+
+  res.json({
+    message: "Draft berkas kelulusan berhasil disimpan. Admin sudah bisa melihat link yang tersimpan.",
+    ...buildProjectResponse({
+      student: refreshedStudent || student,
+      submission: refreshedSaved.submission,
+      activeProjects,
+      savedProjects: refreshedSaved.projects
+    })
+  });
+}));
 router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
   if (!requireMahasiswa(req, res)) return;
 

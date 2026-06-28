@@ -1252,7 +1252,7 @@ router.get(
       `
       SELECT student_id, COUNT(*) AS hadir_count
       FROM attendance_records
-      WHERE status = 'Hadir'
+      WHERE status IN ('Hadir', 'WFH')
         AND attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)
         AND attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
       GROUP BY student_id
@@ -1274,6 +1274,8 @@ router.get(
     }
 
     const attendanceMap = new Map(attendanceResult.rows.map((row) => [row.student_id, row]));
+    const attendanceStatusByStudentId = {};
+    const attendanceModeByStudentId = {};
 
     const presentIds = [];
     const leaveIds = [];
@@ -1288,6 +1290,10 @@ router.get(
       const student = studentsById.get(studentId);
       const attendance = attendanceMap.get(studentId);
       const status = attendance?.status;
+      if (status) {
+        attendanceStatusByStudentId[studentId] = status;
+        attendanceModeByStudentId[studentId] = status === "WFH" ? "wfh" : status === "Hadir" ? "onsite" : normalizeLeaveType(status);
+      }
       const currentHours = Number(student?.current_hours || 0);
       const targetHours = Number(student?.target_hours || 0);
 
@@ -1301,8 +1307,13 @@ router.get(
         risetWeeklyUnderHoursIds.push(studentId);
       }
 
-      if (status === "Hadir") {
+      if ((status === "Hadir" || status === "WFH") && attendance?.check_in_at) {
         presentIds.push(studentId);
+
+        if (status === "WFH") {
+          leaveTypesByStudentId[studentId] = "wfh";
+          return;
+        }
 
         if (student?.tipe === "Magang" && !leaveSet.has(studentId) && !todayHoliday) {
           const durationHours =
@@ -1334,7 +1345,7 @@ router.get(
         status === "Cuti" ||
         status === "Izin" ||
         status === "Sakit" ||
-        status === "WFH" ||
+        (status === "WFH" && !attendance?.check_in_at) ||
         leaveSet.has(studentId)
       ) {
         leaveIds.push(studentId);
@@ -1417,6 +1428,8 @@ router.get(
       risetWeeklyHoursLockWindowOpen,
       missingCheckoutWindowOpen,
       presentIds,
+      attendanceStatusByStudentId,
+      attendanceModeByStudentId,
       leaveIds,
       leaveTypesByStudentId,
       absentIds,

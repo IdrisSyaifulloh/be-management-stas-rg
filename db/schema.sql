@@ -1,4 +1,4 @@
-﻿BEGIN;
+BEGIN;
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -272,6 +272,7 @@ CREATE TABLE IF NOT EXISTS letter_requests (
   status TEXT NOT NULL CHECK (status IN ('Menunggu', 'Diproses', 'Siap Unduh')),
   estimasi DATE,
   nomor_surat TEXT,
+  tanggal_terbit DATE,
   file_url TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -300,6 +301,25 @@ CREATE TABLE IF NOT EXISTS letter_categories (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_letter_categories_name_lower
 ON letter_categories (LOWER(name));
 
+
+CREATE TABLE IF NOT EXISTS letter_number_generations (
+  id TEXT PRIMARY KEY,
+  letter_request_id TEXT REFERENCES letter_requests(id) ON DELETE SET NULL,
+  generated_number TEXT NOT NULL UNIQUE,
+  prefix TEXT NOT NULL DEFAULT 'STAS-RG',
+  sequence INTEGER NOT NULL,
+  month INTEGER NOT NULL,
+  year INTEGER NOT NULL,
+  generated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_letter_number_generations_request
+ON letter_number_generations(letter_request_id, generated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_letter_number_generations_period
+ON letter_number_generations(year, month, sequence DESC);
 CREATE TABLE IF NOT EXISTS certificate_requests (
   id TEXT PRIMARY KEY,
   student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,

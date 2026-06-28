@@ -735,6 +735,7 @@ router.patch(
         lr.student_id,
         lr.jenis_pengajuan,
         lr.counts_against_wfh_quota,
+        lr.periode_start,
         COALESCE(s.wfh_quota, 0)::int AS wfh_quota,
         s.tipe AS student_tipe
       FROM leave_requests lr
@@ -822,6 +823,26 @@ router.patch(
         eventId: "cuti_request"
       });
     }
+
+    await query(
+      `
+      INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+      VALUES ($1, $2, 'Operator', $3, 'leave_request', $4)
+      `,
+      [
+        `AUD-${crypto.randomUUID()}`,
+        reviewedBy || req.authUser?.id || null,
+        status === "Disetujui" ? "Approve" : "Update",
+        JSON.stringify({
+          leave_request_id: leaveRequestId,
+          student_id: requestRow.student_id,
+          student_name: leaveRow.rows[0]?.student_name || null,
+          jenis_pengajuan: leaveRow.rows[0]?.jenis_pengajuan || requestRow.jenis_pengajuan,
+          status,
+          review_note: reviewNote || null
+        })
+      ]
+    );
 
     res.json({
       message: "Status cuti berhasil diperbarui."

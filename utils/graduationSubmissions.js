@@ -1,4 +1,4 @@
-﻿const { query } = require("../db/pool");
+const { query } = require("../db/pool");
 
 const COMMON_GRADUATION_FIELDS = Object.freeze([
   "reportUrl",
@@ -66,10 +66,10 @@ async function ensureGraduationSubmissionsTables() {
           project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
           project_title TEXT,
           position_label TEXT,
-          report_url TEXT NOT NULL,
-          product_photo_folder_url TEXT NOT NULL,
-          manual_book_url TEXT NOT NULL,
-          demo_video_url TEXT NOT NULL,
+          report_url TEXT,
+          product_photo_folder_url TEXT,
+          manual_book_url TEXT,
+          demo_video_url TEXT,
           repository_url TEXT,
           deployed_url TEXT,
           dataset_model_url TEXT,
@@ -114,6 +114,13 @@ async function ensureGraduationSubmissionsTables() {
           ADD COLUMN IF NOT EXISTS field_reviews JSONB NOT NULL DEFAULT '{}'::jsonb,
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      `);
+      await query(`
+        ALTER TABLE graduation_submission_projects
+          ALTER COLUMN report_url DROP NOT NULL,
+          ALTER COLUMN product_photo_folder_url DROP NOT NULL,
+          ALTER COLUMN manual_book_url DROP NOT NULL,
+          ALTER COLUMN demo_video_url DROP NOT NULL;
       `);
 
       await query(`

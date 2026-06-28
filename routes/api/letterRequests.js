@@ -1,6 +1,6 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
-const { query } = require("../../db/pool");
+const { pool, query } = require("../../db/pool");
 const { buildWhereClause } = require("../../utils/queryFilters");
 const { extractRole } = require("../../utils/roleGuard");
 const { resolveStudentId, resolveStudentRecord } = require("../../utils/studentResolver");
@@ -46,6 +46,7 @@ async function ensureLetterRequestColumns() {
         ADD COLUMN IF NOT EXISTS requester_id TEXT,
         ADD COLUMN IF NOT EXISTS project_id TEXT,
         ADD COLUMN IF NOT EXISTS catatan TEXT,
+        ADD COLUMN IF NOT EXISTS tanggal_terbit DATE,
         ADD COLUMN IF NOT EXISTS file_url TEXT
       `);
       await query(`
@@ -61,6 +62,93 @@ async function ensureLetterRequestColumns() {
   await ensureColumnsPromise;
 }
 
+let ensureLetterNumberHistoryPromise = null;
+
+async function ensureLetterNumberHistoryTable() {
+  if (!ensureLetterNumberHistoryPromise) {
+    ensureLetterNumberHistoryPromise = (async () => {
+      await query(`
+        CREATE TABLE IF NOT EXISTS letter_number_generations (
+          id TEXT PRIMARY KEY,
+          letter_request_id TEXT REFERENCES letter_requests(id) ON DELETE SET NULL,
+          generated_number TEXT NOT NULL UNIQUE,
+          prefix TEXT NOT NULL DEFAULT 'STAS-RG',
+          sequence INTEGER NOT NULL,
+          month INTEGER NOT NULL,
+          year INTEGER NOT NULL,
+          generated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          note TEXT
+        )
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_letter_number_generations_request
+          ON letter_number_generations(letter_request_id, generated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_letter_number_generations_period
+          ON letter_number_generations(year, month, sequence DESC);
+      `);
+    })().catch((error) => {
+      ensureLetterNumberHistoryPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureLetterNumberHistoryPromise;
+}
+
+function getRomanMonth(month) {
+  return ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"][Math.max(1, Math.min(12, month)) - 1];
+}
+
+function normalizeLetterNumberPrefix(value) {
+  const normalized = String(value || "STAS-RG")
+    .trim()
+    .replace(/[^a-zA-Z0-9/-]/g, "")
+    .replace(/\/+/g, "/")
+    .replace(/^\/|\/$/g, "");
+  return normalized || "STAS-RG";
+}
+
+function normalizeLetterNumberDate(value) {
+  const raw = String(value || "").trim();
+  const date = raw ? new Date(raw) : new Date();
+  if (Number.isNaN(date.getTime())) {
+    const error = new Error("Tanggal generate nomor surat tidak valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return {
+    iso: date.toISOString().slice(0, 10),
+    month: date.getUTCMonth() + 1,
+    year: date.getUTCFullYear()
+  };
+}
+
+function buildGeneratedLetterNumber({ sequence, prefix, month, year }) {
+  return `${String(sequence).padStart(3, "0")}/${normalizeLetterNumberPrefix(prefix)}/${getRomanMonth(month)}/${year}`;
+}
+
+function mapLetterNumberHistoryRow(row) {
+  return {
+    id: row.id,
+    letterRequestId: row.letter_request_id,
+    letter_request_id: row.letter_request_id,
+    generatedNumber: row.generated_number,
+    generated_number: row.generated_number,
+    prefix: row.prefix,
+    sequence: Number(row.sequence || 0),
+    month: Number(row.month || 0),
+    year: Number(row.year || 0),
+    generatedBy: row.generated_by,
+    generated_by: row.generated_by,
+    generatedByName: row.generated_by_name || null,
+    generated_by_name: row.generated_by_name || null,
+    generatedAt: row.generated_at,
+    generated_at: row.generated_at,
+    note: row.note || null
+  };
+}
 async function resolveLecturerRequester(lecturerIdOrUserId) {
   const lookupValue = String(lecturerIdOrUserId || "").trim();
   if (!lookupValue) return null;
@@ -144,6 +232,8 @@ function mapLetterRequestRow(row) {
     status: row.status,
     estimasi: row.estimasi,
     nomor_surat: row.nomor_surat,
+    tanggal_terbit: row.tanggal_terbit,
+    tanggalTerbit: row.tanggal_terbit,
     file_url: row.file_url,
     projectId: row.project_id,
     project_id: row.project_id,
@@ -163,7 +253,7 @@ async function fetchLetterRequestById(id) {
              ELSE COALESCE(ru.name, su.name)
            END AS requester_name,
            lr.jenis, lr.tanggal, lr.tujuan, lr.catatan,
-           lr.status, lr.estimasi, lr.nomor_surat, lr.file_url,
+           lr.status, lr.estimasi, lr.nomor_surat, lr.tanggal_terbit, lr.file_url,
            lr.project_id, COALESCE(rp.short_title, rp.title) AS project_name
     FROM letter_requests lr
     LEFT JOIN students s ON s.id = lr.student_id
@@ -310,7 +400,7 @@ router.get(
                ELSE COALESCE(ru.name, su.name)
              END AS requester_name,
              lr.jenis, lr.tanggal, lr.tujuan, lr.catatan,
-             lr.status, lr.estimasi, lr.nomor_surat, lr.file_url,
+             lr.status, lr.estimasi, lr.nomor_surat, lr.tanggal_terbit, lr.file_url,
              lr.project_id, COALESCE(rp.short_title, rp.title) AS project_name
       FROM letter_requests lr
       LEFT JOIN students s ON s.id = lr.student_id
@@ -445,6 +535,157 @@ router.post(
   })
 );
 
+router.get(
+  "/number-history",
+  asyncHandler(async (req, res) => {
+    await ensureLetterRequestColumns();
+    await ensureLetterNumberHistoryTable();
+
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat melihat riwayat generate nomor surat." });
+    }
+
+    const letterRequestId = String(req.query.letterRequestId || req.query.requestId || "").trim();
+    const params = [];
+    const where = [];
+
+    if (letterRequestId) {
+      params.push(letterRequestId);
+      where.push(`lng.letter_request_id = $${params.length}`);
+    }
+
+    params.push(100);
+    const result = await query(
+      `
+      SELECT lng.*, u.name AS generated_by_name
+      FROM letter_number_generations lng
+      LEFT JOIN users u ON u.id = lng.generated_by
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY lng.generated_at DESC
+      LIMIT $${params.length}
+      `,
+      params
+    );
+
+    res.json(result.rows.map(mapLetterNumberHistoryRow));
+  })
+);
+
+router.post(
+  "/:id/generate-number",
+  asyncHandler(async (req, res) => {
+    await ensureLetterRequestColumns();
+    await ensureLetterNumberHistoryTable();
+
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Hanya operator yang dapat generate nomor surat." });
+    }
+
+    const letterRequestId = req.params.id;
+    const prefix = normalizeLetterNumberPrefix(req.body?.prefix);
+    const generatedDate = normalizeLetterNumberDate(req.body?.date || req.body?.tanggalTerbit);
+    const db = await pool.connect();
+    let generatedNumber = null;
+
+    try {
+      await db.query("BEGIN");
+      const requestResult = await db.query(
+        `SELECT id, jenis, nomor_surat FROM letter_requests WHERE id = $1 FOR UPDATE`,
+        [letterRequestId]
+      );
+
+      if (requestResult.rowCount === 0) {
+        await db.query("ROLLBACK");
+        return res.status(404).json({ message: "Pengajuan surat tidak ditemukan." });
+      }
+
+      const sequenceResult = await db.query(
+        `
+        SELECT COALESCE(MAX(sequence), 0)::int + 1 AS next_sequence
+        FROM letter_number_generations
+        WHERE year = $1
+          AND month = $2
+          AND prefix = $3
+        `,
+        [generatedDate.year, generatedDate.month, prefix]
+      );
+      const sequence = Number(sequenceResult.rows[0]?.next_sequence || 1);
+      generatedNumber = buildGeneratedLetterNumber({ sequence, prefix, month: generatedDate.month, year: generatedDate.year });
+
+      await db.query(
+        `
+        INSERT INTO letter_number_generations (
+          id, letter_request_id, generated_number, prefix, sequence, month, year, generated_by, note
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `,
+        [
+          `LNG-${crypto.randomUUID()}`,
+          letterRequestId,
+          generatedNumber,
+          prefix,
+          sequence,
+          generatedDate.month,
+          generatedDate.year,
+          resolveRequesterUserId(req) || null,
+          req.body?.note || null
+        ]
+      );
+
+      await db.query(
+        `
+        UPDATE letter_requests
+        SET nomor_surat = $2,
+            tanggal_terbit = COALESCE(tanggal_terbit, $3::date),
+            updated_at = NOW()
+        WHERE id = $1
+        `,
+        [letterRequestId, generatedNumber, generatedDate.iso]
+      );
+
+      await db.query(
+        `
+        INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+        VALUES ($1, $2, 'Operator', 'Update', 'letter_number_generate', $3)
+        `,
+        [
+          `AUD-${crypto.randomUUID()}`,
+          resolveRequesterUserId(req) || null,
+          JSON.stringify({ letter_request_id: letterRequestId, generated_number: generatedNumber, prefix, sequence, month: generatedDate.month, year: generatedDate.year })
+        ]
+      );
+
+      await db.query("COMMIT");
+    } catch (error) {
+      await db.query("ROLLBACK");
+      throw error;
+    } finally {
+      db.release();
+    }
+
+    const updatedRequest = await fetchLetterRequestById(letterRequestId);
+    const history = await query(
+      `
+      SELECT lng.*, u.name AS generated_by_name
+      FROM letter_number_generations lng
+      LEFT JOIN users u ON u.id = lng.generated_by
+      WHERE lng.letter_request_id = $1
+      ORDER BY lng.generated_at DESC
+      LIMIT 20
+      `,
+      [letterRequestId]
+    );
+
+    res.json({
+      message: "Nomor surat berhasil digenerate.",
+      nomorSurat: generatedNumber,
+      nomor_surat: generatedNumber,
+      data: updatedRequest,
+      history: history.rows.map(mapLetterNumberHistoryRow)
+    });
+  })
+);
 router.patch(
   "/:id/status",
   asyncHandler(async (req, res) => {
@@ -454,7 +695,7 @@ router.patch(
       return res.status(403).json({ message: "Hanya operator yang dapat mengubah status surat." });
     }
 
-    const { status, estimasi, nomorSurat, fileUrl, fileDataUrl, fileName } = req.body;
+    const { status, estimasi, nomorSurat, tanggalTerbit, fileUrl, fileDataUrl, fileName } = req.body;
 
     if (!status || !["Menunggu", "Diproses", "Siap Unduh"].includes(status)) {
       return res.status(400).json({ message: "status harus Menunggu/Diproses/Siap Unduh." });
@@ -479,12 +720,13 @@ router.patch(
       SET status = $2,
           estimasi = COALESCE($3, estimasi),
           nomor_surat = COALESCE($4, nomor_surat),
-          file_url = COALESCE($5, file_url),
+          tanggal_terbit = COALESCE($5::date, tanggal_terbit),
+          file_url = COALESCE($6, file_url),
           updated_at = NOW()
       WHERE id = $1
       RETURNING id
       `,
-      [req.params.id, status, estimasi || null, nomorSurat || null, effectiveFileUrl]
+      [req.params.id, status, estimasi || null, nomorSurat || null, tanggalTerbit || null, effectiveFileUrl]
     );
 
     if (result.rowCount === 0) {
@@ -492,6 +734,24 @@ router.patch(
     }
 
     const updatedRequest = await fetchLetterRequestById(req.params.id);
+    await query(
+      `
+      INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+      VALUES ($1, $2, 'Operator', 'Update', 'letter_request', $3)
+      `,
+      [
+        `AUD-${crypto.randomUUID()}`,
+        resolveRequesterUserId(req) || null,
+        JSON.stringify({
+          letter_request_id: req.params.id,
+          status,
+          nomor_surat: nomorSurat || updatedRequest?.nomor_surat || null,
+          tanggal_terbit: tanggalTerbit || updatedRequest?.tanggal_terbit || null,
+          file_uploaded: Boolean(effectiveFileUrl)
+        })
+      ]
+    );
+
     const requesterRecipientId = updatedRequest?.requesterId;
     if (requesterRecipientId) {
       await createNotification({
@@ -522,6 +782,18 @@ router.delete(
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Pengajuan surat tidak ditemukan." });
     }
+
+    await query(
+      `
+      INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+      VALUES ($1, $2, 'Operator', 'Delete', 'letter_request', $3)
+      `,
+      [
+        `AUD-${crypto.randomUUID()}`,
+        resolveRequesterUserId(req) || null,
+        JSON.stringify({ letter_request_id: req.params.id })
+      ]
+    );
 
     res.json({ message: "Pengajuan surat berhasil dihapus." });
   })
