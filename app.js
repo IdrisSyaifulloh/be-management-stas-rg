@@ -335,6 +335,15 @@ app.use(function (err, req, res, next) {
   if (req.path.startsWith("/api")) {
     var status = err.status || err.statusCode || 500;
 
+    if (status >= 500) {
+      console.error("[API Error]", {
+        method: req.method,
+        path: req.originalUrl || req.url,
+        message: err.message,
+        stack: err.stack
+      });
+    }
+
     return res.status(status).json({
       message:
         status >= 500 && err.expose !== true

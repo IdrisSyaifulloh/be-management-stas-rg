@@ -4,7 +4,8 @@ const COMMON_GRADUATION_FIELDS = Object.freeze([
   "reportUrl",
   "productPhotoFolderUrl",
   "manualBookUrl",
-  "demoVideoUrl"
+  "demoVideoUrl",
+  "githubUrl"
 ]);
 
 const SPECIAL_FIELD_DEFINITIONS = Object.freeze({
@@ -70,6 +71,7 @@ async function ensureGraduationSubmissionsTables() {
           product_photo_folder_url TEXT,
           manual_book_url TEXT,
           demo_video_url TEXT,
+          github_url TEXT,
           repository_url TEXT,
           deployed_url TEXT,
           dataset_model_url TEXT,
@@ -107,6 +109,7 @@ async function ensureGraduationSubmissionsTables() {
           ADD COLUMN IF NOT EXISTS product_photo_folder_url TEXT,
           ADD COLUMN IF NOT EXISTS manual_book_url TEXT,
           ADD COLUMN IF NOT EXISTS demo_video_url TEXT,
+          ADD COLUMN IF NOT EXISTS github_url TEXT,
           ADD COLUMN IF NOT EXISTS repository_url TEXT,
           ADD COLUMN IF NOT EXISTS deployed_url TEXT,
           ADD COLUMN IF NOT EXISTS dataset_model_url TEXT,
@@ -254,6 +257,8 @@ function mapSubmissionProjectRow(row) {
     manual_book_url: row.manual_book_url || "",
     demoVideoUrl: row.demo_video_url || "",
     demo_video_url: row.demo_video_url || "",
+    githubUrl: row.github_url || "",
+    github_url: row.github_url || "",
     repositoryUrl: row.repository_url || "",
     repository_url: row.repository_url || "",
     deployedUrl: row.deployed_url || "",

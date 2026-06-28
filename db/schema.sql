@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS graduation_submission_projects (
   product_photo_folder_url TEXT NOT NULL,
   manual_book_url TEXT NOT NULL,
   demo_video_url TEXT NOT NULL,
+  github_url TEXT,
   repository_url TEXT,
   deployed_url TEXT,
   dataset_model_url TEXT,

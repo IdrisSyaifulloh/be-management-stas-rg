@@ -80,9 +80,32 @@ function clearAuthCookies(res) {
   });
 }
 
+let ensureAuthLoginColumnsPromise = null;
+
+async function ensureAuthLoginColumns() {
+  if (!ensureAuthLoginColumnsPromise) {
+    ensureAuthLoginColumnsPromise = (async () => {
+      await query(`
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE
+      `);
+
+      await query(`
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS withdrawal_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS scheduled_deletion_at TIMESTAMPTZ
+      `);
+    })();
+  }
+
+  await ensureAuthLoginColumnsPromise;
+}
+
 router.post(
   "/login",
   asyncHandler(async (req, res) => {
+    await ensureAuthLoginColumns();
+
     const validation = loginSchema.safeParse(req.body);
     if (!validation.success) {
       return res.status(400).json({
@@ -180,6 +203,8 @@ router.post(
 router.get(
   "/me",
   asyncHandler(async (req, res) => {
+    await ensureAuthLoginColumns();
+
     if (!req.authUser?.id) {
       return res.status(401).json({ message: "Tidak terautentikasi." });
     }

@@ -18,7 +18,8 @@ const COMMON_FIELD_LABELS = Object.freeze({
   reportUrl: "Link Laporan PA/Magang",
   productPhotoFolderUrl: "Link Folder kumpulan Foto Hasil Produk",
   manualBookUrl: "Link Manual Book",
-  demoVideoUrl: "Link Video Demo Project"
+  demoVideoUrl: "Link Video Demo Project",
+  githubUrl: "Link GitHub"
 });
 
 const SPECIAL_FIELD_LABELS = Object.freeze({
@@ -33,6 +34,7 @@ const REVIEWABLE_FIELD_KEYS = Object.freeze([
   "productPhotoFolderUrl",
   "manualBookUrl",
   "demoVideoUrl",
+  "githubUrl",
   "repositoryUrl",
   "deployedUrl",
   "datasetModelUrl",
@@ -44,6 +46,7 @@ const FIELD_TO_DB_COLUMN = Object.freeze({
   productPhotoFolderUrl: "product_photo_folder_url",
   manualBookUrl: "manual_book_url",
   demoVideoUrl: "demo_video_url",
+  githubUrl: "github_url",
   repositoryUrl: "repository_url",
   deployedUrl: "deployed_url",
   datasetModelUrl: "dataset_model_url",
@@ -205,6 +208,8 @@ function mapActiveProjectRow(row, studentId) {
     manual_book_url: "",
     demoVideoUrl: "",
     demo_video_url: "",
+    githubUrl: "",
+    github_url: "",
     repositoryUrl: "",
     repository_url: "",
     deployedUrl: "",
@@ -344,6 +349,7 @@ function buildDraftProjectRows(payloadProjects, expectedProjects, savedProjects 
       productPhotoFolderUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "productPhotoFolderUrl"), COMMON_FIELD_LABELS.productPhotoFolderUrl),
       manualBookUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "manualBookUrl"), COMMON_FIELD_LABELS.manualBookUrl),
       demoVideoUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "demoVideoUrl"), COMMON_FIELD_LABELS.demoVideoUrl),
+      githubUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "githubUrl"), COMMON_FIELD_LABELS.githubUrl),
       repositoryUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "repositoryUrl"), getFieldLabel("repositoryUrl")),
       deployedUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "deployedUrl"), getFieldLabel("deployedUrl")),
       datasetModelUrl: normalizeOptionalDraftUrl(getPayloadProjectValue(payload, "datasetModelUrl"), getFieldLabel("datasetModelUrl")),
@@ -495,6 +501,7 @@ function validateSubmissionProjects(payloadProjects, expectedProjects) {
       productPhotoFolderUrl: assertHttpUrl(getPayloadProjectValue(payload, "productPhotoFolderUrl"), COMMON_FIELD_LABELS.productPhotoFolderUrl),
       manualBookUrl: assertHttpUrl(getPayloadProjectValue(payload, "manualBookUrl"), COMMON_FIELD_LABELS.manualBookUrl),
       demoVideoUrl: assertHttpUrl(getPayloadProjectValue(payload, "demoVideoUrl"), COMMON_FIELD_LABELS.demoVideoUrl),
+      githubUrl: assertHttpUrl(getPayloadProjectValue(payload, "githubUrl"), COMMON_FIELD_LABELS.githubUrl, false),
       repositoryUrl: null,
       deployedUrl: null,
       datasetModelUrl: null,
@@ -915,10 +922,10 @@ router.post("/me/draft", asyncHandler(async (req, res) => {
         `
         INSERT INTO graduation_submission_projects (
           id, submission_id, student_id, project_id, project_title, position_label,
-          report_url, product_photo_folder_url, manual_book_url, demo_video_url,
+          report_url, product_photo_folder_url, manual_book_url, demo_video_url, github_url,
           repository_url, deployed_url, dataset_model_url, design_documentation_url, field_reviews
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb)
         ON CONFLICT (submission_id, project_id)
         DO UPDATE SET project_title = EXCLUDED.project_title,
                       position_label = EXCLUDED.position_label,
@@ -926,6 +933,7 @@ router.post("/me/draft", asyncHandler(async (req, res) => {
                       product_photo_folder_url = EXCLUDED.product_photo_folder_url,
                       manual_book_url = EXCLUDED.manual_book_url,
                       demo_video_url = EXCLUDED.demo_video_url,
+                      github_url = EXCLUDED.github_url,
                       repository_url = EXCLUDED.repository_url,
                       deployed_url = EXCLUDED.deployed_url,
                       dataset_model_url = EXCLUDED.dataset_model_url,
@@ -944,6 +952,7 @@ router.post("/me/draft", asyncHandler(async (req, res) => {
           project.productPhotoFolderUrl,
           project.manualBookUrl,
           project.demoVideoUrl,
+          project.githubUrl,
           project.repositoryUrl,
           project.deployedUrl,
           project.datasetModelUrl,
@@ -1219,10 +1228,10 @@ router.post(
           `
           INSERT INTO graduation_submission_projects (
             id, submission_id, student_id, project_id, project_title, position_label,
-            report_url, product_photo_folder_url, manual_book_url, demo_video_url,
+            report_url, product_photo_folder_url, manual_book_url, demo_video_url, github_url,
             repository_url, deployed_url, dataset_model_url, design_documentation_url, field_reviews
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, '{}'::jsonb)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, '{}'::jsonb)
           ON CONFLICT (submission_id, project_id)
           DO UPDATE SET project_title = EXCLUDED.project_title,
                         position_label = EXCLUDED.position_label,
@@ -1230,6 +1239,7 @@ router.post(
                         product_photo_folder_url = EXCLUDED.product_photo_folder_url,
                         manual_book_url = EXCLUDED.manual_book_url,
                         demo_video_url = EXCLUDED.demo_video_url,
+                        github_url = EXCLUDED.github_url,
                         repository_url = EXCLUDED.repository_url,
                         deployed_url = EXCLUDED.deployed_url,
                         dataset_model_url = EXCLUDED.dataset_model_url,
@@ -1248,6 +1258,7 @@ router.post(
             project.productPhotoFolderUrl,
             project.manualBookUrl,
             project.demoVideoUrl,
+            project.githubUrl,
             project.repositoryUrl,
             project.deployedUrl,
             project.datasetModelUrl,
