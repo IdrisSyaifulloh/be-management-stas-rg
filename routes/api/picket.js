@@ -4,10 +4,12 @@ const { extractRole } = require("../../utils/roleGuard");
 const { requireSafeId } = require("../../utils/securityValidation");
 const { resolveStudentId } = require("../../utils/studentResolver");
 const {
+  createPicketHoliday,
   createPicketLeaveRequest,
   createPicketSchedule,
   createPicketSubmission,
   createPicketTask,
+  deletePicketHoliday,
   deletePicketSchedule,
   deletePicketTask,
   generatePicketSchedule,
@@ -17,9 +19,11 @@ const {
   getPicketTodayForStudent,
   isPicketManagerUser,
   listPicketDays,
+  listPicketHolidays,
   listPicketLeaveRequests,
   listPicketManagers,
   listPicketSchedules,
+  listPicketSubmissions,
   listPicketStudentOptions,
   listPicketTasks,
   replacePicketManagers,
@@ -27,6 +31,7 @@ const {
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
   updatePicketSchedule,
+  updatePicketHoliday,
   updatePicketSettings,
   updatePicketTask
 } = require("../../utils/picketService");
@@ -50,7 +55,7 @@ router.use((req, res, next) => {
 
 async function canManagePicket(req) {
   const role = extractRole(req);
-  if (role === "operator") return true;
+  if (role === "operator" || role === "admin") return true;
   if (role === "mahasiswa" && req.authUser?.id) {
     return isPicketManagerUser(req.authUser.id);
   }
@@ -120,6 +125,64 @@ router.get(
   asyncHandler(async (req, res) => {
     const includeInactive = String(req.query.includeInactive || "true").toLowerCase() !== "false";
     res.json(await listPicketDays({ includeInactive }));
+  })
+);
+
+router.get(
+  "/holidays",
+  asyncHandler(async (req, res) => {
+    const items = await listPicketHolidays({
+      startDate: req.query.startDate || req.query.start_date || null,
+      endDate: req.query.endDate || req.query.end_date || null
+    });
+    return res.json({ items, holidays: items });
+  })
+);
+
+router.post(
+  "/holidays",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const holiday = await createPicketHoliday({
+      ...(req.body || {}),
+      createdBy: req.authUser?.id || null,
+      updatedBy: req.authUser?.id || null
+    });
+    return res.status(201).json({
+      message: "Hari libur piket berhasil disimpan.",
+      holiday
+    });
+  })
+);
+
+router.patch(
+  "/holidays/:id",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const id = requireSafeId(req.params.id, "id");
+    const holiday = await updatePicketHoliday(id, {
+      ...(req.body || {}),
+      updatedBy: req.authUser?.id || null
+    });
+    if (!holiday) return res.status(404).json({ message: "Hari libur piket tidak ditemukan." });
+    return res.json({
+      message: "Hari libur piket berhasil diperbarui.",
+      holiday
+    });
+  })
+);
+
+router.delete(
+  "/holidays/:id",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const id = requireSafeId(req.params.id, "id");
+    const holiday = await deletePicketHoliday(id);
+    if (!holiday) return res.status(404).json({ message: "Hari libur piket tidak ditemukan." });
+    return res.json({
+      message: "Hari libur piket berhasil dihapus.",
+      holiday
+    });
   })
 );
 
@@ -307,6 +370,20 @@ router.get(
     const studentId = await resolveAllowedStudentId(req, req.query.studentId || req.query.student_id);
     if (!studentId) return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     return res.json(await getPicketHistory(studentId));
+  })
+);
+
+router.get(
+  "/submissions",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const submissions = await listPicketSubmissions({
+      status: req.query.status || null,
+      date: req.query.date || null,
+      startDate: req.query.startDate || req.query.start_date || null,
+      endDate: req.query.endDate || req.query.end_date || null
+    });
+    return res.json({ submissions });
   })
 );
 

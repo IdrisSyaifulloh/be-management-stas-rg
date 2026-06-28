@@ -178,6 +178,11 @@ router.get(
       WHERE psch.schedule_date BETWEEN $1::date AND $2::date
         AND NOT EXISTS (
           SELECT 1
+          FROM picket_holidays ph
+          WHERE ph.holiday_date = psch.schedule_date
+        )
+        AND NOT EXISTS (
+          SELECT 1
           FROM picket_leave_requests plr
           WHERE plr.schedule_id = psch.id
             AND plr.student_id = psch.student_id

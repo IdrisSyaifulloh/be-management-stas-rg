@@ -361,13 +361,21 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
     SELECT
       to_regclass('public.picket_schedules') AS picket_schedules,
       to_regclass('public.picket_submissions') AS picket_submissions,
-      to_regclass('public.picket_leave_requests') AS picket_leave_requests
+      to_regclass('public.picket_leave_requests') AS picket_leave_requests,
+      to_regclass('public.picket_holidays') AS picket_holidays
     `
   );
   const tables = tableCheck.rows[0] || {};
   if (!tables.picket_schedules || !tables.picket_submissions || !tables.picket_leave_requests) {
     return [];
   }
+  const holidayExclusion = tables.picket_holidays
+    ? `AND NOT EXISTS (
+        SELECT 1
+        FROM picket_holidays ph
+        WHERE ph.holiday_date = psch.schedule_date
+      )`
+    : "";
 
   const result = await query(
     `
@@ -375,6 +383,7 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
     FROM picket_schedules psch
     WHERE psch.student_id = $1
       AND psch.schedule_date < $2::date
+      ${holidayExclusion}
       AND NOT EXISTS (
         SELECT 1
         FROM picket_submissions psub
@@ -658,4 +667,3 @@ module.exports = {
   studentAccessLockMiddleware,
   unlockAccessLock
 };
-

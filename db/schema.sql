@@ -550,6 +550,17 @@ CREATE TABLE IF NOT EXISTS picket_managers (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS picket_holidays (
+  id TEXT PRIMARY KEY,
+  holiday_date DATE NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  notes TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -638,6 +649,7 @@ CREATE INDEX IF NOT EXISTS idx_picket_schedules_date ON picket_schedules(schedul
 CREATE INDEX IF NOT EXISTS idx_picket_schedules_student_date ON picket_schedules(student_id, schedule_date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_picket_holidays_date ON picket_holidays(holiday_date);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_logged_at ON audit_logs(logged_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created ON notifications(recipient_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dashboard_reminders_student_date ON dashboard_reminder_logs(student_id, type, reference_date, sent_at DESC);

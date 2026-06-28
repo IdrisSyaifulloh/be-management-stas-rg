@@ -231,10 +231,22 @@ async function ensurePicketTables() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS picket_holidays (
+          id TEXT PRIMARY KEY,
+          holiday_date DATE NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          notes TEXT,
+          created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE INDEX IF NOT EXISTS idx_picket_schedules_date ON picket_schedules(schedule_date);
         CREATE INDEX IF NOT EXISTS idx_picket_schedules_student_date ON picket_schedules(student_id, schedule_date DESC);
         CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
         CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
+        CREATE INDEX IF NOT EXISTS idx_picket_holidays_date ON picket_holidays(holiday_date);
       `);
 
       await query(`
@@ -461,6 +473,7 @@ function mapTask(row) {
 function mapAssignment(row) {
   if (!row) return null;
   const date = row.date_text || row.schedule_date_text || row.schedule_date || row.date;
+  const isHoliday = Boolean(row.holiday_id);
   return {
     id: row.id,
     schedule_id: row.id,
@@ -485,7 +498,21 @@ function mapAssignment(row) {
     taskName: row.task_name || null,
     task_description: row.task_description || null,
     taskDescription: row.task_description || null,
-    status: row.status,
+    status: isHoliday ? "Libur" : row.status,
+    original_status: row.status,
+    originalStatus: row.status,
+    is_holiday: isHoliday,
+    isHoliday,
+    is_exempt: isHoliday,
+    isExempt: isHoliday,
+    holiday: isHoliday
+      ? {
+          id: row.holiday_id,
+          date: row.holiday_date_text || date,
+          name: row.holiday_name,
+          notes: row.holiday_notes || null
+        }
+      : null,
     submitted: Boolean(row.submission_id),
     submission_id: row.submission_id || null,
     submissionId: row.submission_id || null,
@@ -603,6 +630,199 @@ function mapLeaveRequest(row) {
     created_at: row.created_at,
     createdAt: row.created_at
   };
+}
+
+function mapPicketHoliday(row) {
+  if (!row) return null;
+  const date = row.holiday_date_text || row.holiday_date;
+  return {
+    id: row.id,
+    date,
+    holiday_date: date,
+    holidayDate: date,
+    name: row.name,
+    notes: row.notes || null,
+    created_by: row.created_by || null,
+    createdBy: row.created_by || null,
+    updated_by: row.updated_by || null,
+    updatedBy: row.updated_by || null,
+    created_at: row.created_at,
+    createdAt: row.created_at,
+    updated_at: row.updated_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function getPicketHolidayByDate(date, executor = query) {
+  await ensurePicketTables();
+  const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  const result = await runQuery(
+    executor,
+    `
+    SELECT *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text
+    FROM picket_holidays
+    WHERE holiday_date = $1::date
+    LIMIT 1
+    `,
+    [targetDate]
+  );
+  return result.rows[0] ? mapPicketHoliday(result.rows[0]) : null;
+}
+
+async function ensurePicketDateIsNotHoliday(date, executor = query) {
+  const holiday = await getPicketHolidayByDate(date, executor);
+  if (!holiday) return;
+  const error = new Error(`Tanggal ${holiday.date} ditetapkan sebagai hari libur piket: ${holiday.name}.`);
+  error.statusCode = 409;
+  error.holiday = holiday;
+  throw error;
+}
+
+async function listPicketHolidays({ startDate = null, endDate = null } = {}) {
+  await ensurePicketTables();
+  const params = [];
+  const clauses = [];
+  if (startDate) {
+    params.push(normalizeIsoDate(startDate));
+    clauses.push(`holiday_date >= $${params.length}::date`);
+  }
+  if (endDate) {
+    params.push(normalizeIsoDate(endDate));
+    clauses.push(`holiday_date <= $${params.length}::date`);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const result = await query(
+    `
+    SELECT *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text
+    FROM picket_holidays
+    ${where}
+    ORDER BY holiday_date ASC
+    `,
+    params
+  );
+  return result.rows.map(mapPicketHoliday);
+}
+
+function normalizePicketHolidayPayload(payload = {}) {
+  const date = normalizeIsoDate(payload.date || payload.holidayDate || payload.holiday_date);
+  const dayOfWeek = getJakartaDayOfWeek(date);
+  if (dayOfWeek < 1 || dayOfWeek > 5) {
+    const error = new Error("Hari libur piket hanya dapat ditetapkan untuk Senin sampai Jumat.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const name = String(payload.name || payload.title || payload.label || "").trim();
+  if (!name) {
+    const error = new Error("Nama hari libur wajib diisi.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return {
+    date,
+    name,
+    notes: payload.notes == null ? null : String(payload.notes).trim() || null
+  };
+}
+
+async function releasePicketLocksForHoliday(date, updatedBy = null) {
+  const result = await query(
+    `
+    SELECT DISTINCT student_id
+    FROM picket_schedules
+    WHERE schedule_date = $1::date
+    `,
+    [date]
+  );
+  await Promise.all(result.rows.flatMap((row) => [
+    deactivateAccessLocksForStudentDateReason({
+      studentId: row.student_id,
+      date,
+      reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
+      unlockedBy: updatedBy
+    }),
+    deactivateAccessLocksForStudentDateReason({
+      studentId: row.student_id,
+      date,
+      reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+      unlockedBy: updatedBy
+    })
+  ]));
+}
+
+async function createPicketHoliday(payload = {}) {
+  await ensurePicketTables();
+  const normalized = normalizePicketHolidayPayload(payload);
+  const updatedBy = payload.updatedBy || payload.updated_by || payload.createdBy || payload.created_by || null;
+  const id = buildId("PKT-HOL");
+  const result = await query(
+    `
+    INSERT INTO picket_holidays (id, holiday_date, name, notes, created_by, updated_by)
+    VALUES ($1, $2::date, $3, $4, $5, $5)
+    ON CONFLICT (holiday_date)
+    DO UPDATE SET name = EXCLUDED.name,
+                  notes = EXCLUDED.notes,
+                  updated_by = EXCLUDED.updated_by,
+                  updated_at = NOW()
+    RETURNING *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text
+    `,
+    [id, normalized.date, normalized.name, normalized.notes, updatedBy]
+  );
+  await releasePicketLocksForHoliday(normalized.date, updatedBy);
+  return mapPicketHoliday(result.rows[0]);
+}
+
+async function updatePicketHoliday(id, payload = {}) {
+  await ensurePicketTables();
+  const currentResult = await query(
+    `SELECT *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text FROM picket_holidays WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  if (currentResult.rowCount === 0) return null;
+  const current = mapPicketHoliday(currentResult.rows[0]);
+  const normalized = normalizePicketHolidayPayload({
+    date: payload.date || payload.holidayDate || payload.holiday_date || current.date,
+    name: payload.name || payload.title || payload.label || current.name,
+    notes: Object.prototype.hasOwnProperty.call(payload, "notes") ? payload.notes : current.notes
+  });
+  const updatedBy = payload.updatedBy || payload.updated_by || null;
+  let result;
+  try {
+    result = await query(
+      `
+      UPDATE picket_holidays
+      SET holiday_date = $2::date,
+          name = $3,
+          notes = $4,
+          updated_by = $5,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text
+      `,
+      [id, normalized.date, normalized.name, normalized.notes, updatedBy]
+    );
+  } catch (error) {
+    if (error?.code === "23505") {
+      const conflict = new Error(`Hari libur piket untuk tanggal ${normalized.date} sudah tersedia.`);
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    throw error;
+  }
+  await releasePicketLocksForHoliday(normalized.date, updatedBy);
+  return mapPicketHoliday(result.rows[0]);
+}
+
+async function deletePicketHoliday(id) {
+  await ensurePicketTables();
+  const result = await query(
+    `
+    DELETE FROM picket_holidays
+    WHERE id = $1
+    RETURNING *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text
+    `,
+    [id]
+  );
+  return result.rows[0] ? mapPicketHoliday(result.rows[0]) : null;
 }
 
 async function getPicketSettings() {
@@ -982,12 +1202,15 @@ async function listPicketSchedules({ date = null, studentId = null, dayId = null
            psch.created_at, psch.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
+           ph.id AS holiday_id, TO_CHAR(ph.holiday_date, 'YYYY-MM-DD') AS holiday_date_text,
+           ph.name AS holiday_name, ph.notes AS holiday_notes,
            psub.id AS submission_id, psub.status AS submission_status
     FROM picket_schedules psch
     JOIN picket_days pd ON pd.id = psch.day_id
     JOIN students s ON s.id = psch.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = psch.task_id
+    LEFT JOIN picket_holidays ph ON ph.holiday_date = psch.schedule_date
     LEFT JOIN picket_submissions psub ON psub.schedule_id = psch.id
     ${where}
     ORDER BY psch.schedule_date DESC, pd.id ASC, u.name ASC
@@ -1008,12 +1231,15 @@ async function getPicketScheduleById(id, executor = query) {
            psch.created_at, psch.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
+           ph.id AS holiday_id, TO_CHAR(ph.holiday_date, 'YYYY-MM-DD') AS holiday_date_text,
+           ph.name AS holiday_name, ph.notes AS holiday_notes,
            psub.id AS submission_id, psub.status AS submission_status
     FROM picket_schedules psch
     JOIN picket_days pd ON pd.id = psch.day_id
     JOIN students s ON s.id = psch.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = psch.task_id
+    LEFT JOIN picket_holidays ph ON ph.holiday_date = psch.schedule_date
     LEFT JOIN picket_submissions psub ON psub.schedule_id = psch.id
     WHERE psch.id = $1
     LIMIT 1
@@ -1026,6 +1252,7 @@ async function getPicketScheduleById(id, executor = query) {
 async function createPicketSchedule(payload = {}) {
   await ensurePicketTables();
   const scheduleDate = normalizeIsoDate(payload.scheduleDate || payload.schedule_date || payload.date, getJakartaDateIso());
+  await ensurePicketDateIsNotHoliday(scheduleDate);
   const studentId = await resolveStudentId(payload.studentId || payload.student_id);
   let taskId = String(payload.taskId || payload.task_id || "").trim();
   const status = String(payload.status || "Ditugaskan").trim() || "Ditugaskan";
@@ -1090,6 +1317,7 @@ async function updatePicketSchedule(id, payload = {}) {
   const scheduleDate = payload.scheduleDate || payload.schedule_date || payload.date
     ? normalizeIsoDate(payload.scheduleDate || payload.schedule_date || payload.date)
     : current.date;
+  await ensurePicketDateIsNotHoliday(scheduleDate);
   const studentId = payload.studentId || payload.student_id
     ? await resolveStudentId(payload.studentId || payload.student_id)
     : current.studentId;
@@ -1320,6 +1548,8 @@ async function fetchAssignmentsByDate(date, executor = query) {
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
+           ph.id AS holiday_id, TO_CHAR(ph.holiday_date, 'YYYY-MM-DD') AS holiday_date_text,
+           ph.name AS holiday_name, ph.notes AS holiday_notes,
            ps.id AS submission_id,
            ps.schedule_id AS submission_schedule_id,
            ps.assignment_id AS submission_assignment_id,
@@ -1336,6 +1566,7 @@ async function fetchAssignmentsByDate(date, executor = query) {
     JOIN students s ON s.id = pa.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
+    LEFT JOIN picket_holidays ph ON ph.holiday_date = pa.schedule_date
     LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
     WHERE pa.schedule_date = $1::date
     ORDER BY u.name ASC
@@ -1382,6 +1613,7 @@ async function normalizeManualStudentIds(studentIds, { allowEmpty = false, activ
 
 async function generateManualPicketSchedule({ date, studentIds, activeTasks, generatedBy = null, allowEmptyStudentIds = false }) {
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  await ensurePicketDateIsNotHoliday(targetDate);
   const manualStudentIds = await normalizeManualStudentIds(studentIds, { allowEmpty: allowEmptyStudentIds });
   const createdIds = [];
   const client = await pool.connect();
@@ -1453,6 +1685,7 @@ async function generatePicketSchedule({
 } = {}) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  await ensurePicketDateIsNotHoliday(targetDate);
   const settings = await getPicketSettings();
   const weeklySchedule = getWeeklyScheduleForDate(settings, targetDate);
   const weeklyStudentIds = weeklySchedule?.studentIds || [];
@@ -1553,6 +1786,7 @@ async function generatePicketSchedule({
 
 async function reconcilePicketAssignmentsForDate({ date, settings = null, generatedBy = null, executor = null } = {}) {
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  await ensurePicketDateIsNotHoliday(targetDate, executor || query);
   const effectiveSettings = settings || await getPicketSettings();
   const weeklySchedule = getWeeklyScheduleForDate(effectiveSettings, targetDate);
   const weeklyStudentIds = await normalizeManualStudentIds(weeklySchedule?.studentIds || [], {
@@ -1728,16 +1962,98 @@ async function listSubmissions({ date = null, studentId = null } = {}) {
   return result.rows.map(mapSubmission);
 }
 
+function normalizeSubmissionStatusFilter(value) {
+  const status = String(value || "").trim();
+  if (!status) return null;
+  if (status === "Menunggu") return "Terkirim";
+  if (SUBMISSION_STATUSES.includes(status)) return status;
+
+  const error = new Error("status wajib salah satu dari Menunggu, Terkirim, Valid, Bermasalah.");
+  error.statusCode = 400;
+  throw error;
+}
+
+function mapPicketSubmissionApproval(row) {
+  return {
+    id: row.id,
+    scheduleId: row.schedule_id || row.assignment_id,
+    assignmentId: row.assignment_id || row.schedule_id,
+    studentId: row.student_id,
+    studentName: row.student_name || null,
+    nim: row.nim || null,
+    taskName: row.task_name || null,
+    date: row.date_text || row.date,
+    photoUrl: row.photo_url || row.file_url || null,
+    submittedAt: row.submitted_at || null,
+    status: row.status,
+    reviewNote: row.review_note || null
+  };
+}
+
+async function listPicketSubmissions({
+  status = null,
+  date = null,
+  startDate = null,
+  endDate = null
+} = {}) {
+  await ensurePicketTables();
+  const params = [];
+  const clauses = [];
+  const statusFilter = normalizeSubmissionStatusFilter(status);
+
+  if (statusFilter) {
+    params.push(statusFilter);
+    clauses.push(`ps.status = $${params.length}`);
+  }
+
+  if (date) {
+    params.push(normalizeIsoDate(date));
+    clauses.push(`ps.date = $${params.length}::date`);
+  } else {
+    if (startDate) {
+      params.push(normalizeIsoDate(startDate));
+      clauses.push(`ps.date >= $${params.length}::date`);
+    }
+    if (endDate) {
+      params.push(normalizeIsoDate(endDate));
+      clauses.push(`ps.date <= $${params.length}::date`);
+    }
+  }
+
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const result = await query(
+    `
+    SELECT ps.id, ps.schedule_id, ps.assignment_id, ps.student_id,
+           TO_CHAR(ps.date, 'YYYY-MM-DD') AS date_text,
+           ps.photo_url, ps.file_url, ps.status, ps.submitted_at, ps.review_note,
+           s.nim, u.name AS student_name, pt.name AS task_name
+    FROM picket_submissions ps
+    JOIN students s ON s.id = ps.student_id
+    JOIN users u ON u.id = s.user_id
+    LEFT JOIN picket_schedules psch ON psch.id = ps.schedule_id
+    LEFT JOIN picket_tasks pt ON pt.id = psch.task_id
+    ${where}
+    ORDER BY ps.date DESC, ps.submitted_at DESC, u.name ASC
+    `,
+    params
+  );
+  return result.rows.map(mapPicketSubmissionApproval);
+}
+
 async function getPicketOverview(date) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  const [assignments, submissions, leaveRequests] = await Promise.all([
+  const [assignments, submissions, leaveRequests, holiday] = await Promise.all([
     fetchAssignmentsByDate(targetDate),
     listSubmissions({ date: targetDate }),
-    listPicketLeaveRequests({ date: targetDate })
+    listPicketLeaveRequests({ date: targetDate }),
+    getPicketHolidayByDate(targetDate)
   ]);
   return {
     date: targetDate,
+    is_holiday: Boolean(holiday),
+    isHoliday: Boolean(holiday),
+    holiday,
     schedules: assignments,
     assignments,
     submissions,
@@ -1753,8 +2069,9 @@ async function getPicketOverview(date) {
 async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDateIso()) {
   await ensurePicketTables();
   const studentId = await resolveStudentId(studentIdOrUserId);
-  if (!studentId) return { assignment: null };
+  if (!studentId) return { assignment: null, holiday: null, isHoliday: false, is_holiday: false };
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  const holiday = await getPicketHolidayByDate(targetDate);
   const result = await query(
     `
     SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
@@ -1764,6 +2081,8 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
+           ph.id AS holiday_id, TO_CHAR(ph.holiday_date, 'YYYY-MM-DD') AS holiday_date_text,
+           ph.name AS holiday_name, ph.notes AS holiday_notes,
            ps.id AS submission_id,
            ps.schedule_id AS submission_schedule_id,
            ps.assignment_id AS submission_assignment_id,
@@ -1780,13 +2099,21 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
     JOIN students s ON s.id = pa.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
+    LEFT JOIN picket_holidays ph ON ph.holiday_date = pa.schedule_date
     LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
     WHERE pa.student_id = $1 AND pa.schedule_date = $2::date
     LIMIT 1
     `,
     [studentId, targetDate]
   );
-  return { assignment: result.rows[0] ? mapAssignment(result.rows[0]) : null };
+  return {
+    assignment: result.rows[0] ? mapAssignment(result.rows[0]) : null,
+    holiday,
+    is_holiday: Boolean(holiday),
+    isHoliday: Boolean(holiday),
+    is_exempt: Boolean(holiday),
+    isExempt: Boolean(holiday)
+  };
 }
 
 async function getPicketHistory(studentIdOrUserId) {
@@ -1802,6 +2129,8 @@ async function getPicketHistory(studentIdOrUserId) {
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
+           ph.id AS holiday_id, TO_CHAR(ph.holiday_date, 'YYYY-MM-DD') AS holiday_date_text,
+           ph.name AS holiday_name, ph.notes AS holiday_notes,
            ps.id AS submission_id,
            ps.schedule_id AS submission_schedule_id,
            ps.assignment_id AS submission_assignment_id,
@@ -1818,6 +2147,7 @@ async function getPicketHistory(studentIdOrUserId) {
     JOIN students s ON s.id = pa.student_id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
+    LEFT JOIN picket_holidays ph ON ph.holiday_date = pa.schedule_date
     LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
     WHERE pa.student_id = $1
     ORDER BY pa.schedule_date DESC, pa.created_at DESC, pa.id ASC
@@ -1848,6 +2178,19 @@ async function hasApprovedPicketLeave({ scheduleId, assignmentId, studentId, dat
 async function getPicketCheckoutRequirement(studentIdOrUserId, date = getJakartaDateIso()) {
   const today = await getPicketTodayForStudent(studentIdOrUserId, date);
   const assignment = today.assignment;
+  if (today.isHoliday) {
+    return {
+      required: false,
+      assignment,
+      holiday: today.holiday,
+      isHoliday: true,
+      is_holiday: true,
+      isExempt: true,
+      is_exempt: true,
+      approvedLeave: false,
+      submitted: assignment?.submitted === true
+    };
+  }
   if (!assignment) {
     return { required: false, assignment: null, approvedLeave: false, submitted: false };
   }
@@ -1872,6 +2215,7 @@ async function createPicketSubmission(payload = {}) {
   const scheduleId = getScheduleId(payload);
   const studentId = await resolveStudentId(payload.studentId || payload.student_id);
   const date = normalizeIsoDate(payload.date, getJakartaDateIso());
+  await ensurePicketDateIsNotHoliday(date);
   if (!scheduleId || !studentId) {
     const error = new Error("scheduleId dan studentId wajib diisi.");
     error.statusCode = 400;
@@ -2030,6 +2374,7 @@ async function createPicketLeaveRequest(payload = {}) {
   const scheduleId = getScheduleId(payload);
   const studentId = await resolveStudentId(payload.studentId || payload.student_id);
   const date = normalizeIsoDate(payload.date, getJakartaDateIso());
+  await ensurePicketDateIsNotHoliday(date);
   const reason = String(payload.reason || "").trim();
   if (!scheduleId || !studentId || !reason) {
     const error = new Error("scheduleId, studentId, date, dan reason wajib diisi.");
@@ -2097,24 +2442,29 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
 }
 
 module.exports = {
+  createPicketHoliday,
   createPicketLeaveRequest,
   createPicketSchedule,
   createPicketSubmission,
   createPicketTask,
+  deletePicketHoliday,
   deletePicketSchedule,
   deletePicketTask,
   ensurePicketTables,
   generatePicketSchedule,
   getPicketCheckoutRequirement,
   getPicketHistory,
+  getPicketHolidayByDate,
   getPicketOverview,
   getPicketSettings,
   getPicketTodayForStudent,
   isPicketManagerUser,
   listPicketDays,
+  listPicketHolidays,
   listPicketLeaveRequests,
   listPicketManagers,
   listPicketSchedules,
+  listPicketSubmissions,
   listPicketStudentOptions,
   listPicketTasks,
   replacePicketManagers,
@@ -2122,6 +2472,7 @@ module.exports = {
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
   updatePicketSchedule,
+  updatePicketHoliday,
   updatePicketSettings,
   updatePicketTask
 };
