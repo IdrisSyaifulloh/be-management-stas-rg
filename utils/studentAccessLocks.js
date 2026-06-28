@@ -379,6 +379,10 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
         SELECT 1
         FROM picket_submissions psub
         WHERE psub.schedule_id = psch.id
+           OR (
+             psub.student_id = psch.student_id
+             AND psub.date = psch.schedule_date
+           )
       )
       AND NOT EXISTS (
         SELECT 1
@@ -410,6 +414,71 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
     createdIds.push(...ids);
   }
   return createdIds;
+}
+
+async function getPicketSubmissionLockDebugSnapshot({ studentId, date = null } = {}) {
+  await ensureStudentAccessLockTable();
+  const normalizedStudentId = String(studentId || "").trim();
+  const normalizedDate = normalizeHolidayDate(date);
+  if (!normalizedStudentId) return null;
+
+  const scheduleParams = [normalizedStudentId];
+  const scheduleDateClause = normalizedDate ? "AND schedule_date = $2::date" : "";
+  if (normalizedDate) scheduleParams.push(normalizedDate);
+  const schedules = await query(
+    `
+    SELECT id, TO_CHAR(schedule_date, 'YYYY-MM-DD') AS schedule_date, student_id
+    FROM picket_schedules
+    WHERE student_id = $1
+      ${scheduleDateClause}
+    ORDER BY schedule_date DESC, id ASC
+    LIMIT 50
+    `,
+    scheduleParams
+  );
+
+  const submissionParams = [normalizedStudentId];
+  const submissionDateClause = normalizedDate ? "AND date = $2::date" : "";
+  if (normalizedDate) submissionParams.push(normalizedDate);
+  const submissions = await query(
+    `
+    SELECT id, schedule_id, assignment_id, student_id, TO_CHAR(date, 'YYYY-MM-DD') AS date, status
+    FROM picket_submissions
+    WHERE student_id = $1
+      ${submissionDateClause}
+    ORDER BY date DESC, submitted_at DESC
+    LIMIT 50
+    `,
+    submissionParams
+  );
+
+  const lockParams = [
+    normalizedStudentId,
+    ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+    ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+  ];
+  const lockDateClause = normalizedDate ? "AND lock_date = $4::date" : "";
+  if (normalizedDate) lockParams.push(normalizedDate);
+  const locks = await query(
+    `
+    SELECT reason, TO_CHAR(lock_date, 'YYYY-MM-DD') AS lock_date, active, locked, status
+    FROM student_access_locks
+    WHERE student_id = $1
+      AND reason IN ($2, $3)
+      ${lockDateClause}
+    ORDER BY lock_date DESC, reason ASC
+    LIMIT 50
+    `,
+    lockParams
+  );
+
+  return {
+    studentId: normalizedStudentId,
+    date: normalizedDate || null,
+    picket_schedules: schedules.rows,
+    picket_submissions: submissions.rows,
+    student_access_locks: locks.rows
+  };
 }
 
 async function getActiveLockForStudent(studentIdOrUserId) {
@@ -533,7 +602,10 @@ async function studentAccessLockMiddleware(req, res, next) {
     path.startsWith("/api/v1/profile") ||
     path.startsWith("/api/user-ui-state") ||
     path.startsWith("/api/v1/user-ui-state") ||
+    (method === "GET" && (path === "/api/picket/managers/me" || path === "/api/v1/picket/managers/me")) ||
+    (method === "GET" && (path === "/api/picket/students" || path === "/api/v1/picket/students")) ||
     (method === "GET" && (path === "/api/picket/today" || path === "/api/v1/picket/today")) ||
+    (method === "GET" && (path === "/api/picket/history" || path === "/api/v1/picket/history")) ||
     (method === "POST" && (path === "/api/picket/submissions" || path === "/api/v1/picket/submissions")) ||
     (method === "GET" && (path === "/api/student-access-locks/me" || path === "/api/v1/student-access-locks/me"));
 
@@ -569,6 +641,7 @@ module.exports = {
   createCheckoutMissing22Locks,
   createAttendanceAbsentLocks,
   deactivateAccessLocksForStudentDateReason,
+  getPicketSubmissionLockDebugSnapshot,
   createOverduePicketSubmissionMissingLocksForStudent,
   createPicketSubmissionInvalidLocks,
   createPicketSubmissionMissingLocks,
@@ -585,8 +658,4 @@ module.exports = {
   studentAccessLockMiddleware,
   unlockAccessLock
 };
-
-
-
-
 

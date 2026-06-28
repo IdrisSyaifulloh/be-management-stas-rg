@@ -3,6 +3,7 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { extractRole } = require("../../utils/roleGuard");
 const {
   getActiveLockForStudent,
+  getPicketSubmissionLockDebugSnapshot,
   listAccessLocks,
   mapAccessLockRow,
   createStudentAccessLocks,
@@ -58,6 +59,20 @@ router.get(
     }
 
     res.json(await listAccessLocks({ status: req.query.status, search: req.query.search || req.query.q }));
+  })
+);
+
+router.get(
+  "/debug/picket",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "operator") {
+      return res.status(403).json({ message: "Debug access lock piket hanya untuk operator." });
+    }
+
+    const studentId = requireSafeId(req.query.studentId || req.query.student_id, "studentId");
+    const date = req.query.date ? String(req.query.date).trim().slice(0, 10) : null;
+    res.json(await getPicketSubmissionLockDebugSnapshot({ studentId, date }));
   })
 );
 

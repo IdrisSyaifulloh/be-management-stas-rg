@@ -19,9 +19,11 @@ function csvEscape(value) {
     : str;
 }
 
-function buildCsvBuffer(headers, rows) {
+function buildCsvBuffer(headers, rows, headerRows = null) {
+  const normalizedHeaderRows = Array.isArray(headerRows) && headerRows.length ? headerRows : [headers];
   const csvRows = rows.map((row) => row.map((cell) => csvEscape(cell)).join(","));
-  const csvContent = [headers.join(","), ...csvRows].join("\n");
+  const csvHeaders = normalizedHeaderRows.map((row) => row.map((cell) => csvEscape(cell)).join(","));
+  const csvContent = [...csvHeaders, ...csvRows].join("\n");
   return Buffer.from(`\ufeff${csvContent}`, "utf8");
 }
 
@@ -45,9 +47,16 @@ function columnLetter(index) {
   return label;
 }
 
-function buildSheetXml(headers, rows) {
-  const dataRows = [headers, ...rows];
-  const lastColumn = columnLetter(Math.max(headers.length, 1) - 1);
+function buildSheetXml(headers, rows, headerRows = null, merges = []) {
+  const normalizedHeaderRows = Array.isArray(headerRows) && headerRows.length ? headerRows : [headers];
+  const dataRows = [...normalizedHeaderRows, ...rows];
+  const maxColumns = Math.max(
+    headers.length,
+    ...normalizedHeaderRows.map((row) => row.length),
+    ...rows.map((row) => row.length),
+    1
+  );
+  const lastColumn = columnLetter(maxColumns - 1);
   const lastRow = Math.max(dataRows.length, 1);
 
   const rowXml = dataRows
@@ -65,16 +74,21 @@ function buildSheetXml(headers, rows) {
     })
     .join("");
 
+  const mergeXml = Array.isArray(merges) && merges.length
+    ? `<mergeCells count="${merges.length}">${merges.map((ref) => `<mergeCell ref="${xmlEscape(ref)}"/>`).join("")}</mergeCells>`
+    : "";
+
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="A1:${lastColumn}${lastRow}"/>
   <sheetViews><sheetView workbookViewId="0"/></sheetViews>
   <sheetFormatPr defaultRowHeight="15"/>
   <sheetData>${rowXml}</sheetData>
+  ${mergeXml}
 </worksheet>`;
 }
 
-function buildXlsxFiles({ sheetName, headers, rows, title }) {
+function buildXlsxFiles({ sheetName, headers, rows, title, headerRows = null, merges = [] }) {
   const safeSheetName = xmlEscape((sheetName || "Sheet1").slice(0, 31) || "Sheet1");
   const safeTitle = xmlEscape(title || sheetName || "Export");
   const createdAt = new Date().toISOString();
@@ -174,7 +188,7 @@ function buildXlsxFiles({ sheetName, headers, rows, title }) {
     },
     {
       name: "xl/worksheets/sheet1.xml",
-      data: Buffer.from(buildSheetXml(headers, rows), "utf8")
+      data: Buffer.from(buildSheetXml(headers, rows, headerRows, merges), "utf8")
     }
   ];
 }
@@ -278,8 +292,8 @@ function createZipBuffer(files) {
   return Buffer.concat([...localParts, centralDirectory, endRecord]);
 }
 
-function buildXlsxBuffer({ title, headers, rows, sheetName }) {
-  return createZipBuffer(buildXlsxFiles({ title, headers, rows, sheetName }));
+function buildXlsxBuffer({ title, headers, rows, sheetName, headerRows = null, merges = [] }) {
+  return createZipBuffer(buildXlsxFiles({ title, headers, rows, sheetName, headerRows, merges }));
 }
 
 function toPdfLiteralString(value) {
@@ -375,21 +389,24 @@ function buildPdfTablePage({
   generatedAt,
   metadata,
   headers,
+  headerRows,
   rows,
   rowHeights,
   pageIndex,
   pageWidth,
   pageHeight,
   margins,
-  columnWidths
+  columnWidths,
+  rowFontSize,
+  cellPadding,
+  lineHeight
 }) {
   const commands = [];
   const titleFontSize = 16;
   const textFontSize = 10;
-  const rowFontSize = 9;
-  const headerHeight = 24;
-  const cellPadding = 4;
-  const LINE_HEIGHT = 11;
+  const normalizedHeaderRows = Array.isArray(headerRows) && headerRows.length ? headerRows : [headers];
+  const headerRowHeight = Math.max(14, rowFontSize + cellPadding * 2 + 2);
+  const headerHeight = headerRowHeight * normalizedHeaderRows.length;
   const usableWidth = pageWidth - margins.left - margins.right;
 
   let cursorY = pageHeight - margins.top;
@@ -430,20 +447,34 @@ function buildPdfTablePage({
   commands.push(buildPdfFillRectCommand(margins.left, headerBottomY, usableWidth, headerHeight));
   commands.push(buildPdfRectCommand(margins.left, headerBottomY, usableWidth, headerHeight));
 
-  let currentX = margins.left;
-  headers.forEach((header, index) => {
-    const width = columnWidths[index];
-    if (index > 0) {
-      commands.push(`${currentX.toFixed(2)} ${headerBottomY.toFixed(2)} m ${currentX.toFixed(2)} ${headerTopY.toFixed(2)} l S`);
+  normalizedHeaderRows.forEach((headerRow, headerRowIndex) => {
+    const rowTopY = headerTopY - headerRowIndex * headerRowHeight;
+    const rowBottomY = rowTopY - headerRowHeight;
+    if (headerRowIndex > 0) {
+      commands.push(`${margins.left.toFixed(2)} ${rowTopY.toFixed(2)} m ${(margins.left + usableWidth).toFixed(2)} ${rowTopY.toFixed(2)} l S`);
     }
-    commands.push(buildPdfTextCommand({
-      text: stripLineBreaks(header),
-      x: currentX + cellPadding,
-      y: headerBottomY + 7,
-      font: "F2",
-      fontSize: rowFontSize
-    }));
-    currentX += width;
+
+    let currentX = margins.left;
+    headers.forEach((header, index) => {
+      const width = columnWidths[index];
+      if (index > 0) {
+        commands.push(`${currentX.toFixed(2)} ${rowBottomY.toFixed(2)} m ${currentX.toFixed(2)} ${rowTopY.toFixed(2)} l S`);
+      }
+      const headerLines = normalizeCell(headerRow[index] ?? "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      (headerLines.length ? headerLines : [""]).slice(0, 2).forEach((line, lineIdx) => {
+        commands.push(buildPdfTextCommand({
+          text: stripLineBreaks(line),
+          x: currentX + cellPadding,
+          y: rowTopY - cellPadding - (rowFontSize - 1) - lineIdx * lineHeight,
+          font: "F2",
+          fontSize: rowFontSize
+        }));
+      });
+      currentX += width;
+    });
   });
 
   let rowTopY = headerBottomY;
@@ -463,7 +494,7 @@ function buildPdfTablePage({
       const innerWidth = Math.max(8, width - cellPadding * 2);
       const lines = wrapText(cell, innerWidth, rowFontSize);
       lines.forEach((line, lineIdx) => {
-        const textY = rowTopY - cellPadding - (rowFontSize - 1) - lineIdx * LINE_HEIGHT;
+        const textY = rowTopY - cellPadding - (rowFontSize - 1) - lineIdx * lineHeight;
         if (textY >= rowBottomY + 1) {
           commands.push(buildPdfTextCommand({
             text: line,
@@ -484,19 +515,23 @@ function buildPdfTablePage({
   return commands.join("\n");
 }
 
-function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = [], columnWeights = [] }) {
+function getPdfTableConfig({ headers, rows, columnWeights = [], headerRows = null, metadata = [], filtersSummary = [] }) {
   const pageWidth = 842;
   const pageHeight = 595;
-  const margins = { top: 36, right: 36, bottom: 30, left: 36 };
+  const columnCount = Math.max(headers.length, 1);
+  const denseTable = columnCount > 14;
+  const margins = denseTable
+    ? { top: 28, right: 18, bottom: 24, left: 18 }
+    : { top: 36, right: 36, bottom: 30, left: 36 };
 
-  // PDF wrapping constants (kept in sync with buildPdfTablePage)
-  const ROW_FONT_SIZE = 9;
-  const CELL_PADDING = 4;
-  const LINE_HEIGHT = 11;
-  const MIN_ROW_HEIGHT = 20;
+  const ROW_FONT_SIZE = Math.max(5, Math.min(9, Math.floor(120 / columnCount)));
+  const CELL_PADDING = Math.max(1.5, Math.min(4, ROW_FONT_SIZE * 0.38));
+  const LINE_HEIGHT = Math.max(6, ROW_FONT_SIZE + 2);
+  const MIN_ROW_HEIGHT = Math.max(12, ROW_FONT_SIZE + CELL_PADDING * 2 + 2);
 
   const generatedAt = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
   const headerMetadata = metadata.length ? metadata : filtersSummary;
+  const normalizedHeaderRows = Array.isArray(headerRows) && headerRows.length ? headerRows : [headers];
   const usableWidth = pageWidth - margins.left - margins.right;
   const columnWidths = computePdfColumnWidths(headers, rows, usableWidth, columnWeights);
 
@@ -508,10 +543,25 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
   // Height budget per page: title block + metadata lines + table header
   const titleBlockH = 22 + 16 + 8;
   const metaH = headerMetadata.length * 14;
-  const tableHeaderH = 24;
+  const tableHeaderH = Math.max(14, ROW_FONT_SIZE + CELL_PADDING * 2 + 2) * normalizedHeaderRows.length;
   const availableBodyH = pageHeight - margins.top - margins.bottom - titleBlockH - metaH - tableHeaderH;
 
-  // Paginate by accumulated row heights instead of a fixed row count
+  return {
+    pageWidth,
+    pageHeight,
+    margins,
+    rowFontSize: ROW_FONT_SIZE,
+    cellPadding: CELL_PADDING,
+    lineHeight: LINE_HEIGHT,
+    columnWidths,
+    rowHeights: allRowHeights,
+    headerMetadata,
+    normalizedHeaderRows,
+    availableBodyH
+  };
+}
+
+function paginateRows(rows, rowHeights, availableBodyH) {
   const pageChunks = [];
   const pageChunkHeights = [];
 
@@ -524,17 +574,60 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
       let accumulated = 0;
       let count = 0;
       while (offset + count < rows.length) {
-        const h = allRowHeights[offset + count];
+        const h = rowHeights[offset + count];
         if (count > 0 && accumulated + h > availableBodyH) break;
         accumulated += h;
         count++;
       }
       count = Math.max(1, count);
       pageChunks.push(rows.slice(offset, offset + count));
-      pageChunkHeights.push(allRowHeights.slice(offset, offset + count));
+      pageChunkHeights.push(rowHeights.slice(offset, offset + count));
       offset += count;
     }
   }
+
+  return { pageChunks, pageChunkHeights };
+}
+
+function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = [], columnWeights = [], headerRows = null, sections = null }) {
+  const generatedAt = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
+  const pdfSections = Array.isArray(sections) && sections.length
+    ? sections
+    : [{
+      title,
+      headers,
+      rows,
+      metadata,
+      filtersSummary,
+      columnWeights,
+      headerRows
+    }];
+
+  const pagePlans = [];
+  pdfSections.forEach((section) => {
+    const sectionHeaders = section.headers || headers;
+    const sectionRows = section.rows || [];
+    const config = getPdfTableConfig({
+      headers: sectionHeaders,
+      rows: sectionRows,
+      columnWeights: section.columnWeights || columnWeights,
+      headerRows: section.headerRows || headerRows,
+      metadata: section.metadata || metadata,
+      filtersSummary: section.filtersSummary || filtersSummary
+    });
+    const { pageChunks, pageChunkHeights } = paginateRows(sectionRows, config.rowHeights, config.availableBodyH);
+
+    pageChunks.forEach((chunk, sectionPageIndex) => {
+      pagePlans.push({
+        title: section.title || title,
+        headers: sectionHeaders,
+        rows: chunk,
+        rowHeights: pageChunkHeights[sectionPageIndex],
+        pageIndex: sectionPageIndex,
+        config
+      });
+    });
+  });
 
   const objects = [];
   objects.push("<< /Type /Catalog /Pages 2 0 R >>");
@@ -543,7 +636,7 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
   const contentObjectNumbers = [];
   let nextObjectNumber = 5;
 
-  pageChunks.forEach(() => {
+  pagePlans.forEach(() => {
     pageObjectNumbers.push(nextObjectNumber);
     contentObjectNumbers.push(nextObjectNumber + 1);
     nextObjectNumber += 2;
@@ -553,25 +646,30 @@ function buildPdfBuffer({ title, headers, rows, filtersSummary = [], metadata = 
   objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
   objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
 
-  pageChunks.forEach((chunk, index) => {
+  pagePlans.forEach((plan, index) => {
     const pageObjectNumber = pageObjectNumbers[index];
     const contentObjectNumber = contentObjectNumbers[index];
+    const { config } = plan;
     const stream = buildPdfTablePage({
-      title,
+      title: plan.title,
       generatedAt,
-      metadata: headerMetadata,
-      headers,
-      rows: chunk,
-      rowHeights: pageChunkHeights[index],
-      pageIndex: index,
-      pageWidth,
-      pageHeight,
-      margins,
-      columnWidths
+      metadata: config.headerMetadata,
+      headers: plan.headers,
+      headerRows: config.normalizedHeaderRows,
+      rows: plan.rows,
+      rowHeights: plan.rowHeights,
+      pageIndex: plan.pageIndex,
+      pageWidth: config.pageWidth,
+      pageHeight: config.pageHeight,
+      margins: config.margins,
+      columnWidths: config.columnWidths,
+      rowFontSize: config.rowFontSize,
+      cellPadding: config.cellPadding,
+      lineHeight: config.lineHeight
     });
     const contentBuffer = Buffer.from(stream, "utf8");
 
-    objects[pageObjectNumber - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`;
+    objects[pageObjectNumber - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${config.pageWidth} ${config.pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`;
     objects[contentObjectNumber - 1] = `<< /Length ${contentBuffer.length} >>\nstream\n${stream}\nendstream`;
   });
 

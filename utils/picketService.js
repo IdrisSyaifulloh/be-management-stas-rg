@@ -491,6 +491,44 @@ function mapAssignment(row) {
     submissionId: row.submission_id || null,
     submission_status: row.submission_status || null,
     submissionStatus: row.submission_status || null,
+    photo_url: row.submission_photo_url || null,
+    photoUrl: row.submission_photo_url || null,
+    file_url: row.submission_file_url || row.submission_photo_url || null,
+    fileUrl: row.submission_file_url || row.submission_photo_url || null,
+    photo_file_name: row.submission_photo_file_name || null,
+    photoFileName: row.submission_photo_file_name || null,
+    submitted_at: row.submission_submitted_at || null,
+    submittedAt: row.submission_submitted_at || null,
+    reviewed_at: row.submission_reviewed_at || null,
+    reviewedAt: row.submission_reviewed_at || null,
+    reviewed_by: row.submission_reviewed_by || null,
+    reviewedBy: row.submission_reviewed_by || null,
+    review_note: row.submission_review_note || null,
+    reviewNote: row.submission_review_note || null,
+    submission: row.submission_id
+      ? {
+          id: row.submission_id,
+          schedule_id: row.id,
+          scheduleId: row.id,
+          assignment_id: row.submission_assignment_id || row.id,
+          assignmentId: row.submission_assignment_id || row.id,
+          status: row.submission_status || null,
+          photo_url: row.submission_photo_url || null,
+          photoUrl: row.submission_photo_url || null,
+          file_url: row.submission_file_url || row.submission_photo_url || null,
+          fileUrl: row.submission_file_url || row.submission_photo_url || null,
+          photo_file_name: row.submission_photo_file_name || null,
+          photoFileName: row.submission_photo_file_name || null,
+          submitted_at: row.submission_submitted_at || null,
+          submittedAt: row.submission_submitted_at || null,
+          reviewed_at: row.submission_reviewed_at || null,
+          reviewedAt: row.submission_reviewed_at || null,
+          reviewed_by: row.submission_reviewed_by || null,
+          reviewedBy: row.submission_reviewed_by || null,
+          review_note: row.submission_review_note || null,
+          reviewNote: row.submission_review_note || null
+        }
+      : null,
     notes: row.notes || null,
     generated_by: row.generated_by || null,
     generatedBy: row.generated_by || null,
@@ -884,6 +922,32 @@ function getScheduleId(payload = {}) {
   return String(payload.scheduleId || payload.schedule_id || payload.assignmentId || payload.assignment_id || "").trim();
 }
 
+async function resolvePicketScheduleForSubmission({ scheduleId, studentId, date }) {
+  const exact = await query(
+    `
+    SELECT id, student_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text, task_id
+    FROM picket_schedules
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [scheduleId]
+  );
+  if (exact.rowCount > 0) return exact.rows[0];
+
+  const fallback = await query(
+    `
+    SELECT id, student_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text, task_id
+    FROM picket_schedules
+    WHERE student_id = $1
+      AND schedule_date = $2::date
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 1
+    `,
+    [studentId, date]
+  );
+  return fallback.rows[0] || null;
+}
+
 async function listPicketSchedules({ date = null, studentId = null, dayId = null } = {}) {
   await ensurePicketTables();
   const params = [];
@@ -1256,7 +1320,17 @@ async function fetchAssignmentsByDate(date, executor = query) {
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
-           ps.id AS submission_id, ps.status AS submission_status
+           ps.id AS submission_id,
+           ps.schedule_id AS submission_schedule_id,
+           ps.assignment_id AS submission_assignment_id,
+           ps.status AS submission_status,
+           ps.photo_url AS submission_photo_url,
+           ps.file_url AS submission_file_url,
+           ps.photo_file_name AS submission_photo_file_name,
+           ps.submitted_at AS submission_submitted_at,
+           ps.reviewed_at AS submission_reviewed_at,
+           ps.reviewed_by AS submission_reviewed_by,
+           ps.review_note AS submission_review_note
     FROM picket_schedules pa
     JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
@@ -1314,7 +1388,19 @@ async function generateManualPicketSchedule({ date, studentIds, activeTasks, gen
 
   try {
     await client.query("BEGIN");
-    await client.query("DELETE FROM picket_schedules WHERE schedule_date = $1::date", [targetDate]);
+    await client.query(
+      `
+      DELETE FROM picket_schedules psch
+      WHERE psch.schedule_date = $1::date
+        AND NOT EXISTS (
+          SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = psch.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM picket_leave_requests plr WHERE plr.schedule_id = psch.id
+        )
+      `,
+      [targetDate]
+    );
 
     for (let index = 0; index < manualStudentIds.length; index += 1) {
       const studentId = manualStudentIds[index];
@@ -1327,6 +1413,13 @@ async function generateManualPicketSchedule({ date, studentIds, activeTasks, gen
         `
         INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
         VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
+        ON CONFLICT (schedule_date, student_id)
+        DO UPDATE SET task_id = EXCLUDED.task_id,
+                      status = 'Ditugaskan',
+                      generated_by = EXCLUDED.generated_by,
+                      generated_at = NOW(),
+                      updated_by = EXCLUDED.updated_by,
+                      updated_at = NOW()
         RETURNING id
         `,
         [id, targetDate, getJakartaDayOfWeek(targetDate), studentId, task.id, generatedBy]
@@ -1481,17 +1574,22 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
       WITH ranked AS (
         SELECT pa.id,
                pa.student_id,
+               (ps.id IS NOT NULL) AS has_submission,
+               (plr.id IS NOT NULL) AS has_leave_request,
                ROW_NUMBER() OVER (
                  PARTITION BY pa.student_id
                  ORDER BY (ps.id IS NOT NULL) DESC, pa.generated_at DESC, pa.created_at DESC, pa.id ASC
                ) AS student_rank
         FROM picket_schedules pa
         LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
+        LEFT JOIN picket_leave_requests plr ON plr.schedule_id = pa.id
         WHERE pa.schedule_date = $1::date
       )
       DELETE FROM picket_schedules pa
       USING ranked
       WHERE pa.id = ranked.id
+        AND ranked.has_submission = FALSE
+        AND ranked.has_leave_request = FALSE
         AND (
           NOT (ranked.student_id = ANY($2::text[]))
           OR ranked.student_rank > 1
@@ -1666,7 +1764,17 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
-           ps.id AS submission_id, ps.status AS submission_status
+           ps.id AS submission_id,
+           ps.schedule_id AS submission_schedule_id,
+           ps.assignment_id AS submission_assignment_id,
+           ps.status AS submission_status,
+           ps.photo_url AS submission_photo_url,
+           ps.file_url AS submission_file_url,
+           ps.photo_file_name AS submission_photo_file_name,
+           ps.submitted_at AS submission_submitted_at,
+           ps.reviewed_at AS submission_reviewed_at,
+           ps.reviewed_by AS submission_reviewed_by,
+           ps.review_note AS submission_review_note
     FROM picket_schedules pa
     JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
@@ -1694,7 +1802,17 @@ async function getPicketHistory(studentIdOrUserId) {
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
            pt.name AS task_name, pt.description AS task_description,
-           ps.id AS submission_id, ps.status AS submission_status
+           ps.id AS submission_id,
+           ps.schedule_id AS submission_schedule_id,
+           ps.assignment_id AS submission_assignment_id,
+           ps.status AS submission_status,
+           ps.photo_url AS submission_photo_url,
+           ps.file_url AS submission_file_url,
+           ps.photo_file_name AS submission_photo_file_name,
+           ps.submitted_at AS submission_submitted_at,
+           ps.reviewed_at AS submission_reviewed_at,
+           ps.reviewed_by AS submission_reviewed_by,
+           ps.review_note AS submission_review_note
     FROM picket_schedules pa
     JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
@@ -1702,7 +1820,7 @@ async function getPicketHistory(studentIdOrUserId) {
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
     LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
     WHERE pa.student_id = $1
-    ORDER BY pa.schedule_date DESC
+    ORDER BY pa.schedule_date DESC, pa.created_at DESC, pa.id ASC
     `,
     [studentId]
   );
@@ -1760,27 +1878,20 @@ async function createPicketSubmission(payload = {}) {
     throw error;
   }
 
-  const schedule = await query(
-    `
-    SELECT id, student_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text, task_id
-    FROM picket_schedules
-    WHERE id = $1
-    LIMIT 1
-    `,
-    [scheduleId]
-  );
-  if (schedule.rowCount === 0) {
+  const schedule = await resolvePicketScheduleForSubmission({ scheduleId, studentId, date });
+  if (!schedule) {
     const error = new Error("Jadwal piket tidak ditemukan.");
     error.statusCode = 404;
     throw error;
   }
-  if (schedule.rows[0].student_id !== studentId || schedule.rows[0].date_text !== date) {
+  if (schedule.student_id !== studentId || schedule.date_text !== date) {
     const error = new Error("Jadwal piket tidak sesuai dengan studentId/date.");
     error.statusCode = 400;
     throw error;
   }
+  const effectiveScheduleId = schedule.id;
   const taskId = String(payload.taskId || payload.task_id || "").trim();
-  if (taskId && schedule.rows[0].task_id !== taskId) {
+  if (taskId && schedule.task_id !== taskId) {
     const error = new Error("taskId tidak sesuai dengan jadwal piket.");
     error.statusCode = 400;
     throw error;
@@ -1808,7 +1919,7 @@ async function createPicketSubmission(payload = {}) {
     `,
     [
       buildId("PKT-SUB"),
-      scheduleId,
+      effectiveScheduleId,
       studentId,
       date,
       photoUrl,
@@ -1823,7 +1934,7 @@ async function createPicketSubmission(payload = {}) {
     reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
   });
 
-  const assignment = await getPicketScheduleById(scheduleId);
+  const assignment = await getPicketScheduleById(effectiveScheduleId);
   return {
     ...submission,
     submission,
@@ -1867,12 +1978,20 @@ async function reviewPicketSubmission(id, payload = {}) {
     });
     submission.accessLockReason = ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID;
   } else if (status === "Valid") {
-    await deactivateAccessLocksForStudentDateReason({
-      studentId: submission.studentId,
-      date: submission.date,
-      reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
-      unlockedBy: reviewedBy
-    });
+    await Promise.all([
+      deactivateAccessLocksForStudentDateReason({
+        studentId: submission.studentId,
+        date: submission.date,
+        reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+        unlockedBy: reviewedBy
+      }),
+      deactivateAccessLocksForStudentDateReason({
+        studentId: submission.studentId,
+        date: submission.date,
+        reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
+        unlockedBy: reviewedBy
+      })
+    ]);
   }
 
   return submission;

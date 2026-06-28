@@ -26,7 +26,14 @@ async function ensureResearchBoardTables() {
     ensureResearchBoardTablesPromise = (async () => {
       await query(`
         ALTER TABLE research_projects
-        ADD COLUMN IF NOT EXISTS attachment_link TEXT
+        ADD COLUMN IF NOT EXISTS attachment_link TEXT,
+        ADD COLUMN IF NOT EXISTS research_type TEXT CHECK (research_type IN ('Internal', 'Eksternal')),
+        ADD COLUMN IF NOT EXISTS agreement_type TEXT CHECK (agreement_type IN ('PKS', 'MoU', 'MoA')),
+        ADD COLUMN IF NOT EXISTS agreement_start_date DATE,
+        ADD COLUMN IF NOT EXISTS agreement_end_date DATE,
+        ADD COLUMN IF NOT EXISTS agreement_file_url TEXT,
+        ADD COLUMN IF NOT EXISTS proposal_file_url TEXT,
+        ADD COLUMN IF NOT EXISTS rab_file_url TEXT
       `);
 
       await query(`
@@ -122,6 +129,38 @@ async function ensureResearchBoardTables() {
   }
 
   await ensureResearchBoardTablesPromise;
+}
+
+function formatDateOnly(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value.slice(0, 10);
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function withResearchDocumentFields(row) {
+  if (!row) return row;
+
+  const agreementStartDate = formatDateOnly(row.agreement_start_date);
+  const agreementEndDate = formatDateOnly(row.agreement_end_date);
+
+  return {
+    ...row,
+    research_type: row.research_type ?? null,
+    researchType: row.research_type ?? null,
+    agreement_type: row.agreement_type ?? null,
+    agreementType: row.agreement_type ?? null,
+    agreement_start_date: agreementStartDate,
+    agreementStartDate,
+    agreement_end_date: agreementEndDate,
+    agreementEndDate,
+    agreement_file_url: row.agreement_file_url ?? null,
+    agreementFileUrl: row.agreement_file_url ?? null,
+    proposal_file_url: row.proposal_file_url ?? null,
+    proposalFileUrl: row.proposal_file_url ?? null,
+    rab_file_url: row.rab_file_url ?? null,
+    rabFileUrl: row.rab_file_url ?? null
+  };
 }
 
 function normalizeBoardTaskStatus(value, fallback = "TO DO") {
@@ -470,6 +509,8 @@ async function fetchBoardSnapshot(projectId) {
       `
       SELECT rp.id, rp.title, rp.short_title, rp.period_text, rp.mitra, rp.status, rp.progress,
              rp.category, rp.description, rp.funding, rp.repositori, rp.attachment_link,
+             rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date,
+             rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url,
              l.id AS supervisor_id, u.name AS supervisor_name, u.initials AS supervisor_initials
       FROM research_projects rp
       LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
@@ -498,7 +539,7 @@ async function fetchBoardSnapshot(projectId) {
 
   return {
     projectId,
-    project: projectResult.rows[0] || null,
+    project: withResearchDocumentFields(projectResult.rows[0] || null),
     tasks,
     columns,
     counts: {
