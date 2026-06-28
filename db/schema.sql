@@ -628,4 +628,3 @@ CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_a
 
 COMMIT;
 
-
