@@ -443,27 +443,22 @@ router.post(
 
     const studentRow = studentResult.rows[0] || {};
     const studentType = studentRow.tipe;
+    const isRisetStudent = String(studentType || "").trim().toLowerCase() === "riset";
     const wfhQuota = Number(studentRow.wfh_quota || 0);
 
-    if (studentType === "Riset" && jenisPengajuan === "cuti") {
+    if (isRisetStudent && jenisPengajuan === "cuti") {
       return res.status(400).json({
         message: "Mahasiswa Riset tidak dapat mengajukan cuti. Silakan pilih izin atau sakit."
       });
     }
 
-    if (studentType === "Riset" && jenisPengajuan === "wfh") {
-      return res.status(400).json({
-        message: "Mahasiswa Riset tidak mendapat jatah WFH."
-      });
-    }
+    if (jenisPengajuan === "wfh" && !isRisetStudent) {
+      if (requestedDays !== 1) {
+        return res.status(400).json({
+          message: "Pengajuan WFH hanya berlaku 1 hari."
+        });
+      }
 
-    if (jenisPengajuan === "wfh" && requestedDays !== 1) {
-      return res.status(400).json({
-        message: "Pengajuan WFH hanya berlaku 1 hari."
-      });
-    }
-
-    if (jenisPengajuan === "wfh") {
       if (wfhQuota <= 0) {
         return res.status(400).json({
           message: "Anda tidak punya jatah WFH."
@@ -480,7 +475,7 @@ router.post(
     }
 
     const countsAgainstQuota = jenisPengajuan === "cuti" && countsAgainstLeaveQuota !== false;
-    const countsAgainstWfh = jenisPengajuan === "wfh";
+    const countsAgainstWfh = jenisPengajuan === "wfh" && !isRisetStudent;
 
     const settings = await getSettingsAsync();
     const maxSemesterDays = Number(settings?.cuti?.maxSemesterDays || 0);
@@ -754,22 +749,18 @@ router.patch(
 
     const requestRow = existingRequest.rows[0];
 
-    if (status === "Disetujui" && requestRow.jenis_pengajuan === "wfh") {
-      if (requestRow.student_tipe === "Riset") {
+    if (
+      status === "Disetujui" &&
+      requestRow.jenis_pengajuan === "wfh" &&
+      requestRow.counts_against_wfh_quota !== false
+    ) {
+      const wfhQuota = Number(requestRow.wfh_quota || 0);
+      const usedWfh = await countApprovedWfhRequests(requestRow.student_id, requestRow.periode_start, leaveRequestId);
+
+      if (wfhQuota <= 0 || usedWfh + 1 > wfhQuota) {
         return res.status(400).json({
-          message: "Mahasiswa Riset tidak mendapat jatah WFH."
+          message: "Jatah WFH tidak mencukupi."
         });
-      }
-
-      if (requestRow.counts_against_wfh_quota !== false) {
-        const wfhQuota = Number(requestRow.wfh_quota || 0);
-        const usedWfh = await countApprovedWfhRequests(requestRow.student_id, requestRow.periode_start, leaveRequestId);
-
-        if (wfhQuota <= 0 || usedWfh + 1 > wfhQuota) {
-          return res.status(400).json({
-            message: "Jatah WFH tidak mencukupi."
-          });
-        }
       }
     }
 

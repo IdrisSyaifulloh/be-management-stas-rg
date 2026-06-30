@@ -396,7 +396,6 @@ async function hasApprovedWfhToday(studentId, dateIso) {
     WHERE student_id = $1
       AND jenis_pengajuan = 'wfh'
       AND status = 'Disetujui'
-      AND counts_against_wfh_quota IS NOT FALSE
       AND periode_start <= $2::date
       AND periode_end >= $2::date
     LIMIT 1

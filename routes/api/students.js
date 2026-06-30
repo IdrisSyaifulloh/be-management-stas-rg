@@ -107,6 +107,44 @@ function normalizeNonNegativeInteger(value, fieldName) {
   return parsed;
 }
 
+function normalizeOptionalEmail(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return null;
+
+  if (normalized.length > 160 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    const error = new Error("Email mahasiswa wajib berupa alamat email valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+async function ensureEmailAvailable(email, excludeUserId = null) {
+  if (!email) return;
+
+  const result = await query(
+    `
+    SELECT id
+    FROM users
+    WHERE LOWER(email) = LOWER($1)
+      AND ($2::text IS NULL OR id <> $2)
+    LIMIT 1
+    `,
+    [email, excludeUserId || null]
+  );
+
+  if (result.rowCount > 0) {
+    const error = new Error("Email sudah digunakan oleh akun lain.");
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
+function isEmailUniqueViolation(error) {
+  return error?.code === "23505" && String(error?.constraint || "").includes("users_email_key");
+}
+
 function normalizeResearchMembershipInputs(input, fallbackBergabung) {
   const items = Array.isArray(input)
     ? input
@@ -589,6 +627,13 @@ router.post(
 
     await ensureStudentColumns();
 
+    let normalizedEmail;
+    try {
+      normalizedEmail = normalizeOptionalEmail(email);
+    } catch (error) {
+      return res.status(error?.statusCode || 400).json({ message: error.message });
+    }
+
     const normalizedBergabung = normalizeOptionalDate(bergabung);
     const membershipBergabung = normalizedBergabung || new Date().toISOString().slice(0, 10);
     const resolvedResearchMemberships = await resolveResearchMemberships(
@@ -613,12 +658,14 @@ router.post(
 
       const passwordHash = await bcrypt.hash(password, 10);
 
+      await ensureEmailAvailable(normalizedEmail);
+
       await query(
         `
         INSERT INTO users (id, name, initials, role, email, prodi, password_hash)
         VALUES ($1, $2, $3, 'mahasiswa', $4, $5, $6)
         `,
-        [userId, name, initials, email || null, prodi || null, passwordHash]
+        [userId, name, initials, normalizedEmail, prodi || null, passwordHash]
       );
 
       await query(
@@ -679,6 +726,12 @@ router.post(
       });
     } catch (error) {
       await query("ROLLBACK");
+      if (error?.statusCode) {
+        return res.status(error.statusCode).json({ message: error.message });
+      }
+      if (isEmailUniqueViolation(error)) {
+        return res.status(409).json({ message: "Email sudah digunakan oleh akun lain." });
+      }
       throw error;
     }
   })
@@ -711,6 +764,16 @@ router.put(
     } = req.body;
 
     await ensureStudentColumns();
+
+    let normalizedEmail;
+    const hasEmail = hasOwn(req.body || {}, "email");
+    if (hasEmail) {
+      try {
+        normalizedEmail = normalizeOptionalEmail(email);
+      } catch (error) {
+        return res.status(error?.statusCode || 400).json({ message: error.message });
+      }
+    }
 
     const normalizedBergabung = hasOwn(req.body || {}, "bergabung")
       ? normalizeOptionalDate(bergabung)
@@ -769,6 +832,10 @@ router.put(
         passwordHash = await bcrypt.hash(password, 10);
       }
 
+      if (hasEmail) {
+        await ensureEmailAvailable(normalizedEmail, userId);
+      }
+
       await query(
         `
         UPDATE users
@@ -776,12 +843,12 @@ router.put(
           name = COALESCE($2, name),
           initials = COALESCE($3, initials),
           prodi = COALESCE($4, prodi),
-          email = COALESCE($5, email),
-          password_hash = COALESCE($6, password_hash),
+          email = CASE WHEN $5::boolean THEN $6 ELSE email END,
+          password_hash = COALESCE($7, password_hash),
           updated_at = NOW()
         WHERE id = $1 AND role = 'mahasiswa'
         `,
-        [userId, name, initials, prodi, email, passwordHash]
+        [userId, name, initials, prodi, hasEmail, normalizedEmail ?? null, passwordHash]
       );
 
       const isWithdrawing = previousStatus !== "Mengundurkan Diri" && status === "Mengundurkan Diri";
@@ -868,6 +935,12 @@ router.put(
       });
     } catch (error) {
       await query("ROLLBACK");
+      if (error?.statusCode) {
+        return res.status(error.statusCode).json({ message: error.message });
+      }
+      if (isEmailUniqueViolation(error)) {
+        return res.status(409).json({ message: "Email sudah digunakan oleh akun lain." });
+      }
       throw error;
     }
   })

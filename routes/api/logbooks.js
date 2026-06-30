@@ -3,7 +3,7 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { buildWhereClause } = require("../../utils/queryFilters");
 const { extractRole } = require("../../utils/roleGuard");
-const { resolveStudentId } = require("../../utils/studentResolver");
+const { resolveStudentId, resolveStudentRecord } = require("../../utils/studentResolver");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
@@ -271,16 +271,17 @@ router.post(
       });
     }
 
-    // Validate against logged-in user (frontend sends user_id as studentId)
-    if (String(studentId) !== String(req.authUser?.id)) {
+    const requesterUserId = String(req.authUser?.id || "").trim();
+    const studentRecord = await resolveStudentRecord(studentId);
+    if (!studentRecord) {
+      return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
+    }
+
+    if (!requesterUserId || String(studentRecord.user_id) !== requesterUserId) {
       return res.status(403).json({ message: "studentId tidak sesuai akun login." });
     }
 
-    // Resolve student_id: check if studentId is actually a user_id and find the real student.id
-    const resolvedStudentId = await resolveStudentId(studentId);
-    if (!resolvedStudentId) {
-      return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
-    }
+    const resolvedStudentId = studentRecord.id;
 
     let normalizedProjectId = null;
     try {
