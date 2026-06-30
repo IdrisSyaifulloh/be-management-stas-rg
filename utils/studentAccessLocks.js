@@ -158,7 +158,7 @@ function mapAccessLockRow(row) {
   };
 }
 
-async function createStudentAccessLocks({ studentIds, date, reason, reactivateUnlocked = true }) {
+async function createStudentAccessLocks({ studentIds, date, reason, reactivateUnlocked = false }) {
   await ensureStudentAccessLockTable();
   const uniqueStudentIds = [...new Set((studentIds || []).filter(Boolean))];
   const created = [];
@@ -587,6 +587,19 @@ async function listAccessLocks({ status = null, search = null } = {}) {
 
 async function unlockAccessLock({ id, unlockedBy }) {
   await ensureStudentAccessLockTable();
+  const lockResult = await query(
+    `
+    SELECT id, student_id
+    FROM student_access_locks
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [id]
+  );
+
+  if (lockResult.rowCount === 0) return null;
+
+  const lock = lockResult.rows[0];
   const result = await query(
     `
     UPDATE student_access_locks
@@ -596,16 +609,25 @@ async function unlockAccessLock({ id, unlockedBy }) {
         unlocked_at = COALESCE(unlocked_at, NOW()),
         unlocked_by = COALESCE($2, unlocked_by),
         updated_at = NOW()
-    WHERE id = $1
-    RETURNING id
+    WHERE student_id = $1
+      AND active = TRUE
+      AND locked = TRUE
+      AND status = 'LOCKED'
+    RETURNING id, student_id
     `,
-    [id, unlockedBy || null]
+    [lock.student_id, unlockedBy || null]
   );
 
-  if (result.rowCount === 0) return null;
-
-  const rows = await listAccessLocks();
-  return rows.find((item) => item.id === id) || null;
+  return {
+    id: lock.id,
+    student_id: lock.student_id,
+    studentId: lock.student_id,
+    status: 'UNLOCKED',
+    locked: false,
+    active: false,
+    unlockedCount: result.rowCount,
+    unlockedIds: result.rows.map((row) => row.id)
+  };
 }
 
 async function studentAccessLockMiddleware(req, res, next) {
