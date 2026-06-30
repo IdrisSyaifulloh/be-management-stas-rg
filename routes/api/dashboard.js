@@ -777,10 +777,10 @@ router.get(
       [studentId]
     );
     const risetWeeklyHours = Number(weeklyAttendanceHoursResult.rows[0]?.total_hours || 0);
-    const risetWeeklyTargetHours = Number(
-      studentRow.jam_minggu_target || settings?.attendanceRules?.risetTargetWeeklyHours || 0
-    );
-    const risetWeeklyMinHours = Number(settings?.attendanceRules?.risetMinWeeklyHours || 0);
+    const configuredRisetWeeklyTargetHours = Number(settings?.attendanceRules?.risetTargetWeeklyHours || 6);
+    const configuredRisetWeeklyMinHours = Number(settings?.attendanceRules?.risetMinWeeklyHours || 4);
+    const risetWeeklyTargetHours = configuredRisetWeeklyTargetHours > 0 ? configuredRisetWeeklyTargetHours : 6;
+    const risetWeeklyMinHours = configuredRisetWeeklyMinHours > 0 ? configuredRisetWeeklyMinHours : 4;
     const risetWeeklyRemainingHours = Math.max(0, risetWeeklyTargetHours - risetWeeklyHours);
     const risetWeeklyPct = risetWeeklyTargetHours > 0
       ? Math.min(100, Math.round((risetWeeklyHours / risetWeeklyTargetHours) * 100))
