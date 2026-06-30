@@ -561,7 +561,9 @@ router.get(
 
     await query(`
       ALTER TABLE students
-      ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
+      ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS jam_minggu_ini NUMERIC(5,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS jam_minggu_target NUMERIC(5,2) NOT NULL DEFAULT 6
     `);
 
     await ensureStudentDocumentsTable();
@@ -589,6 +591,8 @@ router.get(
         status,
         tipe,
         COALESCE(wfh_quota, 0)::int AS wfh_quota,
+        COALESCE(jam_minggu_ini, 0)::numeric AS jam_minggu_ini,
+        COALESCE(jam_minggu_target, 0)::numeric AS jam_minggu_target,
         TO_CHAR(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
       FROM students
       WHERE user_id = $1
@@ -718,7 +722,7 @@ router.get(
       return acc;
     }, {});
 
-    const attendanceHadir = attendanceRows.rows.filter((item) => item.status === "Hadir").length;
+    const attendanceHadir = attendanceRows.rows.filter((item) => ["Hadir", "WFH"].includes(item.status)).length;
     const attendanceTotal = attendanceRows.rows.length;
 
     const approvedLeaveCount = leaveRows.rows
@@ -752,6 +756,35 @@ router.get(
     const dokSiapUnduh = letterRows.rows.filter((item) => item.status === "Siap Unduh").length + uploadedStudentDocumentCount;
     const todayAttendance = todayAttendanceRows.rows[0] || null;
     const certTerbitCount = certRows.rows.filter((item) => item.status === "Terbit").length;
+    const weeklyAttendanceHoursResult = await query(
+      `
+      SELECT COALESCE(
+        SUM(
+          GREATEST(
+            EXTRACT(EPOCH FROM (COALESCE(check_out_at, NOW()) - check_in_at)) / 3600.0,
+            0
+          )
+        ),
+        0
+      )::numeric(10,2) AS total_hours
+      FROM attendance_records
+      WHERE student_id = $1
+        AND status IN ('Hadir', 'WFH')
+        AND check_in_at IS NOT NULL
+        AND attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)::date
+        AND attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+      `,
+      [studentId]
+    );
+    const risetWeeklyHours = Number(weeklyAttendanceHoursResult.rows[0]?.total_hours || 0);
+    const risetWeeklyTargetHours = Number(
+      studentRow.jam_minggu_target || settings?.attendanceRules?.risetTargetWeeklyHours || 0
+    );
+    const risetWeeklyMinHours = Number(settings?.attendanceRules?.risetMinWeeklyHours || 0);
+    const risetWeeklyRemainingHours = Math.max(0, risetWeeklyTargetHours - risetWeeklyHours);
+    const risetWeeklyPct = risetWeeklyTargetHours > 0
+      ? Math.min(100, Math.round((risetWeeklyHours / risetWeeklyTargetHours) * 100))
+      : 0;
 
     res.json({
       header: {
@@ -766,12 +799,23 @@ router.get(
         status: studentRow.status,
         studentStatus: studentRow.status,
         tipe: studentRow.tipe,
+        jam_minggu_ini: risetWeeklyHours,
+        jamMingguIni: risetWeeklyHours,
+        jam_minggu_target: risetWeeklyTargetHours,
+        jamMingguTarget: risetWeeklyTargetHours,
         documents: studentDocuments,
         student_documents: studentDocuments
       },
       stats: {
         attendanceHadir,
         attendanceTotal,
+        risetWeeklyHours,
+        risetWeeklyTargetHours,
+        risetWeeklyMinHours,
+        risetWeeklyRemainingHours,
+        risetWeeklyPct,
+        risetWeeklyMeetsTarget: risetWeeklyTargetHours > 0 && risetWeeklyHours >= risetWeeklyTargetHours,
+        risetWeeklyMeetsMin: risetWeeklyMinHours > 0 && risetWeeklyHours >= risetWeeklyMinHours,
         logbookEntries: logbookRows.rowCount,
         logbookTarget: 40,
         tasksDone: projects.reduce(

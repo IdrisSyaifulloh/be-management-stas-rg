@@ -7,6 +7,7 @@ const { resolveStudentRecord } = require("./studentResolver");
 const ACCESS_LOCK_REASON_ATTENDANCE_ABSENT = "ATTENDANCE_ABSENT";
 const ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8 = "WORK_HOURS_UNDER_8";
 const ACCESS_LOCK_REASON_CHECKOUT_MISSING_22 = "CHECKOUT_MISSING_22";
+const ACCESS_LOCK_REASON_WFH_CHECKIN_MISSING = "WFH_CHECKIN_MISSING";
 const ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET = "RISET_WEEKLY_HOURS_UNDER_TARGET";
 const ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS = "RESEARCH_WEEKLY_LOW_HOURS";
 const ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID = "PICKET_SUBMISSION_INVALID";
@@ -24,6 +25,10 @@ const ACCESS_LOCK_REASON_DETAILS = {
   [ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]: {
     label: "Belum Checkout Sampai 22.00 WIB",
     message: "Akses dikunci karena belum checkout sampai pukul 22.00 WIB."
+  },
+  [ACCESS_LOCK_REASON_WFH_CHECKIN_MISSING]: {
+    label: "WFH Belum Check-in",
+    message: "Akses dikunci karena WFH sudah disetujui tetapi belum melakukan check-in."
   },
   [ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET]: {
     label: "Jam Kerja Riset Mingguan Tidak Terpenuhi",
@@ -290,6 +295,14 @@ async function createCheckoutMissing22Locks({ studentIds, date }) {
     studentIds,
     date,
     reason: ACCESS_LOCK_REASON_CHECKOUT_MISSING_22
+  });
+}
+
+async function createWfhCheckinMissingLocks({ studentIds, date }) {
+  return createStudentAccessLocks({
+    studentIds,
+    date,
+    reason: ACCESS_LOCK_REASON_WFH_CHECKIN_MISSING
   });
 }
 
@@ -641,6 +654,7 @@ async function studentAccessLockMiddleware(req, res, next) {
 module.exports = {
   ACCESS_LOCK_REASON_ATTENDANCE_ABSENT,
   ACCESS_LOCK_REASON_CHECKOUT_MISSING_22,
+  ACCESS_LOCK_REASON_WFH_CHECKIN_MISSING,
   ACCESS_LOCK_REASON_DETAILS,
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
@@ -648,6 +662,7 @@ module.exports = {
   ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS,
   ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
   createCheckoutMissing22Locks,
+  createWfhCheckinMissingLocks,
   createAttendanceAbsentLocks,
   deactivateAccessLocksForStudentDateReason,
   getPicketSubmissionLockDebugSnapshot,

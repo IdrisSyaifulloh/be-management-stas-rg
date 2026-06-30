@@ -5,7 +5,10 @@ const {
   hasNotificationDispatch,
   recordNotificationDispatch
 } = require("../utils/notificationService");
-const { createCheckoutMissing22Locks } = require("../utils/studentAccessLocks");
+const {
+  createCheckoutMissing22Locks,
+  createWfhCheckinMissingLocks
+} = require("../utils/studentAccessLocks");
 
 const TIMEZONE = "Asia/Jakarta";
 const ONE_MINUTE = 60 * 1000;
@@ -151,15 +154,16 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
           auto_checkout_reason = $3,
           updated_at = NOW()
       WHERE ar.attendance_date = $1::date
-        AND ar.status = 'Hadir'
+        AND ar.status IN ('Hadir', 'WFH')
         AND ar.check_in_at IS NOT NULL
         AND ar.check_in_at <= (($1::date + $2::time) AT TIME ZONE 'Asia/Jakarta')
         AND ar.check_out_at IS NULL
-      RETURNING ar.id, ar.student_id, ar.attendance_date, ar.check_out_at
+      RETURNING ar.id, ar.student_id, ar.attendance_date, ar.status, ar.check_out_at
     )
     SELECT updated.id,
            updated.student_id,
            TO_CHAR(updated.attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
+           updated.status,
            updated.check_out_at,
            s.user_id AS recipient_user_id,
            s.tipe AS student_type,
@@ -179,11 +183,35 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
     [targetDate, checkoutTime, AUTO_REASON]
   );
 
-  const missingCheckoutMagangIds = result.rows
-    .filter((row) => row.student_type === "Magang" && row.has_approved_leave !== true)
+  const missingCheckoutIds = result.rows
+    .filter((row) => row.status === "WFH" || (row.student_type === "Magang" && row.has_approved_leave !== true))
     .map((row) => row.student_id);
   const accessLockIds = await createCheckoutMissing22Locks({
-    studentIds: missingCheckoutMagangIds,
+    studentIds: missingCheckoutIds,
+    date: targetDate
+  });
+
+  const missingWfhCheckin = await query(
+    `
+    SELECT DISTINCT lr.student_id
+    FROM leave_requests lr
+    JOIN students s ON s.id = lr.student_id
+    JOIN users u ON u.id = s.user_id
+    LEFT JOIN attendance_records ar
+      ON ar.student_id = lr.student_id
+     AND ar.attendance_date = $1::date
+    WHERE lr.status = 'Disetujui'
+      AND lr.jenis_pengajuan = 'wfh'
+      AND $1::date BETWEEN lr.periode_start AND lr.periode_end
+      AND s.status = 'Aktif'
+      AND u.is_active = TRUE
+      AND ar.check_in_at IS NULL
+    `,
+    [targetDate]
+  );
+  const wfhCheckinMissingIds = missingWfhCheckin.rows.map((row) => row.student_id);
+  const wfhCheckinMissingLockIds = await createWfhCheckinMissingLocks({
+    studentIds: wfhCheckinMissingIds,
     date: targetDate
   });
 
@@ -197,8 +225,11 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
     rows: result.rows,
     accessLocks: {
       reason: "CHECKOUT_MISSING_22",
-      studentIds: missingCheckoutMagangIds,
-      ids: accessLockIds
+      studentIds: missingCheckoutIds,
+      ids: accessLockIds,
+      wfhCheckinMissingReason: "WFH_CHECKIN_MISSING",
+      wfhCheckinMissingStudentIds: wfhCheckinMissingIds,
+      wfhCheckinMissingIds: wfhCheckinMissingLockIds
     },
     notifications
   };
@@ -210,11 +241,27 @@ async function recoverMissedAutoCheckout({ today, checkoutTime }) {
   const missedDates = await query(
     `
     SELECT DISTINCT attendance_date::text AS attendance_date
-    FROM attendance_records
-    WHERE attendance_date < $1::date
-      AND status = 'Hadir'
-      AND check_in_at IS NOT NULL
-      AND check_out_at IS NULL
+    FROM (
+      SELECT attendance_date
+      FROM attendance_records
+      WHERE attendance_date < $1::date
+        AND status IN ('Hadir', 'WFH')
+        AND check_in_at IS NOT NULL
+        AND check_out_at IS NULL
+
+      UNION
+
+      SELECT wfh_day::date AS attendance_date
+      FROM leave_requests lr
+      CROSS JOIN LATERAL generate_series(lr.periode_start, lr.periode_end, interval '1 day') AS wfh_day
+      LEFT JOIN attendance_records ar
+        ON ar.student_id = lr.student_id
+       AND ar.attendance_date = wfh_day::date
+      WHERE lr.status = 'Disetujui'
+        AND lr.jenis_pengajuan = 'wfh'
+        AND wfh_day::date < $1::date
+        AND ar.check_in_at IS NULL
+    ) missed
     ORDER BY attendance_date ASC
     `,
     [today]

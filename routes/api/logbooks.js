@@ -182,6 +182,12 @@ router.get(
       `
       SELECT le.id, le.student_id, su.name AS student_name, su.initials AS student_initials,
              le.project_id, COALESCE(rp.short_title, rp.title, 'Logbook Umum') AS project_name,
+             ar.status AS attendance_status,
+             CASE
+               WHEN ar.status = 'WFH' OR COALESCE(wfh_leave.has_wfh, FALSE) THEN 'wfh'
+               WHEN ar.status = 'Hadir' THEN 'onsite'
+               ELSE NULL
+             END AS attendance_mode,
              TO_CHAR(le.date, 'YYYY-MM-DD') AS date, le.title, le.description, le.output, le.kendala, le.has_attachment,
              le.file_url, le.file_name, le.file_size,
              le.created_at, le.updated_at,
@@ -195,6 +201,16 @@ router.get(
       JOIN students s ON s.id = le.student_id
       JOIN users su ON su.id = s.user_id
       LEFT JOIN research_projects rp ON rp.id = le.project_id
+      LEFT JOIN attendance_records ar ON ar.student_id = le.student_id AND ar.attendance_date = le.date
+      LEFT JOIN LATERAL (
+        SELECT TRUE AS has_wfh
+        FROM leave_requests lr
+        WHERE lr.student_id = le.student_id
+          AND lr.status = 'Disetujui'
+          AND lr.jenis_pengajuan = 'wfh'
+          AND le.date BETWEEN lr.periode_start AND lr.periode_end
+        LIMIT 1
+      ) wfh_leave ON TRUE
       LEFT JOIN LATERAL (
         SELECT
           json_agg(

@@ -21,6 +21,7 @@ const {
 const {
   createAttendanceAbsentLocks,
   createCheckoutMissing22Locks,
+  createWfhCheckinMissingLocks,
   createRisetWeeklyHoursUnderTargetLocks,
   createWorkHoursUnder8Locks,
   deactivateAttendanceAbsentLocksForDate
@@ -140,6 +141,8 @@ function getAttendanceRules(settings) {
   const holidayRules = getHolidayRules(settings);
 
   return {
+    risetMinWeeklyHours: Number(settings.attendanceRules?.risetMinWeeklyHours || 4),
+    risetTargetWeeklyHours: Number(settings.attendanceRules?.risetTargetWeeklyHours || 6),
     magangMinCheckoutHours: Number(settings.attendanceRules?.magangMinCheckoutHours || 8),
     earlyCheckoutWarning: Boolean(settings.attendanceRules?.earlyCheckoutWarning ?? true),
     autoCheckoutEnabled: Boolean(settings.attendanceRules?.autoCheckoutEnabled ?? true),
@@ -688,9 +691,17 @@ router.post(
     // Run migrations first so status constraint is up to date
     await ensureAttendanceColumns();
 
+    await query(`
+      ALTER TABLE students
+      ADD COLUMN IF NOT EXISTS jam_minggu_ini NUMERIC(5,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS jam_minggu_target NUMERIC(5,2) NOT NULL DEFAULT 6
+    `);
+
     const studentResult = await query(
       `
       SELECT s.id, s.user_id, s.nim, s.tipe, u.name,
+             COALESCE(s.jam_minggu_ini, 0)::numeric AS jam_minggu_ini,
+             COALESCE(s.jam_minggu_target, 0)::numeric AS jam_minggu_target,
              TO_CHAR(s.created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
       FROM students s
       JOIN users u ON u.id = s.user_id
@@ -1283,6 +1294,8 @@ router.get(
     const reportedAbsentIds = [];
     const magangUnderHoursIds = [];
     const magangMissingCheckoutIds = [];
+    const wfhMissingCheckinIds = [];
+    const wfhMissingCheckoutIds = [];
     const risetWeeklyUnderHoursIds = [];
 
     allStudentIds.forEach((studentId) => {
@@ -1295,6 +1308,7 @@ router.get(
       }
       const currentHours = Number(student?.current_hours || 0);
       const targetHours = Number(student?.target_hours || 0);
+      const hasApprovedWfhToday = leaveTypesByStudentId[studentId] === "wfh";
 
       if (
         risetWeeklyHoursLockWindowOpen &&
@@ -1311,6 +1325,15 @@ router.get(
 
         if (status === "WFH") {
           leaveTypesByStudentId[studentId] = "wfh";
+
+          if (
+            missingCheckoutWindowOpen &&
+            attendance.check_in_at &&
+            (!attendance.check_out_at || attendance.auto_checkout_reason === ATTENDANCE_AUTO_CHECKOUT_REASON_22)
+          ) {
+            wfhMissingCheckoutIds.push(studentId);
+          }
+
           return;
         }
 
@@ -1338,6 +1361,10 @@ router.get(
         }
 
         return;
+      }
+
+      if (hasApprovedWfhToday && shouldCreateAbsentLocks && !attendance?.check_in_at) {
+        wfhMissingCheckinIds.push(studentId);
       }
 
       if (
@@ -1409,6 +1436,20 @@ router.get(
             date: todayIso
           })
         : [];
+    const wfhMissingCheckinLockIds =
+      wfhMissingCheckinIds.length > 0
+        ? await createWfhCheckinMissingLocks({
+            studentIds: wfhMissingCheckinIds,
+            date: todayIso
+          })
+        : [];
+    const wfhMissingCheckoutLockIds =
+      wfhMissingCheckoutIds.length > 0
+        ? await createCheckoutMissing22Locks({
+            studentIds: wfhMissingCheckoutIds,
+            date: todayIso
+          })
+        : [];
     const magangLockedIds = [...new Set([...magangUnderHoursIds, ...magangMissingCheckoutIds])];
 
     res.json({
@@ -1436,6 +1477,10 @@ router.get(
       noInformationIds,
       magangUnderHoursIds,
       magangMissingCheckoutIds,
+      wfhMissingCheckinIds,
+      wfhMissingCheckinLockIds,
+      wfhMissingCheckoutIds,
+      wfhMissingCheckoutLockIds,
       risetWeeklyUnderHoursIds,
       magangLockedIds,
       magangUnderHoursLockIds,
@@ -1463,9 +1508,17 @@ router.get(
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
+    await query(`
+      ALTER TABLE students
+      ADD COLUMN IF NOT EXISTS jam_minggu_ini NUMERIC(5,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS jam_minggu_target NUMERIC(5,2) NOT NULL DEFAULT 6
+    `);
+
     const studentResult = await query(
       `
       SELECT s.id, s.user_id, s.nim, s.tipe, u.name,
+             COALESCE(s.jam_minggu_ini, 0)::numeric AS jam_minggu_ini,
+             COALESCE(s.jam_minggu_target, 0)::numeric AS jam_minggu_target,
              TO_CHAR(s.created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
       FROM students s
       JOIN users u ON u.id = s.user_id
@@ -1545,6 +1598,34 @@ router.get(
       excludeHolidaysFromWorkdays: attendanceRules.excludeHolidaysFromWorkdays
     });
 
+    const weeklyAttendanceHoursResult = await query(
+      `
+      SELECT COALESCE(
+        SUM(
+          GREATEST(
+            EXTRACT(EPOCH FROM (COALESCE(check_out_at, NOW()) - check_in_at)) / 3600.0,
+            0
+          )
+        ),
+        0
+      )::numeric(10,2) AS total_hours
+      FROM attendance_records
+      WHERE student_id = $1
+        AND status IN ('Hadir', 'WFH')
+        AND check_in_at IS NOT NULL
+        AND attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)::date
+        AND attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+      `,
+      [resolvedStudentId]
+    );
+    const risetWeeklyHours = Number(weeklyAttendanceHoursResult.rows[0]?.total_hours || 0);
+    const risetWeeklyTargetHours = Number(student.jam_minggu_target || attendanceRules.risetTargetWeeklyHours || 0);
+    const risetWeeklyMinHours = Number(attendanceRules.risetMinWeeklyHours || 0);
+    const risetWeeklyRemainingHours = Math.max(0, risetWeeklyTargetHours - risetWeeklyHours);
+    const risetWeeklyPct = risetWeeklyTargetHours > 0
+      ? Math.min(100, Math.round((risetWeeklyHours / risetWeeklyTargetHours) * 100))
+      : 0;
+
     const todayAttendance = attendanceMap.get(todayIso);
 
     // Priority: active attendance record beats leave status
@@ -1566,7 +1647,20 @@ router.get(
         userId: student.user_id,
         name: student.name,
         nim: student.nim,
-        tipe: student.tipe
+        tipe: student.tipe,
+        jam_minggu_ini: risetWeeklyHours,
+        jamMingguIni: risetWeeklyHours,
+        jam_minggu_target: risetWeeklyTargetHours,
+        jamMingguTarget: risetWeeklyTargetHours
+      },
+      weeklyAttendance: {
+        currentHours: risetWeeklyHours,
+        targetHours: risetWeeklyTargetHours,
+        minHours: risetWeeklyMinHours,
+        remainingHours: risetWeeklyRemainingHours,
+        pct: risetWeeklyPct,
+        meetsTarget: risetWeeklyTargetHours > 0 && risetWeeklyHours >= risetWeeklyTargetHours,
+        meetsMin: risetWeeklyMinHours > 0 && risetWeeklyHours >= risetWeeklyMinHours
       },
       attendanceRules,
       picketToday,
