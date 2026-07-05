@@ -90,6 +90,10 @@ function getLockReasonDetail(reason) {
   };
 }
 
+function areStudentAccessLocksEnabled(settings) {
+  return settings?.accessLocks?.enabled !== false;
+}
+
 function mapAccessLockRow(row) {
   if (!row) {
     return {
@@ -503,11 +507,15 @@ async function getPicketSubmissionLockDebugSnapshot({ studentId, date = null } =
   };
 }
 
-async function getActiveLockForStudent(studentIdOrUserId) {
+async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting = true } = {}) {
   await ensureStudentAccessLockTable();
   const student = await resolveStudentRecord(studentIdOrUserId);
   if (!student) return null;
   const settings = await getSettingsAsync();
+  if (respectGlobalSetting && !areStudentAccessLocksEnabled(settings)) {
+    return null;
+  }
+
   await createOverduePicketSubmissionMissingLocksForStudent(student.id);
 
   const result = await query(
@@ -683,6 +691,7 @@ module.exports = {
   ACCESS_LOCK_REASON_RISET_WEEKLY_HOURS_UNDER_TARGET,
   ACCESS_LOCK_REASON_RESEARCH_WEEKLY_LOW_HOURS,
   ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8,
+  areStudentAccessLocksEnabled,
   createCheckoutMissing22Locks,
   createWfhCheckinMissingLocks,
   createAttendanceAbsentLocks,

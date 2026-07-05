@@ -712,6 +712,10 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 
 ### PATCH `/system-settings`
 - Deskripsi: update pengaturan sistem (merge patch object).
+- Toggle block mahasiswa global:
+  - Body: `{ "accessLocks": { "enabled": false } }` untuk mematikan enforcement block seluruh mahasiswa.
+  - Body: `{ "accessLocks": { "enabled": true } }` untuk menyalakan kembali enforcement block.
+  - Data access lock tetap tersimpan; saat dimatikan, middleware dan `/student-access-locks/me` menganggap mahasiswa tidak terkunci.
 
 ## 16) Exports
 

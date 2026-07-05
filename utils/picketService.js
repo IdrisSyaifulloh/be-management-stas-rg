@@ -1142,6 +1142,26 @@ function getScheduleId(payload = {}) {
   return String(payload.scheduleId || payload.schedule_id || payload.assignmentId || payload.assignment_id || "").trim();
 }
 
+async function updatePicketScheduleStatusFromSubmission(scheduleId, submissionStatus, executor = query) {
+  const normalizedStatus = String(submissionStatus || "").trim();
+  let scheduleStatus = null;
+  if (normalizedStatus === "Bermasalah") scheduleStatus = "Bermasalah";
+  if (normalizedStatus === "Valid" || normalizedStatus === "Terkirim") scheduleStatus = "Selesai";
+  if (!scheduleStatus) return;
+
+  await runQuery(
+    executor,
+    `
+    UPDATE picket_schedules
+    SET status = $2,
+        updated_at = NOW()
+    WHERE id = $1
+      AND status <> 'Izin'
+    `,
+    [scheduleId, scheduleStatus]
+  );
+}
+
 async function resolvePicketScheduleForSubmission({ scheduleId, studentId, date }) {
   const exact = await query(
     `
@@ -2272,6 +2292,7 @@ async function createPicketSubmission(payload = {}) {
     ]
   );
   const submission = mapSubmission(result.rows[0]);
+  await updatePicketScheduleStatusFromSubmission(effectiveScheduleId, submission.status);
   await deactivateAccessLocksForStudentDateReason({
     studentId,
     date,
@@ -2315,6 +2336,7 @@ async function reviewPicketSubmission(id, payload = {}) {
   if (result.rowCount === 0) return null;
 
   const submission = mapSubmission(result.rows[0]);
+  await updatePicketScheduleStatusFromSubmission(submission.scheduleId, submission.status);
   if (status === "Bermasalah") {
     await createPicketSubmissionInvalidLocks({
       studentIds: [submission.studentId],

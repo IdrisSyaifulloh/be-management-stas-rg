@@ -2,6 +2,7 @@ const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { extractRole } = require("../../utils/roleGuard");
 const {
+  areStudentAccessLocksEnabled,
   getActiveLockForStudent,
   getPicketSubmissionLockDebugSnapshot,
   listAccessLocks,
@@ -10,7 +11,7 @@ const {
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
   unlockAccessLock
 } = require("../../utils/studentAccessLocks");
-const { resolveStudentRecord } = require("../../utils/studentResolver");
+const { getSettingsAsync } = require("../../config/systemSettingsStore");
 const { requireSafeId } = require("../../utils/securityValidation");
 
 const router = express.Router();
@@ -24,12 +25,15 @@ router.get(
     }
 
     const userId = req.authUser?.id;
+    const settings = await getSettingsAsync();
+    const accessLocksEnabled = areStudentAccessLocksEnabled(settings);
     const lock = await getActiveLockForStudent(userId);
     if (!lock) {
       return res.json({
         locked: false,
         active: false,
         status: "UNLOCKED",
+        accessLocksEnabled,
         reason: null,
         reasonLabel: null,
         reasonDetail: null,
@@ -41,6 +45,7 @@ router.get(
     const mapped = mapAccessLockRow(lock);
     res.json({
       locked: true,
+      accessLocksEnabled,
       reason: mapped.reason,
       reasonLabel: mapped.reasonLabel,
       reasonDetail: mapped.reasonDetail,
@@ -145,7 +150,7 @@ router.post(
 
     const studentId = requireSafeId(req.body?.studentId || req.body?.student_id, "studentId");
     const unlockedBy = req.authUser?.id || null;
-    const activeLock = await getActiveLockForStudent(studentId);
+    const activeLock = await getActiveLockForStudent(studentId, { respectGlobalSetting: false });
     if (!activeLock) {
       return res.status(404).json({ message: "Access lock aktif tidak ditemukan." });
     }

@@ -50,6 +50,9 @@ const DEFAULT_SETTINGS = {
     autoCheckoutTime: "22:00",
     excludeHolidaysFromWorkdays: true,
     holidays: []
+  },
+  accessLocks: {
+    enabled: true
   }
 };
 
@@ -98,6 +101,10 @@ function mergeSettings(current, patch) {
       ...currentAttendanceRules,
       ...sourceAttendanceRules,
       holidays
+    },
+    accessLocks: {
+      ...(current.accessLocks || {}),
+      ...(source.accessLocks || {})
     }
   };
 }
