@@ -53,13 +53,20 @@ const FIELD_TO_DB_COLUMN = Object.freeze({
   designDocumentationUrl: "design_documentation_url"
 });
 
+const REQUIRED_COMMON_REVIEW_FIELD_KEYS = Object.freeze([
+  "reportUrl",
+  "productPhotoFolderUrl",
+  "manualBookUrl",
+  "demoVideoUrl"
+]);
+
 function getFieldLabel(key) {
   return COMMON_FIELD_LABELS[key] || SPECIAL_FIELD_LABELS[key] || key;
 }
 
 async function notifyOperatorsGraduationSubmission({ student, projectRows, senderUserId }) {
   const operatorsResult = await query(
-    "SELECT id FROM users WHERE role = 'operator' AND is_active = TRUE"
+    "SELECT id FROM users WHERE role IN ('operator', 'admin') AND is_active = TRUE"
   );
 
   if (operatorsResult.rowCount === 0) return;
@@ -108,7 +115,7 @@ function requireMahasiswa(req, res) {
 }
 
 function requireOperator(req, res) {
-  if (req.authUser?.role !== "operator") {
+  if (!["operator", "admin"].includes(req.authUser?.role)) {
     res.status(403).json({ message: "Akses hanya untuk admin/operator." });
     return false;
   }
@@ -375,14 +382,20 @@ function removeReviewsForChangedFields(existingProject, nextProject) {
   return nextReviews;
 }
 
-function getReviewableFieldsForProject(project) {
+function getRequiredReviewFieldsForProject(project) {
   const positionLabel = project?.position_label || project?.positionLabel || "Anggota";
   const requiredSpecialFields = getRequiredSpecialFieldsForRole(positionLabel);
-  const keys = new Set(Object.keys(COMMON_FIELD_LABELS));
+  const keys = new Set(REQUIRED_COMMON_REVIEW_FIELD_KEYS);
 
   for (const field of requiredSpecialFields) {
-    if (field?.key) keys.add(field.key);
+    if (field?.key && field.required !== false) keys.add(field.key);
   }
+
+  return REVIEWABLE_FIELD_KEYS.filter((key) => keys.has(key));
+}
+
+function getReviewableFieldsForProject(project) {
+  const keys = new Set(getRequiredReviewFieldsForProject(project));
 
   for (const key of REVIEWABLE_FIELD_KEYS) {
     if (getProjectFieldValue(project, key)) keys.add(key);
@@ -393,16 +406,28 @@ function getReviewableFieldsForProject(project) {
 
 function computeSubmissionReviewStatus(projectRows) {
   const reviews = [];
+  let hasMissingRequiredField = false;
 
   for (const project of projectRows || []) {
     const fieldReviews = normalizeFieldReviews(project.field_reviews || project.fieldReviews);
+    const requiredKeys = getRequiredReviewFieldsForProject(project);
+
+    for (const key of requiredKeys) {
+      if (!getProjectFieldValue(project, key)) {
+        hasMissingRequiredField = true;
+        continue;
+      }
+      reviews.push(fieldReviews[key]?.status || "pending");
+    }
+
     for (const key of getReviewableFieldsForProject(project)) {
+      if (requiredKeys.includes(key)) continue;
       reviews.push(fieldReviews[key]?.status || "pending");
     }
   }
 
-  if (reviews.length === 0) return "Dikirim";
   if (reviews.some((status) => status === "rejected")) return "Revisi";
+  if (hasMissingRequiredField || reviews.length === 0) return "Dikirim";
   if (reviews.every((status) => status === "accepted")) return "Valid";
   return "Dikirim";
 }

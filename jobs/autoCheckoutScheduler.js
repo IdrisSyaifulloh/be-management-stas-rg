@@ -9,6 +9,7 @@ const {
   createCheckoutMissing22Locks,
   createWfhCheckinMissingLocks
 } = require("../utils/studentAccessLocks");
+const { findNonWorkingDayForDate } = require("../utils/holidays");
 
 const TIMEZONE = "Asia/Jakarta";
 const ONE_MINUTE = 60 * 1000;
@@ -141,6 +142,10 @@ async function notifyAutoCheckout({ rows, scheduleSlot }) {
 async function processAutoCheckout({ targetDate, checkoutTime }) {
   await ensureAttendanceAutoCheckoutColumns();
 
+  const settings = await getSettingsAsync();
+  const nonWorkingDay = findNonWorkingDayForDate(settings, targetDate);
+  const shouldCreateAttendanceLocks = !nonWorkingDay;
+
   const result = await query(
     `
     WITH updated AS (
@@ -183,15 +188,18 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
     [targetDate, checkoutTime, AUTO_REASON]
   );
 
-  const missingCheckoutIds = result.rows
-    .filter((row) => row.status === "WFH" || (row.student_type === "Magang" && row.has_approved_leave !== true))
-    .map((row) => row.student_id);
+  const missingCheckoutIds = shouldCreateAttendanceLocks
+    ? result.rows
+        .filter((row) => row.status === "WFH" || (row.student_type === "Magang" && row.has_approved_leave !== true))
+        .map((row) => row.student_id)
+    : [];
   const accessLockIds = await createCheckoutMissing22Locks({
     studentIds: missingCheckoutIds,
     date: targetDate
   });
 
-  const missingWfhCheckin = await query(
+  const missingWfhCheckin = shouldCreateAttendanceLocks
+    ? await query(
     `
     SELECT DISTINCT lr.student_id
     FROM leave_requests lr
@@ -208,7 +216,8 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
       AND ar.check_in_at IS NULL
     `,
     [targetDate]
-  );
+  )
+    : { rows: [] };
   const wfhCheckinMissingIds = missingWfhCheckin.rows.map((row) => row.student_id);
   const wfhCheckinMissingLockIds = await createWfhCheckinMissingLocks({
     studentIds: wfhCheckinMissingIds,
@@ -229,7 +238,8 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
       ids: accessLockIds,
       wfhCheckinMissingReason: "WFH_CHECKIN_MISSING",
       wfhCheckinMissingStudentIds: wfhCheckinMissingIds,
-      wfhCheckinMissingIds: wfhCheckinMissingLockIds
+      wfhCheckinMissingIds: wfhCheckinMissingLockIds,
+      nonWorkingDay
     },
     notifications
   };

@@ -1327,6 +1327,7 @@ router.get(
           leaveTypesByStudentId[studentId] = "wfh";
 
           if (
+            !todayHoliday &&
             missingCheckoutWindowOpen &&
             attendance.check_in_at &&
             (!attendance.check_out_at || attendance.auto_checkout_reason === ATTENDANCE_AUTO_CHECKOUT_REASON_22)
