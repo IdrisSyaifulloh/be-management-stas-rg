@@ -47,6 +47,27 @@ function columnLetter(index) {
   return label;
 }
 
+function getDisplayWidth(value) {
+  return normalizeCell(value).replace(/\r?\n/g, " ").length;
+}
+
+function computeColumnWidths(headers, rows, headerRows, maxColumns) {
+  const dataRows = [...headerRows, ...rows];
+
+  return Array.from({ length: maxColumns }, (_, columnIndex) => {
+    const maxLength = Math.max(
+      getDisplayWidth(headers[columnIndex]),
+      ...dataRows.map((row) => getDisplayWidth(row[columnIndex]))
+    );
+
+    if (columnIndex === 0) {
+      return Math.max(18, Math.min(42, maxLength + 2));
+    }
+
+    return Math.max(9, Math.min(18, maxLength + 2));
+  });
+}
+
 function buildSheetXml(headers, rows, headerRows = null, merges = []) {
   const normalizedHeaderRows = Array.isArray(headerRows) && headerRows.length ? headerRows : [headers];
   const dataRows = [...normalizedHeaderRows, ...rows];
@@ -58,6 +79,10 @@ function buildSheetXml(headers, rows, headerRows = null, merges = []) {
   );
   const lastColumn = columnLetter(maxColumns - 1);
   const lastRow = Math.max(dataRows.length, 1);
+  const columnWidths = computeColumnWidths(headers, rows, normalizedHeaderRows, maxColumns);
+  const colsXml = `<cols>${columnWidths
+    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
+    .join("")}</cols>`;
 
   const rowXml = dataRows
     .map((row, rowIndex) => {
@@ -83,6 +108,7 @@ function buildSheetXml(headers, rows, headerRows = null, merges = []) {
   <dimension ref="A1:${lastColumn}${lastRow}"/>
   <sheetViews><sheetView workbookViewId="0"/></sheetViews>
   <sheetFormatPr defaultRowHeight="15"/>
+  ${colsXml}
   <sheetData>${rowXml}</sheetData>
   ${mergeXml}
 </worksheet>`;
