@@ -57,13 +57,14 @@ Query params:
 - `format` wajib di frontend, tetapi backend akan default ke `csv` jika tidak dikirim
 - `studentId` opsional
 - `projectId` opsional
+- `studentType` opsional, nilai: `Riset` atau `Magang`
 - `startDate` opsional
 - `endDate` opsional
 
 Contoh:
 
 ```http
-GET /api/v1/exports/custom?type=kehadiran&format=xlsx&studentId=STD-001&projectId=PRJ-002&startDate=2026-03-01&endDate=2026-03-31
+GET /api/v1/exports/custom?type=kehadiran&format=xlsx&studentType=Riset&studentId=STD-001&projectId=PRJ-002&startDate=2026-03-01&endDate=2026-03-31
 ```
 
 ## Jenis Export yang Didukung
@@ -78,16 +79,13 @@ Format:
 Filter:
 - `studentId`
 - `projectId`
+- `studentType`
 - `startDate`
 - `endDate`
 
 Kolom output:
-- `Nama`
-- `NIM`
-- `Tanggal`
-- `Status`
-- `Check-in`
-- `Check-out`
+- Jika export semua mahasiswa: kolom berupa matriks tanggal kerja sesuai rentang tanggal, dengan subkolom `Masuk` dan `Keluar`, lalu `TOTAL`.
+- Jika export satu mahasiswa: `Nama`, `NIM`, `Tanggal`, `Status`, `Check-in`, `Check-out`.
 
 ### 2. `logbook`
 
@@ -99,6 +97,7 @@ Format:
 Filter:
 - `studentId`
 - `projectId`
+- `studentType`
 - `startDate`
 - `endDate`
 
@@ -121,6 +120,7 @@ Format:
 Filter:
 - `studentId`
 - `projectId`
+- `studentType`
 - `startDate`
 - `endDate`
 
@@ -147,10 +147,8 @@ Format:
 - `pdf`
 
 Filter:
-- `studentId`
-- `projectId`
-- `startDate`
-- `endDate`
+- `angkatan`
+- `studentType`
 
 Kolom output:
 - `Nama`
@@ -197,6 +195,7 @@ Format:
 
 Filter:
 - `studentId`
+- `studentType`
 - `startDate`
 - `endDate`
 
@@ -230,6 +229,7 @@ Semua endpoint di atas tetap menerima query param yang sama:
 - `format`
 - `studentId`
 - `projectId`
+- `studentType`
 - `startDate`
 - `endDate`
 
@@ -257,6 +257,18 @@ Format tanggal yang diterima backend:
 - `DD/MM/YYYY`
 
 Disarankan frontend mengirim `YYYY-MM-DD`.
+
+### `studentType`
+
+Nilai yang diterima:
+
+- `Riset`
+- `Magang`
+
+Alias yang juga diterima backend:
+
+- `studentTipe`
+- `tipe`
 
 ## Status Code dan Error Handling
 
@@ -344,20 +356,6 @@ Contoh response:
 }
 ```
 
-### `422 Unprocessable Entity`
-
-Kasus:
-
-- export `pdf` terlalu besar
-
-Contoh response:
-
-```json
-{
-  "message": "Export PDF Rekap Kehadiran dibatasi maksimal 500 baris. Gunakan CSV atau XLSX untuk data besar."
-}
-```
-
 ## Saran Implementasi Frontend
 
 ### Mapping pilihan UI ke query param
@@ -368,6 +366,7 @@ Gunakan mapping berikut:
 - Format file -> `format`
 - Mahasiswa -> `studentId`
 - Riset -> `projectId`
+- Tipe mahasiswa -> `studentType`
 - Tanggal dari -> `startDate`
 - Tanggal sampai -> `endDate`
 
@@ -376,6 +375,7 @@ Gunakan mapping berikut:
 - Panggil `/templates` saat halaman load
 - Render opsi export berdasarkan `templates`
 - Render filter `Riset` hanya jika `filters.project === true`
+- Render filter `Tipe Mahasiswa` hanya jika `filters.studentType === true`
 - Render filter tanggal hanya jika `filters.dateRange === true`
 - Saat download file, gunakan `responseType: 'blob'`
 - Jika response status bukan `200`, tampilkan `message` dari backend
@@ -386,6 +386,7 @@ Gunakan mapping berikut:
 const params = new URLSearchParams({
   type: "kehadiran",
   format: "xlsx",
+  studentType: "Riset",
   studentId: "STD-001",
   projectId: "PRJ-002",
   startDate: "2026-03-01",

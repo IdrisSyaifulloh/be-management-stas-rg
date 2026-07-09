@@ -729,10 +729,13 @@ Dokumen ini merangkum endpoint yang tersedia di backend (`be/routes/api`).
 - Body opsional:
   - `format` (default `XLSX`)
   - `selectedData` (array id data yang diekspor)
+  - `studentType` / `tipe`: `"Riset"` atau `"Magang"` untuk export yang berbasis data mahasiswa.
 - Response:
   - object job export (`id`, `status`, `fileUrl`, dll).
 - Catatan:
   - Queue export masih in-memory (`const jobs = []`) dan belum persisten antar restart service.
+  - Export PDF tidak lagi dibatasi 500 baris; file akan dipaginasi otomatis.
+  - Export CSV/XLSX absensi semua mahasiswa mengikuti seluruh tanggal kerja pada rentang `startDate` sampai `endDate`.
 
 ## Contoh Endpoint Cepat
 
