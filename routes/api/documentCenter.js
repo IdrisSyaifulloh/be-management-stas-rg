@@ -14,6 +14,7 @@ const {
   resolveDocumentCenterStudent
 } = require("../../utils/documentCenterIdentity");
 const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
+const { publishDocument } = require("../../utils/documentCenterPublish");
 const {
   openPrivateDocumentVersion,
   sanitizeDownloadFilename
@@ -433,6 +434,20 @@ router.post(
       ip: req.ip
     });
     res.status(201).json(document);
+  })
+);
+
+router.post(
+  "/operator/documents/:id/publish",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const document = await publishDocument({
+      documentId: req.params.id,
+      authUser: req.authUser,
+      ip: req.ip,
+      body: req.body
+    });
+    res.status(200).json(document);
   })
 );
 
