@@ -1,9 +1,15 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
-const path = require("path");
 const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
 const { buildStudentKey } = require("./documentCenterIdentity");
+const {
+  STAGING_ROOT,
+  buildStagingFilePath,
+  buildVersionStorageKey,
+  buildVersionFilePath,
+  getVersionDirectory
+} = require("./documentCenterStorage");
 
 const MAX_RAW_PDF_BYTES = 8 * 1024 * 1024;
 const MAX_PARTICIPANTS = 100;
@@ -25,9 +31,6 @@ const PARTICIPANT_FIELDS = new Set([
   "legacyProjectId",
   "period"
 ]);
-const STORAGE_ROOT = path.join(__dirname, "..", "storage", "document-center");
-const STAGING_DIR = path.join(STORAGE_ROOT, "staging");
-const VERSIONS_DIR = path.join(STORAGE_ROOT, "versions");
 
 function createInputError(field) {
   const error = new Error("Input tidak valid.");
@@ -449,16 +452,16 @@ async function createDocumentCenterDraft({ body, authUser, ip }) {
   const documentId = `DCDOC-${crypto.randomUUID()}`;
   const versionId = `DCVER-${crypto.randomUUID()}`;
   const auditId = `AUD-DC-${crypto.randomUUID()}`;
-  const stagingPath = path.join(STAGING_DIR, `${crypto.randomUUID()}.pdf`);
-  const storageKey = `versions/${documentId}/v1.pdf`;
-  const finalPath = path.join(VERSIONS_DIR, documentId, "v1.pdf");
+  const stagingPath = buildStagingFilePath(`${crypto.randomUUID()}.pdf`);
+  const storageKey = buildVersionStorageKey(documentId, 1);
+  const finalPath = buildVersionFilePath(documentId, 1);
   let client;
   let transactionStarted = false;
   let finalMoved = false;
   let committed = false;
 
   try {
-    await fs.mkdir(STAGING_DIR, { recursive: true });
+    await fs.mkdir(STAGING_ROOT, { recursive: true });
     await fs.writeFile(stagingPath, request.pdfBuffer, { flag: "wx" });
 
     client = await pool.connect();
@@ -563,7 +566,7 @@ async function createDocumentCenterDraft({ body, authUser, ip }) {
       ]
     );
 
-    await fs.mkdir(path.dirname(finalPath), { recursive: true });
+    await fs.mkdir(getVersionDirectory(documentId), { recursive: true });
     await fs.rename(stagingPath, finalPath);
     finalMoved = true;
     await client.query("COMMIT");

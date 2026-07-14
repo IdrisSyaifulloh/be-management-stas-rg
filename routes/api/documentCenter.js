@@ -1,4 +1,5 @@
 const express = require("express");
+const { pipeline } = require("stream/promises");
 const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const { requireRoleStrict } = require("../../utils/roleGuard");
@@ -13,6 +14,10 @@ const {
   resolveDocumentCenterStudent
 } = require("../../utils/documentCenterIdentity");
 const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
+const {
+  openPrivateDocumentVersion,
+  sanitizeDownloadFilename
+} = require("../../utils/documentCenterStorage");
 
 const router = express.Router();
 
@@ -117,6 +122,51 @@ function mapDocumentRow(row, includeParticipants = false) {
   return result;
 }
 
+function sendUnavailableDocumentFile(res) {
+  return res.status(410).json({ message: "File dokumen tidak tersedia." });
+}
+
+async function findDownloadDocumentForStudent(documentId, studentKey) {
+  return query(
+    `
+    SELECT od.id, od.status, od.current_version_number,
+           dv.id AS version_id, dv.storage_key, dv.download_filename,
+           dv.mime_type, dv.file_size
+    FROM dc_official_documents od
+    LEFT JOIN dc_document_versions dv
+      ON dv.document_id = od.id
+     AND dv.version_number = od.current_version_number
+    WHERE od.id = $1
+      AND od.status IN ('terbit', 'diarsipkan')
+      AND EXISTS (
+        SELECT 1
+        FROM dc_official_document_students ods
+        WHERE ods.document_id = od.id
+          AND ods.student_key = $2
+      )
+    LIMIT 1
+    `,
+    [documentId, studentKey]
+  );
+}
+
+async function findDownloadDocumentForOperator(documentId) {
+  return query(
+    `
+    SELECT od.id, od.status, od.current_version_number,
+           dv.id AS version_id, dv.storage_key, dv.download_filename,
+           dv.mime_type, dv.file_size
+    FROM dc_official_documents od
+    LEFT JOIN dc_document_versions dv
+      ON dv.document_id = od.id
+     AND dv.version_number = od.current_version_number
+    WHERE od.id = $1
+    LIMIT 1
+    `,
+    [documentId]
+  );
+}
+
 async function resolveStudentOrThrow(req) {
   const student = await resolveDocumentCenterStudent(req.authUser?.id);
   if (!student) {
@@ -185,6 +235,68 @@ router.get(
       items: result.rows.map((row) => mapDocumentRow(row)),
       pagination: { limit: options.limit, offset: options.offset, total }
     });
+  })
+);
+
+router.get(
+  "/documents/:id/download",
+  requireRoleStrict(["mahasiswa", "operator"]),
+  asyncHandler(async (req, res) => {
+    const documentId = requireSafeId(req.params.id);
+    const role = String(req.authUser?.role || "").trim().toLowerCase();
+    let result;
+
+    if (role === "mahasiswa") {
+      const student = await resolveStudentOrThrow(req);
+      result = await findDownloadDocumentForStudent(documentId, student.studentKey);
+    } else {
+      result = await findDownloadDocumentForOperator(documentId);
+    }
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Dokumen tidak ditemukan." });
+    }
+
+    const document = result.rows[0];
+    if (!document.current_version_number || !document.version_id) {
+      return sendUnavailableDocumentFile(res);
+    }
+
+    let openedFile;
+    try {
+      openedFile = await openPrivateDocumentVersion({
+        storageKey: document.storage_key,
+        mimeType: document.mime_type,
+        fileSize: document.file_size
+      });
+    } catch (error) {
+      if (error?.code === "DOCUMENT_FILE_UNAVAILABLE") {
+        return sendUnavailableDocumentFile(res);
+      }
+      throw error;
+    }
+
+    const filename = sanitizeDownloadFilename(document.download_filename);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Length", openedFile.size);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+
+    const fileStream = openedFile.handle.createReadStream({ autoClose: true });
+    try {
+      await pipeline(fileStream, res);
+    } catch (error) {
+      if (!res.headersSent) {
+        if (["ENOENT", "ENOTDIR", "ELOOP"].includes(error?.code)) {
+          return sendUnavailableDocumentFile(res);
+        }
+        throw error;
+      }
+      res.destroy(error);
+    } finally {
+      await openedFile.handle.close().catch(() => {});
+    }
   })
 );
 
