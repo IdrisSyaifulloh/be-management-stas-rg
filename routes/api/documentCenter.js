@@ -15,6 +15,7 @@ const {
 } = require("../../utils/documentCenterIdentity");
 const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
 const { publishDocument } = require("../../utils/documentCenterPublish");
+const { listStudents, listStudentPeriods, listStudentProjects } = require("../../utils/documentCenterLookups");
 const {
   openPrivateDocumentVersion,
   sanitizeDownloadFilename
@@ -441,6 +442,18 @@ router.post(
     res.status(201).json(document);
   })
 );
+
+router.get("/operator/students", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listStudents(req.query));
+}));
+
+router.get("/operator/students/:id/periods", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listStudentPeriods(req.params.id));
+}));
+
+router.get("/operator/students/:id/projects", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listStudentProjects(req.params.id));
+}));
 
 router.post(
   "/operator/documents/:id/publish",

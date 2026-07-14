@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
+const path = require("path");
 const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
 const { buildStudentKey } = require("./documentCenterIdentity");
