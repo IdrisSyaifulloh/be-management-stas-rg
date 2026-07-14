@@ -31,7 +31,7 @@ const DOCUMENT_STATUSES = [
   "diarsipkan",
   "dicabut"
 ];
-const STUDENT_DOCUMENT_STATUSES = ["terbit", "diarsipkan", "dicabut"];
+const STUDENT_DOCUMENT_STATUSES = ["terbit", "diarsipkan"];
 const DOCUMENT_PURPOSES = [
   "introductory_letter",
   "acceptance_letter",
@@ -109,6 +109,7 @@ function mapDocumentRow(row, includeParticipants = false) {
     generatedFrom: row.generated_from,
     activityOutcome: row.activity_outcome || null,
     currentVersionNumber: row.current_version_number || null,
+    createdAt: row.created_at || null,
     issuedAt: row.issued_at || null,
     archivedAt: row.archived_at || null,
     canDownload: false
@@ -185,7 +186,7 @@ router.get(
     const student = await resolveStudentOrThrow(req);
     const options = parseListOptions(req, STUDENT_DOCUMENT_STATUSES);
     const predicates = [
-      "od.status IN ('terbit', 'diarsipkan', 'dicabut')",
+      "od.status IN ('terbit', 'diarsipkan')",
       "EXISTS (SELECT 1 FROM dc_official_document_students ods_access WHERE ods_access.document_id = od.id AND ods_access.student_key = $1)"
     ];
     const params = [student.studentKey];
@@ -200,7 +201,7 @@ router.get(
       `
       WITH filtered AS (
         SELECT od.id, od.title, od.document_number, od.status, od.generated_from,
-               od.activity_outcome, od.current_version_number, od.issued_at, od.archived_at,
+               od.activity_outcome, od.current_version_number, od.created_at, od.issued_at, od.archived_at,
                dd.document_purpose, dd.type_code, dd.type_name, dd.activity_type,
                COUNT(*) OVER() AS total_count
         FROM dc_official_documents od
@@ -310,7 +311,7 @@ router.get(
     const result = await query(
       `
       SELECT od.id, od.title, od.document_number, od.status, od.generated_from,
-             od.activity_outcome, od.current_version_number, od.issued_at, od.archived_at,
+             od.activity_outcome, od.current_version_number, od.created_at, od.issued_at, od.archived_at,
              dd.document_purpose, dd.type_code, dd.type_name, dd.activity_type,
              COALESCE(contexts.participant_contexts, '[]'::jsonb) AS participant_contexts
       FROM dc_official_documents od
@@ -330,7 +331,7 @@ router.get(
           AND ods.student_key = $1
       ) contexts ON TRUE
       WHERE od.id = $2
-        AND od.status IN ('terbit', 'diarsipkan', 'dicabut')
+        AND od.status IN ('terbit', 'diarsipkan')
         AND EXISTS (
           SELECT 1
           FROM dc_official_document_students ods_access
@@ -381,7 +382,7 @@ router.get(
       `
       WITH filtered AS (
         SELECT od.id, od.title, od.document_number, od.status, od.generated_from,
-               od.activity_outcome, od.current_version_number, od.issued_at, od.archived_at,
+               od.activity_outcome, od.current_version_number, od.created_at, od.issued_at, od.archived_at,
                dd.document_purpose, dd.type_code, dd.type_name, dd.activity_type,
                COUNT(*) OVER() AS total_count
         FROM dc_official_documents od
@@ -459,7 +460,7 @@ router.get(
     const result = await query(
       `
       SELECT od.id, od.title, od.document_number, od.status, od.generated_from,
-             od.activity_outcome, od.current_version_number, od.issued_at, od.archived_at,
+             od.activity_outcome, od.current_version_number, od.created_at, od.issued_at, od.archived_at,
              dd.document_purpose, dd.type_code, dd.type_name, dd.activity_type,
              COALESCE(participant_rows.participants, '[]'::jsonb) AS participants
       FROM dc_official_documents od
