@@ -41,6 +41,9 @@ out/
 public/uploads/
 uploads/
 
+# Document Center runtime storage
+/storage/document-center/
+
 # Database
 *.db
 *.sqlite
