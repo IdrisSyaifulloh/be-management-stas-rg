@@ -29,7 +29,9 @@ const {
   detailRequest: detailOperatorRequest,
   requestRevision,
   approveRequest,
-  rejectRequest
+  rejectRequest,
+  listDocumentCandidates,
+  linkDocument
 } = require("../../utils/documentCenterOperatorRequests");
 const { listStudents, listStudentPeriods, listStudentProjects } = require("../../utils/documentCenterLookups");
 const {
@@ -493,6 +495,14 @@ router.get("/operator/requests", requireRoleStrict(["operator"]), asyncHandler(a
 
 router.get("/operator/requests/:id", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.json(await detailOperatorRequest(req.params.id));
+}));
+
+router.get("/operator/requests/:id/document-candidates", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listDocumentCandidates(req.params.id));
+}));
+
+router.post("/operator/requests/:id/link-document", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await linkDocument({ authUser: req.authUser, id: req.params.id, body: req.body }));
 }));
 
 router.post("/operator/requests/:id/request-revision", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {

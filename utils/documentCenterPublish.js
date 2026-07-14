@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
 const { openPrivateDocumentVersion } = require("./documentCenterStorage");
+const { loadRequest, validateRequestDocumentContext, insertAudit } = require("./documentCenterOperatorRequests");
 
 const ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
 
@@ -26,14 +27,14 @@ function isNonEmptyObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
 }
 
-function assertPublishEligibility(document) {
+function assertPublishEligibility(document, allowInactiveDefinition = false) {
   if (
     document.status !== "draft" ||
     document.document_number !== null ||
     document.issued_at !== null ||
     document.issued_by_user_id !== null ||
     !document.definition_id ||
-    !document.definition_active ||
+    (!document.definition_active && !allowInactiveDefinition) ||
     !/^[0-9]{2}$/.test(document.type_code || "") ||
     !Number.isInteger(document.current_version_number) ||
     document.current_version_number < 1 ||
@@ -49,7 +50,7 @@ async function lockPublishDocument(client, documentId) {
   return client.query(
     `
     SELECT od.id, od.status, od.document_number, od.issued_at, od.issued_by_user_id,
-           od.current_version_number,
+           od.current_version_number, od.snapshot_data,
            dd.id AS definition_id, dd.type_code, dd.is_active AS definition_active,
            dv.id AS version_id, dv.storage_key, dv.mime_type, dv.file_size,
            dv.snapshot_data AS version_snapshot_data,
@@ -125,7 +126,13 @@ async function publishDocument({ documentId, authUser, ip, body }) {
     if (!Number.isInteger(document.current_version_number) || document.current_version_number < 1 || !document.version_id) {
       throw unavailableFileError();
     }
-    assertPublishEligibility(document);
+    const linkedId = await client.query(`SELECT id FROM dc_document_requests WHERE official_document_id = $1 LIMIT 1`, [safeDocumentId]);
+    let linkedRequest = null;
+    if (linkedId.rowCount) {
+      linkedRequest = await loadRequest(client, linkedId.rows[0].id, true);
+      await validateRequestDocumentContext(client, linkedRequest, document, true);
+    }
+    assertPublishEligibility(document, Boolean(linkedRequest));
 
     let openedFile;
     try {
@@ -187,6 +194,22 @@ async function publishDocument({ documentId, authUser, ip, body }) {
         })
       ]
     );
+
+    if (linkedRequest) {
+      const completed = await client.query(
+        `UPDATE dc_document_requests
+         SET status='completed', completed_at=NOW(), updated_at=NOW()
+         WHERE id=$1 AND status='approved' AND official_document_id=$2
+         RETURNING id`,
+        [linkedRequest.id, safeDocumentId]
+      );
+      if (!completed.rowCount) throw createHttpError(409, "Permintaan tidak konsisten.");
+      await insertAudit(client, {
+        authUser: { id: operatorUserId }, request: linkedRequest,
+        event: "document_request_completed", action: "Update",
+        previousStatus: "approved", newStatus: "completed", officialDocumentId: safeDocumentId
+      });
+    }
 
     await client.query("COMMIT");
     transactionStarted = false;

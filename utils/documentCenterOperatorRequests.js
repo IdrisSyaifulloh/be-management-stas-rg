@@ -95,6 +95,8 @@ function mapOfficialDocument(row) {
     title: row.official_document_title || null,
     documentNumber: row.official_document_number || null,
     status: row.official_document_status || null,
+    currentVersionNumber: row.official_document_version || null,
+    canDownload: Number(row.official_document_version) > 0,
     issuedAt: row.official_document_issued_at || null
   };
 }
@@ -167,7 +169,7 @@ const REQUEST_SELECT = `
     reviewer.name AS reviewed_by_name,
     od.id AS official_document_id, od.title AS official_document_title,
     od.document_number AS official_document_number,
-    od.status AS official_document_status,
+    od.status AS official_document_status, od.current_version_number AS official_document_version,
     od.issued_at AS official_document_issued_at
   FROM dc_document_requests dr
   JOIN dc_document_definitions dd ON dd.id = dr.document_definition_id
@@ -176,7 +178,7 @@ const REQUEST_SELECT = `
 `;
 const LIST_REQUEST_SELECT = REQUEST_SELECT.replace("SELECT\n", "SELECT\n    f.total_count,\n");
 
-async function insertAudit(client, { authUser, request, event, action, previousStatus, newStatus }) {
+async function insertAudit(client, { authUser, request, event, action, previousStatus, newStatus, officialDocumentId = null }) {
   await client.query(
     `INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
      VALUES ($1, $2, 'Operator', $3, 'document_center_request', $4::jsonb)`,
@@ -189,11 +191,104 @@ async function insertAudit(client, { authUser, request, event, action, previousS
         event,
         requestId: request.id,
         definitionId: request.document_definition_id,
+        ...(officialDocumentId ? { officialDocumentId } : {}),
         previousStatus,
         newStatus
       })
     ]
   );
+}
+
+function conflict(message) { fail(message, 409); }
+
+async function loadRequest(client, requestId, lock = false) {
+  const result = await client.query(
+    `SELECT dr.id, dr.status, dr.document_definition_id, dr.student_key, dr.period_key,
+            dr.legacy_project_id, dr.activity_type, dr.official_document_id,
+            dd.request_mode
+     FROM dc_document_requests dr
+     JOIN dc_document_definitions dd ON dd.id = dr.document_definition_id
+     WHERE dr.id = $1${lock ? " FOR UPDATE OF dr" : ""}`,
+    [requestId]
+  );
+  if (!result.rowCount) fail("Permintaan tidak ditemukan.", 404);
+  return result.rows[0];
+}
+
+async function participantCounts(client, documentId, studentKey) {
+  const result = await client.query(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE student_key = $2)::int AS matching,
+            MAX(legacy_period_key) AS legacy_period_key,
+            MAX(legacy_project_id) AS legacy_project_id
+     FROM dc_official_document_students
+     WHERE document_id = $1`,
+    [documentId, studentKey]
+  );
+  return result.rows[0];
+}
+
+async function validateRequestDocumentContext(client, request, document, linked = false) {
+  if (request.status !== "approved" || (!linked && request.official_document_id) || (linked && request.official_document_id !== document.id)) conflict("Permintaan tidak dapat dihubungkan.");
+  if (request.request_mode !== "student_request") conflict("Permintaan tidak dapat dihubungkan.");
+  if (document.status !== "draft" || !Number.isInteger(Number(document.current_version_number)) || Number(document.current_version_number) < 1) conflict("Dokumen belum memenuhi syarat.");
+  if ((document.document_definition_id || document.definition_id) !== request.document_definition_id) conflict("Dokumen belum memenuhi syarat.");
+  const counts = await participantCounts(client, document.id, request.student_key);
+  if (Number(counts.total) !== 1 || Number(counts.matching) !== 1) conflict("Dokumen belum memenuhi syarat.");
+  if (counts.legacy_period_key !== request.period_key || counts.legacy_project_id !== request.legacy_project_id) conflict("Dokumen belum memenuhi syarat.");
+  const actualActivityType = document.snapshot_data?.actualActivityType || null;
+  if (actualActivityType !== (request.activity_type || null)) conflict("Dokumen belum memenuhi syarat.");
+}
+
+async function listDocumentCandidates(requestId) {
+  const safeRequestId = requireSafeId(requestId, "id");
+  const client = await pool.connect();
+  try {
+    const request = await loadRequest(client, safeRequestId);
+    if (request.status !== "approved" || request.official_document_id || request.request_mode !== "student_request") conflict("Permintaan tidak dapat dihubungkan.");
+    const result = await client.query(
+      `SELECT od.id, od.title, od.status, od.current_version_number, od.created_at,
+              dd.id AS definition_id, dd.name AS definition_name, dd.type_code
+       FROM dc_official_documents od
+       JOIN dc_document_definitions dd ON dd.id = od.document_definition_id
+       JOIN dc_official_document_students ods ON ods.document_id = od.id
+       WHERE od.status = 'draft'
+         AND od.current_version_number > 0
+         AND od.document_definition_id = $1
+         AND NOT EXISTS (SELECT 1 FROM dc_document_requests linked WHERE linked.official_document_id = od.id)
+         AND ods.student_key = $2
+         AND ods.legacy_period_key IS NOT DISTINCT FROM $3
+         AND ods.legacy_project_id IS NOT DISTINCT FROM $4
+         AND od.snapshot_data->>'actualActivityType' IS NOT DISTINCT FROM $5
+         AND (SELECT COUNT(*) FROM dc_official_document_students all_participants WHERE all_participants.document_id = od.id) = 1
+       GROUP BY od.id, dd.id
+       ORDER BY od.created_at DESC, od.id DESC`,
+      [request.document_definition_id, request.student_key, request.period_key, request.legacy_project_id, request.activity_type]
+    );
+    return { items: result.rows.map((row) => ({ id: row.id, title: row.title, definition: { id: row.definition_id, name: row.definition_name, typeCode: row.type_code }, status: row.status, currentVersionNumber: row.current_version_number, createdAt: row.created_at, canDownload: Number(row.current_version_number) > 0 })) };
+  } finally { client.release(); }
+}
+
+async function linkDocument({ authUser, id, body }) {
+  const value = allowOnly(body == null ? {} : body, ["officialDocumentId"]);
+  const documentId = requireSafeId(value.officialDocumentId, "officialDocumentId");
+  const requestId = requireSafeId(id, "id");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const documentResult = await client.query(`SELECT id, status, document_definition_id, current_version_number, snapshot_data FROM dc_official_documents WHERE id=$1 FOR UPDATE`, [documentId]);
+    if (!documentResult.rowCount) fail("Dokumen tidak ditemukan.", 404);
+    const request = await loadRequest(client, requestId, true);
+    const document = documentResult.rows[0];
+    await validateRequestDocumentContext(client, request, document);
+    const linked = await client.query(`SELECT 1 FROM dc_document_requests WHERE official_document_id=$1 AND id <> $2 LIMIT 1`, [documentId, request.id]);
+    if (linked.rowCount) conflict("Dokumen sudah terhubung.");
+    await client.query(`UPDATE dc_document_requests SET official_document_id=$2, updated_at=NOW() WHERE id=$1 AND status='approved' AND official_document_id IS NULL`, [request.id, document.id]);
+    await insertAudit(client, { authUser, request, event: "document_request_linked", action: "Update", previousStatus: "approved", newStatus: "approved", officialDocumentId: document.id });
+    const result = await client.query(`${REQUEST_SELECT} WHERE dr.id=$1 LIMIT 1`, [request.id]);
+    await client.query("COMMIT");
+    return mapRequest(result.rows[0], true);
+  } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; } finally { client.release(); }
 }
 
 async function listRequests(rawQuery) {
@@ -313,4 +408,4 @@ function rejectRequest(input) {
   return transitionRequest({ ...input, transition: { from: ["submitted", "revision_required"], to: "rejected", noteRequired: true, event: "document_request_rejected", action: "Update" } });
 }
 
-module.exports = { listRequests, detailRequest, requestRevision, approveRequest, rejectRequest };
+module.exports = { listRequests, detailRequest, requestRevision, approveRequest, rejectRequest, listDocumentCandidates, linkDocument, loadRequest, validateRequestDocumentContext, insertAudit };
