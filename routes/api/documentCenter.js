@@ -38,6 +38,14 @@ const {
   openPrivateDocumentVersion,
   sanitizeDownloadFilename
 } = require("../../utils/documentCenterStorage");
+const {
+  listEligible: listFinalActivityEligible,
+  createCases: createFinalActivityCases,
+  listCases: listFinalActivityCases,
+  detailCase: detailFinalActivityCase,
+  uploadCompletionDraft,
+  uploadCertificateDraft
+} = require("../../utils/documentCenterFinalActivity");
 
 const router = express.Router();
 
@@ -527,6 +535,30 @@ router.get("/operator/students/:id/periods", requireRoleStrict(["operator"]), as
 
 router.get("/operator/students/:id/projects", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.json(await listStudentProjects(req.params.id));
+}));
+
+router.get("/operator/final-activity/eligible", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listFinalActivityEligible(req.query));
+}));
+
+router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await createFinalActivityCases({ body: req.body, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.get("/operator/final-activity/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listFinalActivityCases(req.query));
+}));
+
+router.get("/operator/final-activity/cases/:id", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await detailFinalActivityCase(req.params.id));
+}));
+
+router.post("/operator/final-activity/cases/:id/completion-draft", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await uploadCompletionDraft({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.post("/operator/final-activity/case-projects/:id/certificate-draft", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await uploadCertificateDraft({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
 }));
 
 router.post(

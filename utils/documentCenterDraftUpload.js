@@ -433,7 +433,7 @@ async function removeIfExists(filePath) {
   }
 }
 
-async function createDocumentCenterDraft({ body, authUser, ip }) {
+async function createDocumentCenterDraft({ body, authUser, ip, onDraftCreated, generatedFrom = "operator_manual" }) {
   const request = parseUploadRequest(body);
   const definition = await resolveDefinition(request.documentDefinitionId);
   validateOutcomeForDefinition(definition.request_mode, request.activityOutcome);
@@ -476,12 +476,13 @@ async function createDocumentCenterDraft({ body, authUser, ip }) {
         document_number, title, status, generated_from, activity_outcome,
         snapshot_data, current_version_number
       )
-      VALUES ($1, $2, NULL, NULL, NULL, $3, 'draft', 'operator_manual', $4, $5::jsonb, 1)
+      VALUES ($1, $2, NULL, NULL, NULL, $3, 'draft', $4, $5, $6::jsonb, 1)
       `,
       [
         documentId,
         definition.id,
         request.title,
+        generatedFrom,
         request.activityOutcome,
         JSON.stringify(documentSnapshot)
       ]
@@ -566,6 +567,18 @@ async function createDocumentCenterDraft({ body, authUser, ip }) {
         })
       ]
     );
+
+    if (typeof onDraftCreated === "function") {
+      await onDraftCreated({
+        client,
+        documentId,
+        versionId,
+        definition,
+        request,
+        resolved,
+        operatorUserId
+      });
+    }
 
     await fs.mkdir(getVersionDirectory(documentId), { recursive: true });
     await fs.rename(stagingPath, finalPath);

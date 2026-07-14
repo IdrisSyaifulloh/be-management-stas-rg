@@ -3,6 +3,7 @@ const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
 const { openPrivateDocumentVersion } = require("./documentCenterStorage");
 const { loadRequest, validateRequestDocumentContext, insertAudit } = require("./documentCenterOperatorRequests");
+const { markIssuedForPublishedDocument } = require("./documentCenterFinalActivity");
 
 const ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
 
@@ -210,6 +211,12 @@ async function publishDocument({ documentId, authUser, ip, body }) {
         previousStatus: "approved", newStatus: "completed", officialDocumentId: safeDocumentId
       });
     }
+
+    await markIssuedForPublishedDocument(client, {
+      documentId: safeDocumentId,
+      authUser: { id: operatorUserId },
+      ip
+    });
 
     await client.query("COMMIT");
     transactionStarted = false;
