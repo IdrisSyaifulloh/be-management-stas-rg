@@ -15,6 +15,15 @@ const {
 } = require("../../utils/documentCenterIdentity");
 const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
 const { publishDocument } = require("../../utils/documentCenterPublish");
+const {
+  getDefinitions: getStudentRequestDefinitions,
+  getContext: getStudentRequestContext,
+  submitRequest: submitStudentRequest,
+  listRequests: listStudentRequests,
+  detailRequest: detailStudentRequest,
+  editRequest: editStudentRequest,
+  cancelRequest: cancelStudentRequest
+} = require("../../utils/documentCenterStudentRequests");
 const { listStudents, listStudentPeriods, listStudentProjects } = require("../../utils/documentCenterLookups");
 const {
   openPrivateDocumentVersion,
@@ -183,6 +192,34 @@ async function resolveStudentOrThrow(req) {
   }
   return student;
 }
+
+router.get("/my/request-definitions", requireRoleStrict(["mahasiswa"]), asyncHandler(async (req, res) => {
+  res.json(await getStudentRequestDefinitions());
+}));
+
+router.get("/my/request-context", requireRoleStrict(["mahasiswa"]), asyncHandler(async (req, res) => {
+  res.json(await getStudentRequestContext(req.authUser?.id, req.query));
+}));
+
+router.get("/my/requests", requireRoleStrict(["mahasiswa"]), asyncHandler(async (req, res) => {
+  res.json(await listStudentRequests(req.authUser?.id, req.query));
+}));
+
+router.get("/my/requests/:id", requireRoleStrict(["mahasiswa"]), asyncHandler(async (req, res) => {
+  res.json(await detailStudentRequest(req.authUser?.id, req.params.id));
+}));
+
+router.post("/my/requests", requireRoleStrict(["mahasiswa"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await submitStudentRequest({ authUser: req.authUser, body: req.body }));
+}));
+
+router.patch("/my/requests/:id", requireRoleStrict(["mahasiswa"]), asyncHandler(async (req, res) => {
+  res.json(await editStudentRequest({ authUser: req.authUser, id: req.params.id, body: req.body }));
+}));
+
+router.post("/my/requests/:id/cancel", requireRoleStrict(["mahasiswa"]), asyncHandler(async (req, res) => {
+  res.json(await cancelStudentRequest({ authUser: req.authUser, id: req.params.id, body: req.body }));
+}));
 
 router.get(
   "/my/documents",
