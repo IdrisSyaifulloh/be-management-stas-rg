@@ -24,6 +24,13 @@ const {
   editRequest: editStudentRequest,
   cancelRequest: cancelStudentRequest
 } = require("../../utils/documentCenterStudentRequests");
+const {
+  listRequests: listOperatorRequests,
+  detailRequest: detailOperatorRequest,
+  requestRevision,
+  approveRequest,
+  rejectRequest
+} = require("../../utils/documentCenterOperatorRequests");
 const { listStudents, listStudentPeriods, listStudentProjects } = require("../../utils/documentCenterLookups");
 const {
   openPrivateDocumentVersion,
@@ -479,6 +486,26 @@ router.post(
     res.status(201).json(document);
   })
 );
+
+router.get("/operator/requests", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listOperatorRequests(req.query));
+}));
+
+router.get("/operator/requests/:id", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await detailOperatorRequest(req.params.id));
+}));
+
+router.post("/operator/requests/:id/request-revision", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await requestRevision({ authUser: req.authUser, id: req.params.id, body: req.body }));
+}));
+
+router.post("/operator/requests/:id/approve", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await approveRequest({ authUser: req.authUser, id: req.params.id, body: req.body }));
+}));
+
+router.post("/operator/requests/:id/reject", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await rejectRequest({ authUser: req.authUser, id: req.params.id, body: req.body }));
+}));
 
 router.get("/operator/students", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.json(await listStudents(req.query));
