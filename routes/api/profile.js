@@ -604,9 +604,6 @@ router.patch(
       prodi,
       angkatan,
       fakultas,
-      status,
-      tipe,
-      bergabung,
       pembimbing,
       bio,
       photoUrl,
@@ -620,9 +617,6 @@ router.patch(
     const hasProdi = hasOwn(payload, "prodi");
     const hasAngkatan = hasOwn(payload, "angkatan");
     const hasFakultas = hasOwn(payload, "fakultas");
-    const hasStatus = hasOwn(payload, "status");
-    const hasTipe = hasOwn(payload, "tipe");
-    const hasBergabung = hasOwn(payload, "bergabung");
     const hasPembimbing = hasOwn(payload, "pembimbing");
     const hasBio = hasOwn(payload, "bio");
     const hasPhotoUrl = hasOwn(payload, "photoUrl") || hasOwn(payload, "photo_url");
@@ -635,9 +629,6 @@ router.patch(
     const normalizedProdi = hasProdi ? normalizeOptionalText(prodi) : null;
     const normalizedAngkatan = hasAngkatan ? normalizeOptionalText(angkatan) : null;
     const normalizedFakultas = hasFakultas ? normalizeOptionalText(fakultas) : null;
-    const normalizedStatus = hasStatus ? normalizeStudentStatus(status) : null;
-    const normalizedTipe = hasTipe ? normalizeStudentType(tipe) : null;
-    const normalizedBergabung = hasBergabung ? normalizeOptionalDateField(bergabung, "Tanggal bergabung") : null;
     const normalizedPembimbing = hasPembimbing ? normalizeOptionalText(pembimbing) : null;
     const normalizedBio = hasBio ? normalizeOptionalText(bio) : null;
     const nextPhotoUrl = photoUrl ?? photoUrlSnake ?? null;
@@ -695,11 +686,8 @@ router.patch(
         phone = CASE WHEN $4::boolean THEN $5 ELSE phone END,
         angkatan = CASE WHEN $6::boolean THEN $7 ELSE angkatan END,
         fakultas = CASE WHEN $8::boolean THEN $9 ELSE fakultas END,
-        status = CASE WHEN $10::boolean THEN $11 ELSE status END,
-        tipe = CASE WHEN $12::boolean THEN $13 ELSE tipe END,
-        bergabung = CASE WHEN $14::boolean THEN $15::date ELSE bergabung END,
-        pembimbing = CASE WHEN $16::boolean THEN $17 ELSE pembimbing END,
-        bio = CASE WHEN $18::boolean THEN $19 ELSE bio END,
+        pembimbing = CASE WHEN $10::boolean THEN $11 ELSE pembimbing END,
+        bio = CASE WHEN $12::boolean THEN $13 ELSE bio END,
         updated_at = NOW()
       WHERE user_id = $1
       `,
@@ -713,12 +701,6 @@ router.patch(
         normalizedAngkatan,
         hasFakultas,
         normalizedFakultas,
-        hasStatus,
-        normalizedStatus,
-        hasTipe,
-        normalizedTipe,
-        hasBergabung,
-        normalizedBergabung,
         hasPembimbing,
         normalizedPembimbing,
         hasBio,
