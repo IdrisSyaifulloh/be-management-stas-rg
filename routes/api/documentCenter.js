@@ -95,7 +95,11 @@ function addFilter(predicates, params, value, buildSql) {
   predicates.push(buildSql(params.length));
 }
 
-function mapDocumentRow(row, includeParticipants = false) {
+function mapDocumentRow(row, includeParticipants = false, isStudent = false) {
+  const hasCurrentVersion = Number.isInteger(Number(row.current_version_number)) && Number(row.current_version_number) > 0;
+  const canDownload = isStudent
+    ? hasCurrentVersion && ["terbit", "diarsipkan"].includes(row.status)
+    : hasCurrentVersion;
   const result = {
     id: row.id,
     title: row.title,
@@ -112,7 +116,7 @@ function mapDocumentRow(row, includeParticipants = false) {
     createdAt: row.created_at || null,
     issuedAt: row.issued_at || null,
     archivedAt: row.archived_at || null,
-    canDownload: false
+    canDownload
   };
 
   if (includeParticipants) {
@@ -234,7 +238,7 @@ router.get(
 
     const total = result.rowCount > 0 ? Number(result.rows[0].total_count) : 0;
     res.json({
-      items: result.rows.map((row) => mapDocumentRow(row)),
+      items: result.rows.map((row) => mapDocumentRow(row, false, true)),
       pagination: { limit: options.limit, offset: options.offset, total }
     });
   })
@@ -347,7 +351,7 @@ router.get(
       return res.status(404).json({ message: "Dokumen tidak ditemukan." });
     }
 
-    res.json(mapDocumentRow(result.rows[0]));
+    res.json(mapDocumentRow(result.rows[0], false, true));
   })
 );
 
