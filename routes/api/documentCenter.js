@@ -12,6 +12,7 @@ const {
   requireDocumentCenterKey,
   resolveDocumentCenterStudent
 } = require("../../utils/documentCenterIdentity");
+const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
 
 const router = express.Router();
 
@@ -307,6 +308,19 @@ router.get(
       items: result.rows.map((row) => mapDocumentRow(row, true)),
       pagination: { limit: options.limit, offset: options.offset, total }
     });
+  })
+);
+
+router.post(
+  "/operator/documents/upload",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const document = await createDocumentCenterDraft({
+      body: req.body,
+      authUser: req.authUser,
+      ip: req.ip
+    });
+    res.status(201).json(document);
   })
 );
 
