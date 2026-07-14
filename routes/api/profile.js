@@ -28,6 +28,8 @@ async function ensureProfileColumns() {
     ensureProfileColumnsPromise = (async () => {
       await query(`
         ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS fakultas TEXT,
+        ADD COLUMN IF NOT EXISTS bio TEXT,
         ADD COLUMN IF NOT EXISTS wfh_quota INTEGER NOT NULL DEFAULT 0
       `);
 
@@ -45,6 +47,124 @@ async function ensureProfileColumns() {
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function normalizeOptionalText(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function normalizeRequiredText(value, fieldName) {
+  const normalized = String(value ?? "").trim();
+
+  if (!normalized) {
+    const error = new Error(`${fieldName} wajib diisi.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+function normalizeOptionalDateField(value, fieldName) {
+  if (value == null || value === "") return null;
+
+  const normalized = String(value).trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const error = new Error(`${fieldName} wajib format YYYY-MM-DD.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+function normalizeOptionalEmail(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return null;
+
+  if (normalized.length > 160 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    const error = new Error("Email mahasiswa wajib berupa alamat email valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+function normalizeStudentStatus(value) {
+  const normalized = normalizeRequiredText(value, "Status mahasiswa");
+  const allowed = ["Aktif", "Cuti", "Alumni", "Mengundurkan Diri"];
+
+  if (!allowed.includes(normalized)) {
+    const error = new Error("Status mahasiswa tidak valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+function normalizeStudentType(value) {
+  const normalized = normalizeRequiredText(value, "Tipe mahasiswa");
+  const allowed = ["Riset", "Magang"];
+
+  if (!allowed.includes(normalized)) {
+    const error = new Error("Tipe mahasiswa tidak valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
+function makeInitials(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return null;
+  return `${parts[0]?.[0] || ""}${parts[1]?.[0] || ""}`.toUpperCase();
+}
+
+async function ensureProfileEmailAvailable(email, excludeUserId = null) {
+  if (!email) return;
+
+  const result = await query(
+    `
+    SELECT id
+    FROM users
+    WHERE LOWER(email) = LOWER($1)
+      AND ($2::text IS NULL OR id <> $2)
+    LIMIT 1
+    `,
+    [email, excludeUserId || null]
+  );
+
+  if (result.rowCount > 0) {
+    const error = new Error("Email sudah digunakan oleh akun lain.");
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
+async function ensureProfileNimAvailable(nim, excludeUserId = null) {
+  if (!nim) return;
+
+  const result = await query(
+    `
+    SELECT s.id
+    FROM students s
+    WHERE s.nim = $1
+      AND ($2::text IS NULL OR s.user_id <> $2)
+    LIMIT 1
+    `,
+    [nim, excludeUserId || null]
+  );
+
+  if (result.rowCount > 0) {
+    const error = new Error("NIM sudah digunakan oleh mahasiswa lain.");
+    error.statusCode = 409;
+    throw error;
+  }
 }
 
 function getRequestBaseUrl(req) {
@@ -320,10 +440,12 @@ router.get(
         s.nim,
         s.phone,
         s.angkatan,
+        s.fakultas,
         s.status,
         s.tipe,
         s.pembimbing,
         s.bergabung,
+        s.bio,
         COALESCE(s.wfh_quota, 0)::int AS wfh_quota,
         COUNT(lr.id)::int AS wfh_used
       FROM users u
@@ -346,10 +468,12 @@ router.get(
         s.nim,
         s.phone,
         s.angkatan,
+        s.fakultas,
         s.status,
         s.tipe,
         s.pembimbing,
         s.bergabung,
+        s.bio,
         s.wfh_quota
       `,
         [userId, weekBounds.startDate, weekBounds.endDate]
@@ -471,9 +595,51 @@ router.patch(
     await ensureProfileColumns();
 
     const userId = requireSafeId(req.params.userId, "userId");
-    const { name, phone, email, prodi, photoUrl, photo_url: photoUrlSnake } = req.body || {};
+    const payload = req.body || {};
+    const {
+      name,
+      nim,
+      phone,
+      email,
+      prodi,
+      angkatan,
+      fakultas,
+      status,
+      tipe,
+      bergabung,
+      pembimbing,
+      bio,
+      photoUrl,
+      photo_url: photoUrlSnake
+    } = payload;
 
-    const hasPhotoUrl = hasOwn(req.body || {}, "photoUrl") || hasOwn(req.body || {}, "photo_url");
+    const hasName = hasOwn(payload, "name");
+    const hasNim = hasOwn(payload, "nim");
+    const hasPhone = hasOwn(payload, "phone");
+    const hasEmail = hasOwn(payload, "email");
+    const hasProdi = hasOwn(payload, "prodi");
+    const hasAngkatan = hasOwn(payload, "angkatan");
+    const hasFakultas = hasOwn(payload, "fakultas");
+    const hasStatus = hasOwn(payload, "status");
+    const hasTipe = hasOwn(payload, "tipe");
+    const hasBergabung = hasOwn(payload, "bergabung");
+    const hasPembimbing = hasOwn(payload, "pembimbing");
+    const hasBio = hasOwn(payload, "bio");
+    const hasPhotoUrl = hasOwn(payload, "photoUrl") || hasOwn(payload, "photo_url");
+
+    const normalizedName = hasName ? normalizeRequiredText(name, "Nama lengkap") : null;
+    const normalizedInitials = hasName ? makeInitials(normalizedName) : null;
+    const normalizedNim = hasNim ? normalizeRequiredText(nim, "NIM") : null;
+    const normalizedPhone = hasPhone ? normalizeOptionalText(phone) : null;
+    const normalizedEmail = hasEmail ? normalizeOptionalEmail(email) : null;
+    const normalizedProdi = hasProdi ? normalizeOptionalText(prodi) : null;
+    const normalizedAngkatan = hasAngkatan ? normalizeOptionalText(angkatan) : null;
+    const normalizedFakultas = hasFakultas ? normalizeOptionalText(fakultas) : null;
+    const normalizedStatus = hasStatus ? normalizeStudentStatus(status) : null;
+    const normalizedTipe = hasTipe ? normalizeStudentType(tipe) : null;
+    const normalizedBergabung = hasBergabung ? normalizeOptionalDateField(bergabung, "Tanggal bergabung") : null;
+    const normalizedPembimbing = hasPembimbing ? normalizeOptionalText(pembimbing) : null;
+    const normalizedBio = hasBio ? normalizeOptionalText(bio) : null;
     const nextPhotoUrl = photoUrl ?? photoUrlSnake ?? null;
 
     const existingUser = await query(
@@ -492,29 +658,72 @@ router.patch(
       });
     }
 
+    await ensureProfileEmailAvailable(normalizedEmail, userId);
+    await ensureProfileNimAvailable(normalizedNim, userId);
+
     await query(
       `
       UPDATE users
       SET 
-        name = COALESCE($2, name),
-        email = COALESCE($3, email),
-        prodi = COALESCE($4, prodi),
-        photo_url = CASE WHEN $5::boolean THEN $6 ELSE photo_url END,
+        name = CASE WHEN $2::boolean THEN $3 ELSE name END,
+        initials = CASE WHEN $2::boolean THEN COALESCE($4, initials) ELSE initials END,
+        email = CASE WHEN $5::boolean THEN $6 ELSE email END,
+        prodi = CASE WHEN $7::boolean THEN $8 ELSE prodi END,
+        photo_url = CASE WHEN $9::boolean THEN $10 ELSE photo_url END,
         updated_at = NOW()
       WHERE id = $1
       `,
-      [userId, name, email, prodi, hasPhotoUrl, nextPhotoUrl]
+      [
+        userId,
+        hasName,
+        normalizedName,
+        normalizedInitials,
+        hasEmail,
+        normalizedEmail,
+        hasProdi,
+        normalizedProdi,
+        hasPhotoUrl,
+        nextPhotoUrl
+      ]
     );
 
     await query(
       `
       UPDATE students
       SET 
-        phone = COALESCE($2, phone),
+        nim = CASE WHEN $2::boolean THEN $3 ELSE nim END,
+        phone = CASE WHEN $4::boolean THEN $5 ELSE phone END,
+        angkatan = CASE WHEN $6::boolean THEN $7 ELSE angkatan END,
+        fakultas = CASE WHEN $8::boolean THEN $9 ELSE fakultas END,
+        status = CASE WHEN $10::boolean THEN $11 ELSE status END,
+        tipe = CASE WHEN $12::boolean THEN $13 ELSE tipe END,
+        bergabung = CASE WHEN $14::boolean THEN $15::date ELSE bergabung END,
+        pembimbing = CASE WHEN $16::boolean THEN $17 ELSE pembimbing END,
+        bio = CASE WHEN $18::boolean THEN $19 ELSE bio END,
         updated_at = NOW()
       WHERE user_id = $1
       `,
-      [userId, phone]
+      [
+        userId,
+        hasNim,
+        normalizedNim,
+        hasPhone,
+        normalizedPhone,
+        hasAngkatan,
+        normalizedAngkatan,
+        hasFakultas,
+        normalizedFakultas,
+        hasStatus,
+        normalizedStatus,
+        hasTipe,
+        normalizedTipe,
+        hasBergabung,
+        normalizedBergabung,
+        hasPembimbing,
+        normalizedPembimbing,
+        hasBio,
+        normalizedBio
+      ]
     );
 
     if (hasPhotoUrl && !nextPhotoUrl) {
