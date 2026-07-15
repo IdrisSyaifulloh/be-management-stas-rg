@@ -538,7 +538,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const data = buildLetterData({
       studentSnapshot: caseRow.student_snapshot,
       periodSnapshot: caseRow.period_snapshot,
-      projectSnapshots
+      projectSnapshot: primaryProjectRow.project_snapshot
     });
     const template = await loadCompletionTemplateVersion(client, { activeOnly: true });
     if (
@@ -621,8 +621,8 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       [
         `DCPART-${crypto.randomUUID()}`, documentId,
         caseRow.student_key || buildStudentKey(caseRow.legacy_student_id),
-        caseRow.legacy_student_id, projectRows.length === 1 ? primaryProjectRow.legacy_project_id : null,
-        caseRow.period_key, projectRows.length === 1 ? primaryProjectRow.project_key : null,
+        caseRow.legacy_student_id, primaryProjectRow.legacy_project_id,
+        caseRow.period_key, primaryProjectRow.project_key,
         data.studentName, data.studentNim, data.studyProgram,
         data.universityName, data.projectTitle, formatPeriodLabel(caseRow.period_snapshot)
       ]
