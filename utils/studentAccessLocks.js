@@ -1,4 +1,4 @@
-﻿const { query } = require("../db/pool");
+const { query } = require("../db/pool");
 const { getSettingsAsync } = require("../config/systemSettingsStore");
 const { getJakartaDateIso } = require("./attendanceHistory");
 const { findNonWorkingDayForDate, getHolidayRules, normalizeHolidayDate } = require("./holidays");
@@ -24,7 +24,7 @@ const ACCESS_LOCK_REASON_DETAILS = {
   },
   [ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]: {
     label: "Belum Checkout Sampai 22.00 WIB",
-    message: "Akses dikunci karena belum checkout sampai pukul 22.00 WIB."
+    message: "Tercatat belum checkout sampai pukul 22.00 WIB, tetapi tidak mengunci akses website."
   },
   [ACCESS_LOCK_REASON_WFH_CHECKIN_MISSING]: {
     label: "WFH Belum Check-in",
@@ -295,11 +295,9 @@ async function createWorkHoursUnder8Locks({ studentIds, date }) {
 }
 
 async function createCheckoutMissing22Locks({ studentIds, date }) {
-  return createStudentAccessLocks({
-    studentIds,
-    date,
-    reason: ACCESS_LOCK_REASON_CHECKOUT_MISSING_22
-  });
+  // Lupa checkout setelah jam 22 cukup dicatat di absensi/monitoring.
+  // Jangan membuat access lock, supaya web mahasiswa tetap bisa dipakai malam hari.
+  return [];
 }
 
 async function createWfhCheckinMissingLocks({ studentIds, date }) {
@@ -531,10 +529,11 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
       AND sal.active = TRUE
       AND sal.locked = TRUE
       AND sal.status = 'LOCKED'
+      AND sal.reason <> $3
       AND NOT (sal.reason = $2 AND s.tipe = 'Riset')
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
     `,
-    [student.id, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT]
+    [student.id, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT, ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]
   );
 
   for (const row of result.rows) {
@@ -557,7 +556,7 @@ async function listAccessLocks({ status = null, search = null } = {}) {
   await deactivateAttendanceAbsentLocksForConfiguredHolidays();
   const activeOnly = String(status || "").toLowerCase() === "active";
   const searchValue = String(search || "").trim();
-  const params = [activeOnly, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT];
+  const params = [activeOnly, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT, ACCESS_LOCK_REASON_CHECKOUT_MISSING_22];
   const searchClause = searchValue
     ? (() => {
         params.push(`%${searchValue}%`);
@@ -581,7 +580,7 @@ async function listAccessLocks({ status = null, search = null } = {}) {
     FROM student_access_locks sal
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id
-    WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED'))
+    WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND sal.reason <> $3))
       AND NOT (sal.reason = $2 AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
       ${searchClause}
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
