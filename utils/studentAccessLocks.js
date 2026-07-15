@@ -208,6 +208,7 @@ async function createStudentAccessLocks({ studentIds, date, reason, reactivateUn
 
   return created;
 }
+
 async function deactivateAttendanceAbsentLocksForDate({ date, unlockedBy = null } = {}) {
   await ensureStudentAccessLockTable();
   const normalizedDate = normalizeHolidayDate(date);
@@ -332,6 +333,7 @@ async function createPicketSubmissionMissingLocks({ studentIds, date, reactivate
     reactivateUnlocked
   });
 }
+
 async function deactivateAccessLocksForStudentDateReason({
   studentId,
   date,
@@ -641,6 +643,20 @@ async function studentAccessLockMiddleware(req, res, next) {
   if (String(req.authUser?.role || "").toLowerCase() !== "mahasiswa") {
     return next();
   }
+
+  // Setelah jam 22:00 WIB, lock tidak diberlakukan malam itu.
+  // Auto-checkout tetap berjalan dan lock tetap tersimpan di DB,
+  // namun baru aktif mulai keesokan harinya (setelah midnight).
+  const jakartaHour = parseInt(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Jakarta",
+      hour: "2-digit",
+      hour12: false,
+      hourCycle: "h23"
+    }).format(new Date()),
+    10
+  );
+  if (jakartaHour >= 22) return next();
 
   const path = req.path || "";
   const method = req.method || "GET";
