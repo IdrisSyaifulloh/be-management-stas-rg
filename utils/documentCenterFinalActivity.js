@@ -6,6 +6,8 @@ const { createDocumentCenterDraft } = require("./documentCenterDraftUpload");
 
 const COMPLETION_DEFINITION_ID = "DCDEF-COMPLETE-NORMAL-01";
 const CERTIFICATE_DEFINITION_ID = "DCDEF-CERT-NORMAL-01";
+const EARLY_COMPLETION_DEFINITION_ID = "DCDEF-COMPLETE-EARLY-01";
+const EARLY_CERTIFICATE_DEFINITION_ID = "DCDEF-CERT-EARLY-01";
 const CASE_STATUSES = ["pending", "draft_created", "issued", "revoked"];
 const DOCUMENT_PURPOSES = ["completion_letter", "certificate"];
 const ACTIVITY_TYPES = ["Magang", "Riset"];
@@ -72,6 +74,23 @@ function rejectUnexpectedFields(value, allowed, field) {
 
 function periodText(period) {
   return `${period.activityType}: ${period.startDate}${period.endDate ? ` s.d. ${period.endDate}` : ""}`;
+}
+
+function definitionIdsForOutcome(outcome) {
+  if (outcome === "withdrawn_early") {
+    return {
+      completionDefinitionId: EARLY_COMPLETION_DEFINITION_ID,
+      certificateDefinitionId: EARLY_CERTIFICATE_DEFINITION_ID,
+      requestMode: "early_exit_review",
+      generatedFrom: "early_exit_approved"
+    };
+  }
+  return {
+    completionDefinitionId: COMPLETION_DEFINITION_ID,
+    certificateDefinitionId: CERTIFICATE_DEFINITION_ID,
+    requestMode: "alumni_sync",
+    generatedFrom: "alumni_sync"
+  };
 }
 
 function mapDocument(row, prefix) {
@@ -237,6 +256,436 @@ async function loadEligibleProjects(client, studentId) {
     [studentId]
   );
   return result.rows;
+}
+
+async function loadWithdrawalContext(client, withdrawalRequestId) {
+  const result = await client.query(
+    `
+    SELECT wr.id AS withdrawal_request_id, wr.student_id, wr.reason,
+           wr.final_status, wr.status_dosen, wr.advisor_reviewed_at,
+           s.user_id, s.nim, s.status AS student_status,
+           s.tipe AS student_activity_type, s.withdrawal_at,
+           u.name AS student_name, u.prodi,
+           TO_CHAR(COALESCE(s.withdrawal_at, wr.advisor_reviewed_at), 'YYYY-MM-DD') AS effective_date
+    FROM withdrawal_requests wr
+    JOIN students s ON s.id = wr.student_id
+    JOIN users u ON u.id = s.user_id
+    WHERE wr.id = $1
+    LIMIT 1
+    `,
+    [withdrawalRequestId]
+  );
+  return result.rows[0] || null;
+}
+
+async function loadWithdrawalPeriods(client, studentId, effectiveDate, activityType = null) {
+  const params = [studentId, effectiveDate];
+  const predicates = [
+    "sp.student_id = $1",
+    "sp.mulai <= $2::date",
+    "(sp.selesai IS NULL OR sp.selesai >= $2::date)"
+  ];
+  if (activityType) {
+    params.push(activityType);
+    predicates.push(`sp.tipe = $${params.length}`);
+  }
+  const result = await client.query(
+    `
+    SELECT sp.id, sp.tipe,
+           TO_CHAR(sp.mulai, 'YYYY-MM-DD') AS mulai,
+           TO_CHAR(sp.selesai, 'YYYY-MM-DD') AS selesai,
+           sp.keterangan
+    FROM student_periods sp
+    WHERE ${predicates.join(" AND ")}
+    ORDER BY sp.mulai DESC, sp.id ASC
+    `,
+    params
+  );
+  return result.rows;
+}
+
+async function loadWithdrawalProjects(client, userId, effectiveDate) {
+  const result = await client.query(
+    `
+    SELECT rp.id, rp.title, rp.short_title, rp.period_text,
+           rp.status AS project_status,
+           rm.status AS membership_status, rm.peran,
+           TO_CHAR(rm.bergabung, 'YYYY-MM-DD') AS bergabung,
+           TO_CHAR(rm.selesai, 'YYYY-MM-DD') AS selesai
+    FROM research_memberships rm
+    JOIN research_projects rp ON rp.id = rm.project_id
+    WHERE rm.user_id = $1
+      AND rm.member_type = 'Mahasiswa'
+      AND (rm.bergabung IS NULL OR rm.bergabung <= $2::date)
+    ORDER BY COALESCE(rp.short_title, rp.title), rp.id
+    `,
+    [userId, effectiveDate]
+  );
+  return result.rows;
+}
+
+function isFinalWithdrawal(context) {
+  return Boolean(
+    context &&
+    context.final_status === "Disetujui" &&
+    context.status_dosen === "Disetujui" &&
+    context.student_status === "Mengundurkan Diri" &&
+    context.effective_date
+  );
+}
+
+function mapWithdrawalPeriod(row) {
+  return {
+    id: row.id,
+    activityType: row.tipe,
+    startDate: row.mulai,
+    endDate: row.selesai || null,
+    description: row.keterangan || null
+  };
+}
+
+function mapWithdrawalProject(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    shortTitle: row.short_title || null,
+    projectStatus: row.project_status || null,
+    membershipStatus: row.membership_status || null,
+    role: row.peran || null,
+    joinedAt: row.bergabung || null,
+    completedAt: row.selesai || null
+  };
+}
+
+function buildWithdrawalStudentSnapshot(context) {
+  return {
+    legacyStudentId: context.student_id,
+    name: context.student_name,
+    nim: context.nim,
+    prodi: context.prodi || null,
+    studentStatus: context.student_status,
+    studentActivityType: context.student_activity_type
+  };
+}
+
+function buildWithdrawalPeriodSnapshot(period) {
+  return {
+    source: "legacy",
+    legacyPeriodId: period.id,
+    activityType: period.tipe,
+    startDate: period.mulai,
+    endDate: period.selesai || null,
+    description: period.keterangan || null
+  };
+}
+
+function buildWithdrawalProjectSnapshot(project) {
+  return {
+    legacyProjectId: project.id,
+    title: project.title,
+    shortTitle: project.short_title || null,
+    periodText: project.period_text || null,
+    status: project.project_status || null,
+    membershipStatus: project.membership_status || null,
+    role: project.peran || null,
+    joinedAt: project.bergabung || null,
+    completedAt: project.selesai || null
+  };
+}
+
+function mapWithdrawalCandidate(row) {
+  const periods = row.eligible_periods || [];
+  const projects = row.eligible_projects || [];
+  let blockingReason = null;
+  if (!row.effective_date) blockingReason = "Tanggal efektif pengunduran diri tidak tersedia.";
+  else if (periods.length === 0) blockingReason = "Tidak ada periode mahasiswa yang mencakup tanggal efektif.";
+  else if (periods.length > 1) blockingReason = "Terdapat lebih dari satu periode cocok; pilih periode saat registrasi.";
+  else if (row.case_id) blockingReason = "Case early exit sudah terdaftar.";
+  return {
+    withdrawalRequestId: row.withdrawal_request_id,
+    student: {
+      id: row.student_id,
+      name: row.student_name,
+      nim: row.nim,
+      prodi: row.prodi || null,
+      status: row.student_status
+    },
+    activityType: row.period_activity_type || row.student_activity_type || null,
+    effectiveDate: row.effective_date || null,
+    reason: row.reason || null,
+    finalStatus: row.final_status,
+    periods,
+    projects,
+    existingCase: row.case_id ? {
+      id: row.case_id,
+      status: row.case_status,
+      hasCompletionDocument: Boolean(row.completion_document_id)
+    } : null,
+    canRegister: !blockingReason,
+    blockingReason
+  };
+}
+
+async function listWithdrawalEligible(rawQuery) {
+  const activityType = requireActivityType(rawQuery.activityType);
+  const periodId = rawQuery.periodId ? safeId(rawQuery.periodId, "periodId") : null;
+  const search = optionalSearch(rawQuery.search);
+  const limit = parseLimit(rawQuery.limit);
+  const offset = parseOffset(rawQuery.offset);
+  const params = [activityType];
+  const predicates = [
+    "wr.final_status = 'Disetujui'",
+    "wr.status_dosen = 'Disetujui'",
+    "s.status = 'Mengundurkan Diri'",
+    "COALESCE(s.withdrawal_at, wr.advisor_reviewed_at) IS NOT NULL",
+    "s.tipe = $1"
+  ];
+  if (periodId) {
+    params.push(periodId);
+    predicates.push(`EXISTS (
+      SELECT 1 FROM student_periods sp_filter
+      WHERE sp_filter.id = $${params.length}
+        AND sp_filter.student_id = s.id
+        AND sp_filter.tipe = $1
+        AND sp_filter.mulai <= COALESCE(s.withdrawal_at, wr.advisor_reviewed_at)::date
+        AND (sp_filter.selesai IS NULL OR sp_filter.selesai >= COALESCE(s.withdrawal_at, wr.advisor_reviewed_at)::date)
+    )`);
+  }
+  if (search) {
+    params.push(search);
+    predicates.push(`(u.name ILIKE '%' || $${params.length} || '%' OR s.nim ILIKE '%' || $${params.length} || '%')`);
+  }
+  params.push(limit, offset);
+  const result = await pool.query(
+    `
+    WITH filtered AS (
+      SELECT wr.id AS withdrawal_request_id, wr.student_id, wr.reason,
+             wr.final_status, wr.status_dosen,
+             s.user_id, s.nim, s.status AS student_status, s.tipe AS student_activity_type,
+             u.name AS student_name, u.prodi,
+             TO_CHAR(COALESCE(s.withdrawal_at, wr.advisor_reviewed_at), 'YYYY-MM-DD') AS effective_date,
+             COUNT(*) OVER() AS total_count
+      FROM withdrawal_requests wr
+      JOIN students s ON s.id = wr.student_id
+      JOIN users u ON u.id = s.user_id
+      WHERE ${predicates.join(" AND ")}
+      ORDER BY COALESCE(s.withdrawal_at, wr.advisor_reviewed_at) DESC, wr.id DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
+    )
+    SELECT f.*,
+           periods.items AS eligible_periods,
+           projects.items AS eligible_projects,
+           c.id AS case_id, c.case_status, c.completion_document_id,
+           (periods.items->0->>'activityType') AS period_activity_type
+    FROM filtered f
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'id', sp.id,
+        'activityType', sp.tipe,
+        'startDate', TO_CHAR(sp.mulai, 'YYYY-MM-DD'),
+        'endDate', TO_CHAR(sp.selesai, 'YYYY-MM-DD'),
+        'description', sp.keterangan
+      ) ORDER BY sp.mulai DESC, sp.id ASC), '[]'::jsonb) AS items
+      FROM student_periods sp
+      WHERE sp.student_id = f.student_id
+        AND sp.tipe = $1
+        AND sp.mulai <= f.effective_date::date
+        AND (sp.selesai IS NULL OR sp.selesai >= f.effective_date::date)
+    ) periods ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'id', rp.id,
+        'title', rp.title,
+        'shortTitle', rp.short_title,
+        'projectStatus', rp.status,
+        'membershipStatus', rm.status,
+        'role', rm.peran,
+        'joinedAt', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
+        'completedAt', TO_CHAR(rm.selesai, 'YYYY-MM-DD')
+      ) ORDER BY COALESCE(rp.short_title, rp.title), rp.id), '[]'::jsonb) AS items
+      FROM research_memberships rm
+      JOIN research_projects rp ON rp.id = rm.project_id
+      WHERE rm.user_id = f.user_id
+        AND rm.member_type = 'Mahasiswa'
+        AND (rm.bergabung IS NULL OR rm.bergabung <= f.effective_date::date)
+    ) projects ON TRUE
+    LEFT JOIN dc_final_activity_cases c
+      ON c.legacy_student_id = f.student_id
+     AND c.completion_document_definition_id = $${params.length + 1}
+     AND c.outcome = 'withdrawn_early'
+     AND c.completion_snapshot->>'withdrawalRequestId' = f.withdrawal_request_id
+    ORDER BY f.effective_date DESC, f.withdrawal_request_id DESC
+    `,
+    [...params, EARLY_COMPLETION_DEFINITION_ID]
+  );
+  return {
+    items: result.rows.map(mapWithdrawalCandidate),
+    pagination: { limit, offset, total: result.rowCount ? Number(result.rows[0].total_count) : 0 }
+  };
+}
+
+async function createOneWithdrawalCase({ item, authUser, ip }) {
+  const withdrawalRequestId = safeId(item.withdrawalRequestId, "withdrawalRequestId");
+  const requestedPeriodId = item.periodId == null || item.periodId === "" ? null : safeId(item.periodId, "periodId");
+  const certificateProjectIds = Array.isArray(item.certificateProjectIds) ? item.certificateProjectIds.map((value) => safeId(value, "certificateProjectIds")) : [];
+  if (!Array.isArray(item.certificateProjectIds || [])) bad("certificateProjectIds");
+  if (certificateProjectIds.length !== new Set(certificateProjectIds).size) bad("certificateProjectIds");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await requireActiveDefinition(client, EARLY_COMPLETION_DEFINITION_ID, "completion_letter", "early_exit_review");
+    const certificateDefinition = await requireActiveDefinition(client, EARLY_CERTIFICATE_DEFINITION_ID, "certificate", "early_exit_review");
+    const context = await loadWithdrawalContext(client, withdrawalRequestId);
+    if (!context) {
+      await client.query("ROLLBACK");
+      return { withdrawalRequestId, status: "invalid", message: "Pengunduran diri tidak ditemukan." };
+    }
+    if (!isFinalWithdrawal(context)) {
+      await client.query("ROLLBACK");
+      return { withdrawalRequestId, status: "invalid", message: "Pengunduran diri belum final." };
+    }
+    const periods = await loadWithdrawalPeriods(client, context.student_id, context.effective_date);
+    if (periods.length === 0) {
+      await client.query("ROLLBACK");
+      return { withdrawalRequestId, status: "invalid", message: "Tidak ada periode eligible." };
+    }
+    let period = null;
+    if (requestedPeriodId) {
+      period = periods.find((candidate) => candidate.id === requestedPeriodId) || null;
+      if (!period) {
+        await client.query("ROLLBACK");
+        return { withdrawalRequestId, status: "invalid", message: "Periode tidak eligible." };
+      }
+    } else if (periods.length === 1) {
+      period = periods[0];
+    } else {
+      await client.query("ROLLBACK");
+      return { withdrawalRequestId, status: "invalid", message: "Periode ambigu dan wajib dipilih." };
+    }
+    const projects = await loadWithdrawalProjects(client, context.user_id, context.effective_date);
+    const projectsById = new Map(projects.map((project) => [project.id, project]));
+    for (const projectId of certificateProjectIds) {
+      if (!projectsById.has(projectId)) {
+        await client.query("ROLLBACK");
+        return { withdrawalRequestId, periodId: period.id, status: "invalid", message: "Project tidak eligible." };
+      }
+    }
+
+    const studentKey = buildStudentKey(context.student_id);
+    const periodKey = `period:${period.id}`;
+    const caseId = `DCFCASE-${crypto.randomUUID()}`;
+    const inserted = await client.query(
+      `
+      INSERT INTO dc_final_activity_cases (
+        id, student_key, legacy_student_id, student_snapshot,
+        activity_type, period_key, legacy_period_id, period_snapshot,
+        outcome, case_status, completion_source, completed_at,
+        completion_snapshot, completion_document_definition_id, created_by_user_id
+      )
+      VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, 'withdrawn_early',
+              'pending', 'withdrawal_approved', $9::date, $10::jsonb, $11, $12)
+      ON CONFLICT (student_key, completion_document_definition_id, activity_type, period_key, outcome)
+      DO NOTHING
+      RETURNING id
+      `,
+      [
+        caseId,
+        studentKey,
+        context.student_id,
+        JSON.stringify(buildWithdrawalStudentSnapshot(context)),
+        period.tipe,
+        periodKey,
+        period.id,
+        JSON.stringify(buildWithdrawalPeriodSnapshot(period)),
+        context.effective_date,
+        JSON.stringify({
+          source: "withdrawal_requests",
+          withdrawalRequestId,
+          effectiveDate: context.effective_date,
+          reason: context.reason,
+          finalStatus: context.final_status,
+          advisorReviewedAt: context.advisor_reviewed_at || null
+        }),
+        EARLY_COMPLETION_DEFINITION_ID,
+        requireSafeId(authUser?.id, "userId")
+      ]
+    );
+    if (!inserted.rowCount) {
+      const existing = await client.query(
+        `SELECT id, case_status FROM dc_final_activity_cases
+         WHERE student_key=$1 AND completion_document_definition_id=$2 AND activity_type=$3 AND period_key=$4 AND outcome='withdrawn_early'
+         LIMIT 1`,
+        [studentKey, EARLY_COMPLETION_DEFINITION_ID, period.tipe, periodKey]
+      );
+      await client.query("ROLLBACK");
+      return { withdrawalRequestId, periodId: period.id, status: "existing", caseId: existing.rows[0]?.id || null, caseStatus: existing.rows[0]?.case_status || null };
+    }
+    for (let index = 0; index < certificateProjectIds.length; index += 1) {
+      const project = projectsById.get(certificateProjectIds[index]);
+      await client.query(
+        `
+        INSERT INTO dc_final_activity_case_projects (
+          id, final_activity_case_id, student_key, project_key, legacy_project_id,
+          project_snapshot, certificate_required, certificate_document_definition_id,
+          certificate_status, display_order
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, TRUE, $7, 'pending', $8)
+        ON CONFLICT (final_activity_case_id, project_key) DO NOTHING
+        `,
+        [
+          `DCFCPROJ-${crypto.randomUUID()}`,
+          caseId,
+          studentKey,
+          `project:${project.id}`,
+          project.id,
+          JSON.stringify(buildWithdrawalProjectSnapshot(project)),
+          certificateDefinition.id,
+          index
+        ]
+      );
+    }
+    await insertAudit(client, {
+      authUser,
+      ip,
+      event: "final_activity_withdrawal_case_created",
+      target: "document_center_final_activity",
+      detail: { caseId, withdrawalRequestId, studentId: context.student_id, periodId: period.id, outcome: "withdrawn_early", certificateProjectCount: certificateProjectIds.length }
+    });
+    await client.query("COMMIT");
+    return { withdrawalRequestId, periodId: period.id, status: "created", caseId, projectCount: certificateProjectIds.length };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error?.code === "23505") return { withdrawalRequestId, status: "existing" };
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function createWithdrawalCases({ body, authUser, ip }) {
+  requirePlainObject(body, "body");
+  rejectUnexpectedFields(body, new Set(["items"]), "body");
+  if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > MAX_BATCH_ITEMS) bad("items");
+  const results = [];
+  for (const raw of body.items) {
+    try {
+      requirePlainObject(raw, "items");
+      rejectUnexpectedFields(raw, new Set(["withdrawalRequestId", "periodId", "certificateProjectIds"]), "items");
+      results.push(await createOneWithdrawalCase({ item: raw, authUser, ip }));
+    } catch (error) {
+      if ([400, 404, 409].includes(error?.statusCode)) {
+        results.push({
+          withdrawalRequestId: typeof raw?.withdrawalRequestId === "string" ? raw.withdrawalRequestId : null,
+          status: error.statusCode === 409 ? "conflict" : "invalid",
+          message: error.message || "Input tidak valid."
+        });
+      } else {
+        throw error;
+      }
+    }
+  }
+  return { items: results };
 }
 
 async function listEligible(rawQuery) {
@@ -546,18 +995,23 @@ async function uploadCompletionDraft({ id, body, authUser, ip }) {
   const caseId = safeId(id, "id");
   const current = await detailCase(caseId);
   if (current.status !== "pending" || current.completionDocument) throw httpError(409, "Case tidak dapat dibuatkan draft.");
+  const caseRow = await pool.query("SELECT legacy_student_id, outcome, completion_document_definition_id FROM dc_final_activity_cases WHERE id=$1 LIMIT 1", [caseId]);
+  if (!caseRow.rowCount) throw httpError(404, "Case tidak ditemukan.");
+  const caseDefinitionId = caseRow.rows[0].completion_document_definition_id;
+  const outcome = caseRow.rows[0].outcome;
+  const { generatedFrom } = definitionIdsForOutcome(outcome);
   const result = await createDocumentCenterDraft({
     authUser,
     ip,
-    generatedFrom: "alumni_sync",
+    generatedFrom,
     body: {
-      documentDefinitionId: COMPLETION_DEFINITION_ID,
+      documentDefinitionId: caseDefinitionId,
       title: parsed.title || `Surat Keterangan Selesai - ${current.student.name || current.id}`,
-      activityOutcome: "completed",
+      activityOutcome: outcome,
       fileName: parsed.fileName,
       fileDataUrl: parsed.fileDataUrl,
       participants: [{
-        legacyStudentId: (await pool.query("SELECT legacy_student_id FROM dc_final_activity_cases WHERE id=$1", [caseId])).rows[0].legacy_student_id,
+        legacyStudentId: caseRow.rows[0].legacy_student_id,
         period: { activityType: current.period.activityType, startDate: current.period.startDate, endDate: current.period.endDate }
       }]
     },
@@ -570,7 +1024,7 @@ async function uploadCompletionDraft({ id, body, authUser, ip }) {
          WHERE id=$1`,
         [caseId, documentId]
       );
-      await insertAudit(client, { authUser: { id: operatorUserId }, ip, event: "final_activity_completion_draft_created", target: "document_center_final_activity", detail: { caseId, documentId } });
+      await insertAudit(client, { authUser: { id: operatorUserId }, ip, event: "final_activity_completion_draft_created", target: "document_center_final_activity", detail: { caseId, documentId, outcome } });
     }
   });
   return { document: result, case: await detailCase(caseId) };
@@ -581,7 +1035,7 @@ async function uploadCertificateDraft({ id, body, authUser, ip }) {
   const projectRowId = safeId(id, "id");
   const row = await pool.query(
     `SELECT cp.*, c.legacy_student_id, c.activity_type, c.period_snapshot, c.case_status,
-            c.student_snapshot
+            c.student_snapshot, c.outcome
      FROM dc_final_activity_case_projects cp
      JOIN dc_final_activity_cases c ON c.id = cp.final_activity_case_id
      WHERE cp.id=$1 LIMIT 1`,
@@ -590,15 +1044,17 @@ async function uploadCertificateDraft({ id, body, authUser, ip }) {
   if (!row.rowCount) throw httpError(404, "Project case tidak ditemukan.");
   const project = row.rows[0];
   if (project.certificate_status !== "pending" || project.certificate_document_id || project.case_status === "revoked") throw httpError(409, "Sertifikat tidak dapat dibuatkan draft.");
+  if (!project.certificate_document_definition_id) throw httpError(409, "Sertifikat tidak dapat dibuatkan draft.");
   const period = project.period_snapshot;
+  const { generatedFrom } = definitionIdsForOutcome(project.outcome);
   const result = await createDocumentCenterDraft({
     authUser,
     ip,
-    generatedFrom: "alumni_sync",
+    generatedFrom,
     body: {
-      documentDefinitionId: CERTIFICATE_DEFINITION_ID,
+      documentDefinitionId: project.certificate_document_definition_id,
       title: parsed.title || `Sertifikat - ${project.student_snapshot?.name || project.legacy_student_id}`,
-      activityOutcome: "completed",
+      activityOutcome: project.outcome,
       fileName: parsed.fileName,
       fileDataUrl: parsed.fileDataUrl,
       participants: [{
@@ -616,7 +1072,7 @@ async function uploadCertificateDraft({ id, body, authUser, ip }) {
          WHERE id=$1`,
         [projectRowId, documentId]
       );
-      await insertAudit(client, { authUser: { id: operatorUserId }, ip, event: "final_activity_certificate_draft_created", target: "document_center_final_activity", detail: { caseProjectId: projectRowId, caseId: project.final_activity_case_id, documentId } });
+      await insertAudit(client, { authUser: { id: operatorUserId }, ip, event: "final_activity_certificate_draft_created", target: "document_center_final_activity", detail: { caseProjectId: projectRowId, caseId: project.final_activity_case_id, documentId, outcome: project.outcome } });
     }
   });
   return { document: result, case: await detailCase(project.final_activity_case_id) };
@@ -641,7 +1097,9 @@ async function markIssuedForPublishedDocument(client, { documentId, authUser, ip
 
 module.exports = {
   listEligible,
+  listWithdrawalEligible,
   createCases,
+  createWithdrawalCases,
   listCases,
   detailCase,
   uploadCompletionDraft,

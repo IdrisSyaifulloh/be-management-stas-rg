@@ -15,6 +15,7 @@ const {
 } = require("../../utils/documentCenterIdentity");
 const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
 const { publishDocument } = require("../../utils/documentCenterPublish");
+const { revokeDocument } = require("../../utils/documentCenterRevocation");
 const {
   getDefinitions: getStudentRequestDefinitions,
   getContext: getStudentRequestContext,
@@ -40,7 +41,9 @@ const {
 } = require("../../utils/documentCenterStorage");
 const {
   listEligible: listFinalActivityEligible,
+  listWithdrawalEligible,
   createCases: createFinalActivityCases,
+  createWithdrawalCases,
   listCases: listFinalActivityCases,
   detailCase: detailFinalActivityCase,
   uploadCompletionDraft,
@@ -541,8 +544,16 @@ router.get("/operator/final-activity/eligible", requireRoleStrict(["operator"]),
   res.json(await listFinalActivityEligible(req.query));
 }));
 
+router.get("/operator/final-activity/early-exit/eligible", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listWithdrawalEligible(req.query));
+}));
+
 router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.status(201).json(await createFinalActivityCases({ body: req.body, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.post("/operator/final-activity/early-exit/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await createWithdrawalCases({ body: req.body, authUser: req.authUser, ip: req.ip }));
 }));
 
 router.get("/operator/final-activity/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
@@ -566,6 +577,20 @@ router.post(
   requireRoleStrict(["operator"]),
   asyncHandler(async (req, res) => {
     const document = await publishDocument({
+      documentId: req.params.id,
+      authUser: req.authUser,
+      ip: req.ip,
+      body: req.body
+    });
+    res.status(200).json(document);
+  })
+);
+
+router.post(
+  "/operator/documents/:id/revoke",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const document = await revokeDocument({
       documentId: req.params.id,
       authUser: req.authUser,
       ip: req.ip,
