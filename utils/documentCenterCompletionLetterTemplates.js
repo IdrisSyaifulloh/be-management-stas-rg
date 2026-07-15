@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
+const path = require("path");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
@@ -19,6 +20,9 @@ const {
 const TEMPLATE_KEY = "completion_letter_completed_internship";
 const TEMPLATE_ID = "DCTPL-COMPLETE-MAGANG-01";
 const DEFINITION_ID = "DCDEF-COMPLETE-NORMAL-01";
+const BUILTIN_TEMPLATE_FILE = "completion-letter-completed-internship.pdf";
+const BUILTIN_TEMPLATE_ROOT = path.join(__dirname, "..", "resources", "document-center", "templates");
+const BUILTIN_VERSION_ID = `builtin:${TEMPLATE_KEY}`;
 const PAGE_WIDTH = 595.32;
 const PAGE_HEIGHT = 841.92;
 const MAX_TEMPLATE_PDF_BYTES = 8 * 1024 * 1024;
@@ -39,9 +43,9 @@ const CONTENT_CONFIG = Object.freeze({
 const LAYOUT_CONFIG = Object.freeze({
   page: { width: PAGE_WIDTH, height: PAGE_HEIGHT, orientation: "portrait", pageSize: "A4" },
   number: { x: 241, y: 126, width: 285, fontSize: 10.5, minFontSize: 8 },
-  studentName: { x: 135, y: 302, width: 390, fontSize: 10.5, minFontSize: 8 },
-  studentNim: { x: 135, y: 319, width: 390, fontSize: 10.5, minFontSize: 8 },
-  studyProgram: { x: 135, y: 336, width: 390, fontSize: 10.5, minFontSize: 8 },
+  studentName: { x: 135, y: 298, width: 375, fontSize: 10.5, minFontSize: 8 },
+  studentNim: { x: 135, y: 315, width: 375, fontSize: 10.5, minFontSize: 8 },
+  studyProgram: { x: 135, y: 331, width: 375, fontSize: 10.5, minFontSize: 8 },
   activityParagraph: { x: 57, y: 383, width: 482, fontSize: 10.5, minFontSize: 8.5, lineHeight: 15, maxLines: 5 },
   closingCover: { x: 54, y: 445, width: 490, height: 45 },
   closing: { x: 57, y: 450, width: 482, fontSize: 10.5, minFontSize: 9, lineHeight: 15, maxLines: 2 },
@@ -51,7 +55,7 @@ const LAYOUT_CONFIG = Object.freeze({
   placeholderAllowlist: [
     "document_number", "student_name", "student_nim", "study_program",
     "university_name", "project_title", "project_role", "period_start",
-    "period_end", "issued_city", "issued_date"
+    "period_end", "organization_label", "activity_paragraph", "issued_city", "issued_date"
   ]
 });
 
@@ -87,6 +91,13 @@ function ensureEmptyBody(body) {
 function requiredText(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   if (!normalized || /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(normalized)) throw httpError(409, "Data dokumen akhir belum lengkap.");
+  return normalized;
+}
+
+function optionalSafeText(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return null;
+  if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(normalized)) throw httpError(409, "Data dokumen akhir belum lengkap.");
   return normalized;
 }
 
@@ -296,29 +307,62 @@ function drawWrapped(page, text, font, box) {
   });
 }
 
-function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot }) {
+function projectTitleFromSnapshot(projectSnapshot) {
+  return requiredText(projectSnapshot?.title || projectSnapshot?.name || projectSnapshot?.shortTitle);
+}
+
+function buildProjectSummary(projectSnapshots) {
+  const snapshots = Array.isArray(projectSnapshots) ? projectSnapshots : [projectSnapshots];
+  const normalized = snapshots.filter(Boolean);
+  if (normalized.length < 1) throw httpError(409, "Data proyek belum lengkap.");
+  const titles = normalized.map(projectTitleFromSnapshot);
+  const roles = normalized
+    .map((snapshot) => optionalSafeText(snapshot?.role || snapshot?.position))
+    .filter(Boolean);
+  const uniqueRoles = [...new Set(roles)];
+  return {
+    title: titles.join(", "),
+    titles,
+    role: normalized.length === 1 || uniqueRoles.length === 1 ? uniqueRoles[0] || null : null,
+    roles: uniqueRoles
+  };
+}
+
+function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot, projectSnapshots }) {
   const studentName = requiredText(studentSnapshot?.name);
   const studentNim = requiredText(studentSnapshot?.nim);
   const studyProgram = requiredText(studentSnapshot?.prodi);
   const periodStart = requireIsoDate(periodSnapshot?.startDate);
   const periodEnd = requireIsoDate(periodSnapshot?.endDate);
   if (periodStart > periodEnd) throw httpError(409, "Data periode belum lengkap atau tidak valid.");
-  const projectTitle = requiredText(projectSnapshot?.title);
-  const projectRole = requiredText(projectSnapshot?.role);
-  return {
+  const projectSummary = buildProjectSummary(projectSnapshots || projectSnapshot);
+  const projectTitle = projectSummary.title;
+  const projectRole = projectSummary.role;
+  const data = {
     studentName,
     studentNim,
     studyProgram,
     universityName: CONTENT_CONFIG.universityName,
     projectTitle,
+    projectTitles: projectSummary.titles,
     projectRole,
+    projectRoles: projectSummary.roles,
     periodStart,
-    periodEnd
+    periodEnd,
+    organizationLabel: CONTENT_CONFIG.organizationLabel,
+    documentNumber: "Nomor diterbitkan saat dokumen dipublikasikan",
+    issuedCity: CONTENT_CONFIG.issuedCity,
+    issuedDate: "Tanggal diterbitkan saat publikasi"
+  };
+  return {
+    ...data,
+    activityParagraph: buildActivityParagraph(data)
   };
 }
 
 function buildActivityParagraph(data) {
-  return `Berdasarkan Surat Penerimaan Magang, yang bersangkutan telah melaksanakan kegiatan magang di ${CONTENT_CONFIG.organizationLabel} sebagai bagian dari proyek "${data.projectTitle}" dengan peran sebagai ${data.projectRole}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
+  const roleText = data.projectRole ? ` dengan peran sebagai ${data.projectRole}` : "";
+  return `Berdasarkan Surat Penerimaan Magang, yang bersangkutan telah melaksanakan kegiatan magang di ${requiredText(data.organizationLabel || CONTENT_CONFIG.organizationLabel)} sebagai bagian dari proyek "${data.projectTitle}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
 }
 
 function signerSnapshot() {
@@ -350,7 +394,7 @@ async function renderCompletionLetterPdf({ backgroundBytes, data, documentNumber
   drawSingleLine(page, data.studentName, regular, LAYOUT_CONFIG.studentName);
   drawSingleLine(page, data.studentNim, regular, LAYOUT_CONFIG.studentNim);
   drawSingleLine(page, data.studyProgram, regular, LAYOUT_CONFIG.studyProgram);
-  drawWrapped(page, buildActivityParagraph(data), regular, LAYOUT_CONFIG.activityParagraph);
+  drawWrapped(page, data.activityParagraph || buildActivityParagraph(data), regular, LAYOUT_CONFIG.activityParagraph);
 
   const cover = LAYOUT_CONFIG.closingCover;
   page.drawRectangle({
@@ -364,38 +408,57 @@ async function renderCompletionLetterPdf({ backgroundBytes, data, documentNumber
 
   const issuedText = issuedAt
     ? `${CONTENT_CONFIG.issuedCity}, ${formatDateId(issuedAt)}`
-    : `${CONTENT_CONFIG.issuedCity}, Tanggal diterbitkan saat publikasi`;
+    : `${data.issuedCity || CONTENT_CONFIG.issuedCity}, ${data.issuedDate || "Tanggal diterbitkan saat publikasi"}`;
   drawSingleLine(page, issuedText, preview ? regular : bold, LAYOUT_CONFIG.issuedDate);
   return Buffer.from(await pdf.save({ useObjectStreams: false }));
 }
 
-async function loadUploadedTemplateVersion(clientOrPool, { templateId = TEMPLATE_ID, versionId = null, activeOnly = false }) {
+async function readBuiltinCompletionTemplateBackground() {
+  const filePath = path.join(BUILTIN_TEMPLATE_ROOT, BUILTIN_TEMPLATE_FILE);
+  const buffer = await fs.readFile(filePath).catch(() => {
+    throw httpError(409, "Template bawaan Surat Keterangan Selesai Magang tidak tersedia.");
+  });
+  await validatePortraitPdf(buffer);
+  return { buffer, fileName: BUILTIN_TEMPLATE_FILE };
+}
+
+async function loadCompletionTemplateVersion(clientOrPool, { templateId = TEMPLATE_ID, versionId = null, activeOnly = false }) {
+  const requestedBuiltin = versionId === BUILTIN_VERSION_ID;
   const params = [templateId];
-  let versionPredicate;
-  if (versionId) {
-    params.push(versionId);
-    versionPredicate = "v.id=$2";
-  } else if (activeOnly) {
-    versionPredicate = "v.id=t.active_version_id AND t.status='active'";
-  } else {
-    versionPredicate = "v.id=t.active_version_id";
-  }
+  const versionPredicate = versionId && !requestedBuiltin ? "AND v.id=$2" : "";
+  const joinClause = versionId && !requestedBuiltin
+    ? "JOIN dc_document_template_versions v ON v.document_template_id=t.id"
+    : "LEFT JOIN dc_document_template_versions v ON v.id=t.active_version_id";
+  if (versionId && !requestedBuiltin) params.push(versionId);
   const result = await clientOrPool.query(
     `SELECT t.id AS template_id, t.template_key, t.document_definition_id,
             t.activity_type, t.activity_outcome, t.status,
             v.id AS version_id, v.version_number, v.storage_key, v.mime_type,
-            v.file_size, v.original_filename, v.page_width, v.page_height
+            v.file_size, v.original_filename, v.page_width, v.page_height,
+            CASE WHEN v.id IS NULL THEN 'builtin' ELSE 'uploaded' END AS template_source
      FROM dc_document_templates t
-     JOIN dc_document_template_versions v ON ${versionPredicate}
-     WHERE t.id=$1 AND t.template_key='completion_letter_completed_internship'
+     ${joinClause}
+     WHERE t.id=$1 AND t.template_key='completion_letter_completed_internship' ${versionPredicate}
      LIMIT 1`,
     params
   );
-  if (!result.rowCount) throw httpError(activeOnly ? 409 : 404, activeOnly ? "Template surat aktif belum tersedia." : "Versi template tidak ditemukan.");
-  return result.rows[0];
+  if (!result.rowCount) throw httpError(versionId ? 404 : 409, versionId ? "Versi template tidak ditemukan." : "Template surat aktif belum tersedia.");
+  const row = result.rows[0];
+  if (!row.version_id) {
+    const builtin = await readBuiltinCompletionTemplateBackground();
+    row.version_id = BUILTIN_VERSION_ID;
+    row.version_number = 1;
+    row.original_filename = builtin.fileName;
+    row.page_width = PAGE_WIDTH;
+    row.page_height = PAGE_HEIGHT;
+    row.background_bytes = builtin.buffer;
+    row.template_source = "builtin";
+  }
+  return row;
 }
 
 async function openTemplateBytes(version) {
+  if (version.background_bytes) return { bytes: version.background_bytes, close: async () => {} };
   const opened = await openPrivateTemplateVersion({
     storageKey: version.storage_key,
     mimeType: version.mime_type,
@@ -415,7 +478,7 @@ async function previewCompletionTemplate({ id, body }) {
     rejectUnexpectedFields(payload, new Set(["versionId"]));
     versionId = payload.versionId ? requireSafeId(payload.versionId, "versionId") : null;
   }
-  const version = await loadUploadedTemplateVersion(pool, { templateId, versionId });
+  const version = await loadCompletionTemplateVersion(pool, { templateId, versionId });
   const opened = await openTemplateBytes(version);
   try {
     const data = buildLetterData({
@@ -468,14 +531,16 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       "SELECT * FROM dc_final_activity_case_projects WHERE final_activity_case_id=$1 ORDER BY display_order, id FOR SHARE",
       [caseId]
     );
-    if (projectResult.rowCount !== 1) throw httpError(409, "Surat hanya dapat dibuat untuk case dengan tepat satu project.");
-    const projectRow = projectResult.rows[0];
+    if (projectResult.rowCount < 1) throw httpError(409, "Surat hanya dapat dibuat untuk case yang memiliki project.");
+    const projectRows = projectResult.rows;
+    const primaryProjectRow = projectRows[0];
+    const projectSnapshots = projectRows.map((row) => row.project_snapshot);
     const data = buildLetterData({
       studentSnapshot: caseRow.student_snapshot,
       periodSnapshot: caseRow.period_snapshot,
-      projectSnapshot: projectRow.project_snapshot
+      projectSnapshots
     });
-    const template = await loadUploadedTemplateVersion(client, { activeOnly: true });
+    const template = await loadCompletionTemplateVersion(client, { activeOnly: true });
     if (
       template.document_definition_id !== DEFINITION_ID ||
       template.activity_type !== "Magang" ||
@@ -493,8 +558,10 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const templateSnapshot = {
       id: template.template_id,
       key: TEMPLATE_KEY,
-      versionId: template.version_id,
-      versionNumber: Number(template.version_number),
+      source: template.template_source || "uploaded",
+      versionId: template.template_source === "builtin" ? null : template.version_id,
+      versionNumber: template.template_source === "builtin" ? null : Number(template.version_number),
+      fileName: template.original_filename || null,
       orientation: "portrait",
       pageSize: "A4"
     };
@@ -503,7 +570,8 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       template: templateSnapshot,
       student: caseRow.student_snapshot,
       period: caseRow.period_snapshot,
-      project: projectRow.project_snapshot,
+      project: primaryProjectRow.project_snapshot,
+      projects: projectSnapshots,
       letterData: data,
       content: CONTENT_CONFIG
     };
@@ -513,7 +581,8 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       activityType: "Magang",
       activityOutcome: "completed",
       caseId,
-      caseProjectId: projectRow.id
+      caseProjectId: primaryProjectRow.id,
+      caseProjectIds: projectRows.map((row) => row.id)
     };
     await fs.mkdir(STAGING_ROOT, { recursive: true });
     await fs.writeFile(stagingPath, pdfBuffer, { flag: "wx" });
@@ -539,7 +608,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       [
         versionId, documentId, storageKey, `${documentId}-draft.pdf`, `${documentId}-v1.pdf`,
         pdfBuffer.length, crypto.createHash("sha256").update(pdfBuffer).digest("hex"),
-        JSON.stringify(signerSnapshot()), JSON.stringify(versionSnapshot), template.version_id
+        JSON.stringify(signerSnapshot()), JSON.stringify(versionSnapshot), template.template_source === "builtin" ? null : template.version_id
       ]
     );
     await client.query(
@@ -552,8 +621,8 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       [
         `DCPART-${crypto.randomUUID()}`, documentId,
         caseRow.student_key || buildStudentKey(caseRow.legacy_student_id),
-        caseRow.legacy_student_id, projectRow.legacy_project_id,
-        caseRow.period_key, projectRow.project_key,
+        caseRow.legacy_student_id, projectRows.length === 1 ? primaryProjectRow.legacy_project_id : null,
+        caseRow.period_key, projectRows.length === 1 ? primaryProjectRow.project_key : null,
         data.studentName, data.studentNim, data.studyProgram,
         data.universityName, data.projectTitle, formatPeriodLabel(caseRow.period_snapshot)
       ]
@@ -570,7 +639,14 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       authUser: { id: operatorUserId }, ip,
       event: "final_activity_completion_letter_generated_draft",
       target: "document_center_final_activity",
-      detail: { caseId, caseProjectId: projectRow.id, documentId, templateVersionId: template.version_id }
+      detail: {
+        caseId,
+        caseProjectId: primaryProjectRow.id,
+        caseProjectIds: projectRows.map((row) => row.id),
+        documentId,
+        templateSource: template.template_source || "uploaded",
+        templateVersionId: template.template_source === "builtin" ? null : template.version_id
+      }
     });
     await fs.mkdir(getVersionDirectory(documentId), { recursive: true });
     await fs.rename(stagingPath, finalPath);
@@ -595,14 +671,23 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
 async function renderPublishedCompletionLetterVersion({ client, document, documentNumber, issuedAt }) {
   const snapshot = document.version_snapshot_data || {};
   if (snapshot.generator !== "completion_letter_template_v1") return null;
-  if (!document.template_version_id || !snapshot.letterData) throw httpError(409, "Template dokumen tidak tersedia.");
-  const template = await loadUploadedTemplateVersion(client, { templateId: snapshot.template?.id || TEMPLATE_ID, versionId: document.template_version_id });
+  if (!snapshot.letterData) throw httpError(409, "Template dokumen tidak tersedia.");
+  const template = await loadCompletionTemplateVersion(client, {
+    templateId: snapshot.template?.id || TEMPLATE_ID,
+    versionId: document.template_version_id || (snapshot.template?.source === "builtin" ? BUILTIN_VERSION_ID : null)
+  });
   if (template.template_key !== TEMPLATE_KEY) throw httpError(409, "Template dokumen tidak tersedia.");
   const opened = await openTemplateBytes(template);
   try {
+    const finalLetterData = {
+      ...snapshot.letterData,
+      documentNumber,
+      issuedCity: CONTENT_CONFIG.issuedCity,
+      issuedDate: formatDateId(issuedAt)
+    };
     const pdfBuffer = await renderCompletionLetterPdf({
       backgroundBytes: opened.bytes,
-      data: snapshot.letterData,
+      data: finalLetterData,
       documentNumber,
       issuedAt
     });
@@ -610,9 +695,9 @@ async function renderPublishedCompletionLetterVersion({ client, document, docume
       kind: "completion_letter",
       auditEvent: "final_activity_completion_letter_generated_final",
       pdfBuffer,
-      templateVersionId: template.version_id,
+      templateVersionId: template.template_source === "builtin" ? null : template.version_id,
       signer: document.signer_snapshot || signerSnapshot(),
-      snapshotData: { ...snapshot, publishedDocumentNumber: documentNumber, publishedAt: issuedAt }
+      snapshotData: { ...snapshot, letterData: finalLetterData, publishedDocumentNumber: documentNumber, publishedAt: issuedAt }
     };
   } finally {
     await opened.close();

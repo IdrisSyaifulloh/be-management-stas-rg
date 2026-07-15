@@ -3,6 +3,8 @@ const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
 const { buildStudentKey } = require("./documentCenterIdentity");
 const { createDocumentCenterDraft } = require("./documentCenterDraftUpload");
+const { generateCertificateDraft } = require("./documentCenterCertificateTemplates");
+const { generateCompletionLetterDraft } = require("./documentCenterCompletionLetterTemplates");
 
 const COMPLETION_DEFINITION_ID = "DCDEF-COMPLETE-NORMAL-01";
 const CERTIFICATE_DEFINITION_ID = "DCDEF-CERT-NORMAL-01";
@@ -184,8 +186,8 @@ function buildStudentSnapshot(row) {
 
 function buildPeriodSnapshot(row) {
   return {
-    source: "legacy",
-    legacyPeriodId: row.period_id,
+    source: row.period_source || "legacy",
+    legacyPeriodId: row.period_id || null,
     activityType: row.period_activity_type,
     startDate: row.period_start_date,
     endDate: row.period_end_date || null,
@@ -209,27 +211,59 @@ function buildProjectSnapshot(row) {
 }
 
 async function loadEligibleContext(client, { studentId, periodId }) {
+  const periodPredicate = periodId ? "AND sp.id = $2" : "";
+  const sourcePredicate = periodId
+    ? "sp.id IS NOT NULL"
+    : "(sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR s.bergabung IS NOT NULL)";
+  const params = periodId ? [studentId, periodId] : [studentId];
   const result = await client.query(
     `
+    WITH project_period AS (
+      SELECT gsp.student_id,
+             MIN(rm.bergabung) AS project_start_date,
+             MAX(COALESCE(rm.selesai, gs.graduation_completed_at::date, CURRENT_DATE)) AS project_end_date,
+             STRING_AGG(DISTINCT COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id), ', ' ORDER BY COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id)) AS project_description
+      FROM graduation_submission_projects gsp
+      JOIN graduation_submissions gs ON gs.id = gsp.submission_id
+      JOIN students ps ON ps.id = gsp.student_id
+      JOIN research_memberships rm
+        ON rm.user_id = ps.user_id
+       AND rm.project_id = gsp.project_id
+       AND rm.member_type = 'Mahasiswa'
+      JOIN research_projects rp ON rp.id = gsp.project_id
+      WHERE gsp.student_id = $1
+      GROUP BY gsp.student_id
+    )
     SELECT s.id AS student_id, s.user_id, s.nim, s.status AS student_status,
            s.tipe AS student_activity_type, u.name AS student_name, u.prodi,
            gs.id AS graduation_submission_id,
            TO_CHAR(gs.graduation_completed_at, 'YYYY-MM-DD') AS completed_at,
-           sp.id AS period_id, sp.tipe AS period_activity_type,
-           TO_CHAR(sp.mulai, 'YYYY-MM-DD') AS period_start_date,
-           TO_CHAR(sp.selesai, 'YYYY-MM-DD') AS period_end_date,
-           sp.keterangan AS period_description
+           sp.id AS period_id,
+           COALESCE(sp.tipe, s.tipe) AS period_activity_type,
+           TO_CHAR(COALESCE(sp.mulai, pp.project_start_date, s.bergabung, gs.graduation_completed_at::date), 'YYYY-MM-DD') AS period_start_date,
+           TO_CHAR(COALESCE(sp.selesai, pp.project_end_date, gs.graduation_completed_at::date), 'YYYY-MM-DD') AS period_end_date,
+           COALESCE(sp.keterangan, pp.project_description, 'Periode dari relasi project mahasiswa') AS period_description,
+           CASE WHEN sp.id IS NULL THEN 'project_membership' ELSE 'legacy' END AS period_source
     FROM students s
     JOIN users u ON u.id = s.user_id
     JOIN graduation_submissions gs ON gs.student_id = s.id
-    JOIN student_periods sp ON sp.student_id = s.id
+    LEFT JOIN LATERAL (
+      SELECT sp.*
+      FROM student_periods sp
+      WHERE sp.student_id = s.id
+        AND sp.tipe = s.tipe
+        ${periodPredicate}
+      ORDER BY sp.mulai DESC NULLS LAST, sp.id DESC
+      LIMIT 1
+    ) sp ON TRUE
+    LEFT JOIN project_period pp ON pp.student_id = s.id
     WHERE s.id = $1
-      AND sp.id = $2
       AND s.status = 'Alumni'
       AND gs.graduation_completed_at IS NOT NULL
+      AND ${sourcePredicate}
     LIMIT 1
     `,
-    [studentId, periodId]
+    params
   );
   return result.rows[0] || null;
 }
@@ -695,14 +729,22 @@ async function listEligible(rawQuery) {
   const limit = parseLimit(rawQuery.limit);
   const offset = parseOffset(rawQuery.offset);
   const params = [activityType];
+  let periodParamIndex = null;
   const predicates = [
     "s.status = 'Alumni'",
     "gs.graduation_completed_at IS NOT NULL",
-    "sp.tipe = $1"
+    "s.tipe = $1"
   ];
   if (periodId) {
     params.push(periodId);
-    predicates.push(`sp.id = $${params.length}`);
+    periodParamIndex = params.length;
+    predicates.push(`EXISTS (
+      SELECT 1
+      FROM student_periods sp_filter
+      WHERE sp_filter.id = $${periodParamIndex}
+        AND sp_filter.student_id = s.id
+        AND sp_filter.tipe = $1
+    )`);
   }
   if (search) {
     params.push(search);
@@ -714,17 +756,45 @@ async function listEligible(rawQuery) {
     WITH filtered AS (
       SELECT s.id AS student_id, s.nim, u.name AS student_name, u.prodi,
              s.status AS student_status, s.tipe AS student_activity_type,
-             sp.id AS period_id, sp.tipe AS period_activity_type,
-             TO_CHAR(sp.mulai, 'YYYY-MM-DD') AS period_start_date,
-             TO_CHAR(sp.selesai, 'YYYY-MM-DD') AS period_end_date,
-             sp.keterangan AS period_description,
+             sp.id AS period_id,
+             COALESCE(sp.tipe, s.tipe) AS period_activity_type,
+             TO_CHAR(COALESCE(sp.mulai, pp.project_start_date, s.bergabung, gs.graduation_completed_at::date), 'YYYY-MM-DD') AS period_start_date,
+             TO_CHAR(COALESCE(sp.selesai, pp.project_end_date, gs.graduation_completed_at::date), 'YYYY-MM-DD') AS period_end_date,
+             COALESCE(sp.keterangan, pp.project_description, 'Periode dari relasi project mahasiswa') AS period_description,
              TO_CHAR(gs.graduation_completed_at, 'YYYY-MM-DD') AS completed_at,
+             CASE
+               WHEN sp.id IS NOT NULL THEN 'period:' || sp.id
+               ELSE 'period:' || s.tipe || ':' ||
+                    TO_CHAR(COALESCE(pp.project_start_date, s.bergabung, gs.graduation_completed_at::date), 'YYYY-MM-DD') || ':' ||
+                    TO_CHAR(COALESCE(pp.project_end_date, gs.graduation_completed_at::date), 'YYYY-MM-DD')
+             END AS period_key,
              COUNT(*) OVER() AS total_count
       FROM students s
       JOIN users u ON u.id = s.user_id
       JOIN graduation_submissions gs ON gs.student_id = s.id
-      JOIN student_periods sp ON sp.student_id = s.id
+      LEFT JOIN LATERAL (
+        SELECT sp.*
+        FROM student_periods sp
+        WHERE sp.student_id = s.id
+          AND sp.tipe = s.tipe
+          ${periodId ? `AND sp.id = $${periodParamIndex}` : ""}
+        ORDER BY sp.mulai DESC NULLS LAST, sp.id DESC
+        LIMIT 1
+      ) sp ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT MIN(rm.bergabung) AS project_start_date,
+               MAX(COALESCE(rm.selesai, gs.graduation_completed_at::date, CURRENT_DATE)) AS project_end_date,
+               STRING_AGG(DISTINCT COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id), ', ' ORDER BY COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id)) AS project_description
+        FROM graduation_submission_projects gsp
+        JOIN research_memberships rm
+          ON rm.user_id = s.user_id
+         AND rm.project_id = gsp.project_id
+         AND rm.member_type = 'Mahasiswa'
+        JOIN research_projects rp ON rp.id = gsp.project_id
+        WHERE gsp.student_id = s.id
+      ) pp ON TRUE
       WHERE ${predicates.join(" AND ")}
+        AND (sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR s.bergabung IS NOT NULL)
       ORDER BY u.name ASC, s.id ASC, sp.mulai DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}
     )
@@ -734,7 +804,7 @@ async function listEligible(rawQuery) {
     FROM filtered f
     LEFT JOIN dc_final_activity_cases c
       ON c.legacy_student_id = f.student_id
-     AND c.legacy_period_id = f.period_id
+     AND c.period_key = f.period_key
      AND c.completion_document_definition_id = $${params.length + 1}
      AND c.outcome = 'completed'
     LEFT JOIN LATERAL (
@@ -769,12 +839,14 @@ async function listEligible(rawQuery) {
 }
 
 async function insertAudit(client, { authUser, ip, event, target, detail }) {
+  const userRole = String(authUser?.role || "").toLowerCase() === "mahasiswa" ? "Mahasiswa" : "Operator";
   await client.query(
     `INSERT INTO audit_logs (id, user_id, user_role, action, target, ip, detail)
-     VALUES ($1, $2, 'Operator', 'Create', $3, $4, $5::jsonb)`,
+     VALUES ($1, $2, $3, 'Create', $4, $5, $6::jsonb)`,
     [
       `AUD-DC-${crypto.randomUUID()}`,
       requireSafeId(authUser?.id, "userId"),
+      userRole,
       target,
       ip || null,
       JSON.stringify({ module: "document_center", event, ...detail })
@@ -782,9 +854,11 @@ async function insertAudit(client, { authUser, ip, event, target, detail }) {
   );
 }
 
-async function createOneCase({ item, authUser, ip }) {
+async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = false }) {
   const studentId = safeId(item.studentId, "studentId");
-  const periodId = safeId(item.periodId, "periodId");
+  const periodId = item.periodId || null;
+  if (periodId) safeId(periodId, "periodId");
+  if (!periodId && !allowProjectPeriodFallback) bad("periodId");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -797,7 +871,9 @@ async function createOneCase({ item, authUser, ip }) {
     }
     const projects = await loadEligibleProjects(client, studentId);
     const studentKey = buildStudentKey(context.student_id);
-    const periodKey = `period:${context.period_id}`;
+    const periodKey = context.period_id
+      ? `period:${context.period_id}`
+      : `period:${context.period_activity_type}:${context.period_start_date}:${context.period_end_date}`;
     const caseId = `DCFCASE-${crypto.randomUUID()}`;
     const completedAt = context.completed_at;
     const inserted = await client.query(
@@ -821,7 +897,7 @@ async function createOneCase({ item, authUser, ip }) {
         JSON.stringify(buildStudentSnapshot(context)),
         context.period_activity_type,
         periodKey,
-        context.period_id,
+        context.period_id || null,
         JSON.stringify(buildPeriodSnapshot(context)),
         completedAt,
         JSON.stringify({ source: "graduation_submissions", graduationSubmissionId: context.graduation_submission_id, completedAt }),
@@ -889,8 +965,19 @@ async function createCases({ body, authUser, ip }) {
   for (const raw of body.items) {
     try {
       requirePlainObject(raw, "items");
-      rejectUnexpectedFields(raw, new Set(["studentId", "periodId"]), "items");
-      results.push(await createOneCase({ item: { studentId: raw.studentId, periodId: raw.periodId }, authUser, ip }));
+        rejectUnexpectedFields(raw, new Set(["studentId", "periodId"]), "items");
+      const caseResult = await createOneCase({
+        item: { studentId: raw.studentId, periodId: raw.periodId },
+        authUser,
+        ip,
+        allowProjectPeriodFallback: true
+      });
+      if (["created", "existing"].includes(caseResult.status) && caseResult.caseId) {
+        const drafts = await generateDraftsForCase({ caseId: caseResult.caseId, authUser, ip });
+        results.push({ ...caseResult, ...drafts });
+      } else {
+        results.push(caseResult);
+      }
     } catch (error) {
       if (error?.statusCode === 400 || error?.statusCode === 404) {
         results.push({
@@ -905,6 +992,99 @@ async function createCases({ body, authUser, ip }) {
     }
   }
   return { items: results };
+}
+
+async function generateDraftsForCase({ caseId, authUser, ip }) {
+  let currentCase = await detailCase(caseId);
+  let completionDraft = currentCase.completionDocument
+    ? { status: "existing", documentId: currentCase.completionDocument.id }
+    : { status: "not_applicable" };
+
+  if (
+    currentCase.activityType === "Magang" &&
+    currentCase.outcome === "completed" &&
+    currentCase.status === "pending" &&
+    !currentCase.completionDocument &&
+    (currentCase.projects || []).length > 0
+  ) {
+    try {
+      const generated = await generateCompletionLetterDraft({ id: caseId, body: {}, authUser, ip });
+      completionDraft = {
+        status: "created",
+        documentId: generated?.document?.id || null
+      };
+      currentCase = await detailCase(caseId);
+    } catch (error) {
+      if (error?.statusCode === 409) {
+        completionDraft = {
+          status: "skipped",
+          message: error.message || "Surat Keterangan Selesai tidak dapat dibuat."
+        };
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  const certificateDrafts = [];
+  for (const project of currentCase.projects || []) {
+    if (!project.certificateRequired || project.certificateDocument || project.certificateStatus !== "pending") {
+      certificateDrafts.push({
+        caseProjectId: project.id,
+        status: project.certificateDocument ? "existing" : project.certificateStatus
+      });
+      continue;
+    }
+
+    try {
+      const generated = await generateCertificateDraft({ id: project.id, authUser, ip });
+      certificateDrafts.push({
+        caseProjectId: project.id,
+        status: "created",
+        documentId: generated?.document?.id || null
+      });
+    } catch (error) {
+      if (error?.statusCode === 409) {
+        certificateDrafts.push({
+          caseProjectId: project.id,
+          status: "skipped",
+          message: error.message || "Sertifikat tidak dapat dibuat."
+        });
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  return { completionDraft, certificateDrafts };
+}
+
+async function createArtifactsForFinalizedAlumni({ studentId, authUser, ip }) {
+  const safeStudentId = safeId(studentId, "studentId");
+  const caseResult = await createOneCase({
+    item: { studentId: safeStudentId },
+    authUser,
+    ip,
+    allowProjectPeriodFallback: true
+  });
+
+  if (!["created", "existing"].includes(caseResult.status) || !caseResult.caseId) {
+    return {
+      status: caseResult.status,
+      caseId: caseResult.caseId || null,
+      completionDraft: { status: "not_created" },
+      certificateDrafts: [],
+      message: caseResult.message || null
+    };
+  }
+
+  const drafts = await generateDraftsForCase({ caseId: caseResult.caseId, authUser, ip });
+
+  return {
+    status: caseResult.status,
+    caseId: caseResult.caseId,
+    ...drafts
+  };
 }
 
 const CASE_SELECT = `
@@ -1099,6 +1279,7 @@ module.exports = {
   listEligible,
   listWithdrawalEligible,
   createCases,
+  createArtifactsForFinalizedAlumni,
   createWithdrawalCases,
   listCases,
   detailCase,

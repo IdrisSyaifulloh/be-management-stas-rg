@@ -14,7 +14,7 @@ const {
   resolveDocumentCenterStudent
 } = require("../../utils/documentCenterIdentity");
 const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
-const { publishDocument } = require("../../utils/documentCenterPublish");
+const { publishDocument, publishDocumentBatch } = require("../../utils/documentCenterPublish");
 const { revokeDocument } = require("../../utils/documentCenterRevocation");
 const {
   getDefinitions: getStudentRequestDefinitions,
@@ -622,6 +622,19 @@ router.post("/operator/templates/:id/preview", requireRoleStrict(["operator"]), 
   res.setHeader("Content-Disposition", `inline; filename="${req.params.id}-preview.pdf"`);
   res.end(buffer);
 }));
+
+router.post(
+  "/operator/documents/bulk-publish",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const result = await publishDocumentBatch({
+      authUser: req.authUser,
+      ip: req.ip,
+      body: req.body
+    });
+    res.status(200).json(result);
+  })
+);
 
 router.post(
   "/operator/documents/:id/publish",

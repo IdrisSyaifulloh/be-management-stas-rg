@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
+const path = require("path");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 const { pool } = require("../db/pool");
 const { requireSafeId, requireEnum, parseBoundedLimit, parseBoundedOffset } = require("./securityValidation");
@@ -21,6 +22,12 @@ const PAGE_HEIGHT = 595.5;
 const MAX_TEMPLATE_PDF_BYTES = 8 * 1024 * 1024;
 const TEMPLATE_KEYS = ["certificate_completed_internship", "certificate_completed_research", "completion_letter_completed_internship"];
 const MONTHS_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+const BUILTIN_TEMPLATE_FILES = {
+  certificate_completed_internship: "certificate-completed-internship.pdf",
+  certificate_completed_research: "certificate-completed-research.pdf",
+  completion_letter_completed_internship: "completion-letter-completed-internship.pdf"
+};
+const BUILTIN_TEMPLATE_ROOT = path.join(__dirname, "..", "resources", "document-center", "templates");
 
 const CONTENT_CONFIG = {
   organizationLabel: "CoE STAS-RG",
@@ -36,10 +43,10 @@ const PRESETS = {
     activityType: "Magang",
     activityOutcome: "completed",
     layout: {
-      number: { x: 126, y: 278, width: 150, fontSize: 10 },
-      name: { x: 315, y: 207, width: 430, fontSize: 23, minFontSize: 12 },
-      paragraph: { x: 390, y: 325, width: 390, fontSize: 14, minFontSize: 11, lineHeight: 19, maxLines: 4 },
-      date: { x: 150, y: 422, width: 260, fontSize: 11 },
+      number: { x: 126, y: 286, width: 150, fontSize: 12 },
+      name: { x: 280, y: 182, width: 520, fontSize: 25, minFontSize: 14 },
+      paragraph: { x: 420, y: 318, width: 373, fontSize: 17, minFontSize: 12, lineHeight: 24, maxLines: 4 },
+      date: { x: 264, y: 427, width: 170, fontSize: 14 },
       signerPosition: { x: 150, y: 444, width: 260, fontSize: 10 },
       signerName: { x: 150, y: 518, width: 300, fontSize: 9 },
       signerEmployeeNumber: { x: 150, y: 537, width: 260, fontSize: 10 }
@@ -50,10 +57,10 @@ const PRESETS = {
     activityType: "Riset",
     activityOutcome: "completed",
     layout: {
-      number: { x: 126, y: 278, width: 150, fontSize: 10 },
-      name: { x: 315, y: 207, width: 430, fontSize: 23, minFontSize: 12 },
-      paragraph: { x: 390, y: 325, width: 390, fontSize: 14, minFontSize: 11, lineHeight: 19, maxLines: 4 },
-      date: { x: 150, y: 422, width: 260, fontSize: 11 },
+      number: { x: 126, y: 286, width: 150, fontSize: 12 },
+      name: { x: 280, y: 182, width: 520, fontSize: 25, minFontSize: 14 },
+      paragraph: { x: 420, y: 318, width: 373, fontSize: 17, minFontSize: 12, lineHeight: 24, maxLines: 4 },
+      date: { x: 264, y: 427, width: 170, fontSize: 14 },
       signerPosition: { x: 150, y: 444, width: 260, fontSize: 10 },
       signerName: { x: 150, y: 518, width: 300, fontSize: 9 },
       signerEmployeeNumber: { x: 150, y: 537, width: 260, fontSize: 10 }
@@ -113,6 +120,8 @@ async function validateLandscapePdf(buffer) {
 }
 
 function mapTemplateRow(row) {
+  const hasActiveUpload = Boolean(row.active_version_id);
+  const hasBuiltin = Boolean(BUILTIN_TEMPLATE_FILES[row.template_key]);
   return {
     id: row.id,
     documentDefinitionId: row.document_definition_id,
@@ -120,9 +129,11 @@ function mapTemplateRow(row) {
     name: row.name,
     activityType: row.activity_type,
     activityOutcome: row.activity_outcome,
-    status: row.status,
-    activeVersionId: row.active_version_id,
-    activeVersionNumber: row.active_version_number == null ? null : Number(row.active_version_number),
+    status: hasActiveUpload || hasBuiltin ? "active" : row.status,
+    activeVersionId: row.active_version_id || (hasBuiltin ? `builtin:${row.template_key}` : null),
+    activeVersionNumber: row.active_version_number == null ? (hasBuiltin ? 1 : null) : Number(row.active_version_number),
+    templateSource: hasActiveUpload ? "uploaded" : hasBuiltin ? "builtin" : "none",
+    usesBuiltinTemplate: !hasActiveUpload && hasBuiltin,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -154,8 +165,17 @@ async function listTemplates(query = {}) {
   }
   const status = requireEnum(query.status, ["draft", "active", "inactive"], "status");
   if (status) {
-    params.push(status);
-    predicates.push(`t.status = $${params.length}`);
+    const builtinKeys = Object.keys(BUILTIN_TEMPLATE_FILES);
+    if (status === "active") {
+      params.push(status, builtinKeys);
+      predicates.push(`(t.status = $${params.length - 1} OR t.template_key = ANY($${params.length}::text[]))`);
+    } else if (status === "draft") {
+      params.push(status, builtinKeys);
+      predicates.push(`(t.status = $${params.length - 1} AND NOT (t.template_key = ANY($${params.length}::text[])))`);
+    } else {
+      params.push(status);
+      predicates.push(`t.status = $${params.length}`);
+    }
   }
   const activityType = requireEnum(query.activityType, ["Magang", "Riset"], "activityType");
   if (activityType) {
@@ -211,6 +231,30 @@ async function detailTemplate(id) {
     [templateId]
   );
   return { ...mapTemplateRow(result.rows[0]), versions: versions.rows.map(mapTemplateVersion) };
+}
+
+async function readBuiltinTemplateBackground(templateKey) {
+  const fileName = BUILTIN_TEMPLATE_FILES[templateKey];
+  if (!fileName) throw httpError(409, "Template bawaan tidak tersedia.");
+  const filePath = path.join(BUILTIN_TEMPLATE_ROOT, fileName);
+  const buffer = await fs.readFile(filePath).catch(() => {
+    throw httpError(409, "Template bawaan tidak tersedia.");
+  });
+  await validateLandscapePdf(buffer);
+  return { buffer, fileName };
+}
+
+async function openTemplateBackground(template) {
+  if (template.background_bytes) return { bytes: template.background_bytes, close: async () => {} };
+  const opened = await openPrivateTemplateVersion({
+    storageKey: template.storage_key,
+    mimeType: template.mime_type,
+    fileSize: Number(template.file_size)
+  });
+  return {
+    bytes: await opened.handle.readFile(),
+    close: async () => opened.handle.close().catch(() => {})
+  };
 }
 
 async function insertAudit(client, { authUser, ip, event, target = "document_center_template", detail }) {
@@ -312,7 +356,7 @@ function topY(y, fontSize) {
   return PAGE_HEIGHT - y - fontSize;
 }
 
-function drawCenteredText(page, text, box, font, fontSize) {
+function drawCenteredText(page, text, box, font, fontSize, color = rgb(0, 0, 0)) {
   const value = String(text || "");
   const width = font.widthOfTextAtSize(value, fontSize);
   page.drawText(value, {
@@ -320,7 +364,17 @@ function drawCenteredText(page, text, box, font, fontSize) {
     y: topY(box.y, fontSize),
     size: fontSize,
     font,
-    color: rgb(0, 0, 0)
+    color
+  });
+}
+
+function drawLeftText(page, text, box, font, fontSize, color = rgb(0, 0, 0)) {
+  page.drawText(String(text || ""), {
+    x: box.x,
+    y: topY(box.y, fontSize),
+    size: fontSize,
+    font,
+    color
   });
 }
 
@@ -357,14 +411,25 @@ function wrapRichSegments(segments, fonts, size, maxWidth) {
 function buildParagraphSegments(data) {
   const projectTitle = data.projectTitle || "proyek/kegiatan";
   const role = data.projectRole || (data.activityType === "Riset" ? "anggota riset" : "peserta magang");
+  if (data.activityType === "Riset") {
+    return [
+      { text: "Telah berpartisipasi aktif dalam proyek ", bold: false },
+      { text: CONTENT_CONFIG.organizationLabel, bold: true },
+      { text: " yang berjudul \"", bold: false },
+      { text: projectTitle, bold: true },
+      { text: "\", di posisi ", bold: false },
+      { text: role, bold: true },
+      { text: `, selama periode ${data.periodLabel}.`, bold: false }
+    ];
+  }
   return [
-    { text: "Telah menyelesaikan kegiatan pada ", bold: false },
+    { text: "Telah melaksanakan kegiatan magang di ", bold: false },
     { text: CONTENT_CONFIG.organizationLabel, bold: true },
-    { text: " sebagai ", bold: false },
-    { text: role, bold: true },
-    { text: " dalam proyek ", bold: false },
+    { text: " sebagai bagian dari proyek \"", bold: false },
     { text: projectTitle, bold: true },
-    { text: ` periode ${data.periodLabel}.`, bold: false }
+    { text: "\", dengan posisi ", bold: false },
+    { text: role, bold: true },
+    { text: `, selama periode ${data.periodLabel}.`, bold: false }
   ];
 }
 
@@ -384,7 +449,9 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const fonts = { regular, bold };
   const layout = preset.layout;
-  drawCenteredText(page, documentNumber || "NOMOR DOKUMEN SAAT PUBLISH", layout.number, regular, layout.number.fontSize);
+  if (documentNumber) {
+    drawCenteredText(page, documentNumber, layout.number, regular, layout.number.fontSize, rgb(1, 1, 1));
+  }
   const name = String(data.studentName || "").toUpperCase();
   let nameSize = layout.name.fontSize;
   while (nameSize > layout.name.minFontSize && bold.widthOfTextAtSize(name, nameSize) > layout.name.width) nameSize -= 1;
@@ -402,8 +469,7 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
     throw httpError(409, "Paragraf sertifikat melebihi ruang template.");
   }
   lines.forEach((line, index) => {
-    const lineWidth = measureSegments(line, fonts, paragraphSize);
-    let x = paragraph.x + Math.max(0, (paragraph.width - lineWidth) / 2);
+    let x = paragraph.x;
     const y = topY(paragraph.y + index * paragraph.lineHeight, paragraphSize);
     for (const segment of line) {
       const font = segment.bold ? bold : regular;
@@ -412,27 +478,40 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
     }
   });
 
-  const dateText = issuedAt ? `${CONTENT_CONFIG.issuedCity}, ${formatDateId(issuedAt)}` : `${CONTENT_CONFIG.issuedCity}, TANGGAL TERBIT`;
-  drawCenteredText(page, dateText, layout.date, regular, layout.date.fontSize);
+  if (issuedAt) {
+    drawLeftText(page, formatDateId(issuedAt), layout.date, bold, layout.date.fontSize);
+  }
   return Buffer.from(await pdf.save({ useObjectStreams: false }));
 }
 
 async function loadTemplateVersionForPreview(templateId, versionId = null) {
   const params = [templateId];
-  const versionPredicate = versionId ? "AND v.id = $2" : "AND v.id = t.active_version_id";
+  const versionPredicate = versionId ? "AND v.id = $2" : "";
+  const joinClause = versionId
+    ? "JOIN dc_document_template_versions v ON v.document_template_id = t.id"
+    : "LEFT JOIN dc_document_template_versions v ON v.id = t.active_version_id";
   if (versionId) params.push(versionId);
   const result = await pool.query(
     `
-    SELECT t.*, v.id AS version_id, v.version_number, v.storage_key, v.mime_type, v.file_size
+    SELECT t.*, v.id AS version_id, v.version_number, v.storage_key, v.mime_type, v.file_size,
+           CASE WHEN v.id IS NULL THEN 'builtin' ELSE 'uploaded' END AS template_source
     FROM dc_document_templates t
-    JOIN dc_document_template_versions v ON v.document_template_id = t.id
+    ${joinClause}
     WHERE t.id = $1 ${versionPredicate}
     LIMIT 1
     `,
     params
   );
   if (!result.rowCount) throw httpError(404, "Versi template tidak ditemukan.");
-  return result.rows[0];
+  const row = result.rows[0];
+  if (!row.version_id) {
+    const builtin = await readBuiltinTemplateBackground(row.template_key);
+    row.background_bytes = builtin.buffer;
+    row.version_id = null;
+    row.version_number = null;
+    row.original_filename = builtin.fileName;
+  }
+  return row;
 }
 
 async function previewTemplate({ id, body }) {
@@ -444,11 +523,10 @@ async function previewTemplate({ id, body }) {
     versionId = payload.versionId ? requireSafeId(payload.versionId, "versionId") : null;
   }
   const version = await loadTemplateVersionForPreview(templateId, versionId);
-  const opened = await openPrivateTemplateVersion({ storageKey: version.storage_key, mimeType: version.mime_type, fileSize: Number(version.file_size) });
+  const opened = await openTemplateBackground(version);
   try {
-    const bytes = await opened.handle.readFile();
     return await renderCertificatePdf({
-      backgroundBytes: bytes,
+      backgroundBytes: opened.bytes,
       templateKey: version.template_key,
       data: {
         studentName: "Nama Mahasiswa",
@@ -461,7 +539,7 @@ async function previewTemplate({ id, body }) {
       issuedAt: new Date("2026-01-15T00:00:00Z")
     });
   } finally {
-    await opened.handle.close().catch(() => {});
+    await opened.close();
   }
 }
 
@@ -469,20 +547,26 @@ async function loadActiveTemplateForCertificate(client, { definitionId, activity
   const templateKey = activityType === "Magang" ? "certificate_completed_internship" : "certificate_completed_research";
   const result = await client.query(
     `
-    SELECT t.*, v.id AS version_id, v.version_number, v.storage_key, v.mime_type, v.file_size
+    SELECT t.*, v.id AS version_id, v.version_number, v.storage_key, v.mime_type, v.file_size,
+           CASE WHEN v.id IS NULL THEN 'builtin' ELSE 'uploaded' END AS template_source
     FROM dc_document_templates t
-    JOIN dc_document_template_versions v ON v.id = t.active_version_id
+    LEFT JOIN dc_document_template_versions v ON v.id = t.active_version_id
     WHERE t.document_definition_id = $1
       AND t.template_key = $2
       AND t.activity_type = $3
       AND t.activity_outcome = $4
-      AND t.status = 'active'
     LIMIT 1
     `,
     [definitionId, templateKey, activityType, outcome]
   );
-  if (!result.rowCount) throw httpError(409, "Template sertifikat aktif belum tersedia.");
-  return result.rows[0];
+  if (!result.rowCount) throw httpError(409, "Template sertifikat belum tersedia.");
+  const row = result.rows[0];
+  if (!row.version_id) {
+    const builtin = await readBuiltinTemplateBackground(row.template_key);
+    row.background_bytes = builtin.buffer;
+    row.original_filename = builtin.fileName;
+  }
+  return row;
 }
 
 function periodLabel(period) {
@@ -496,7 +580,7 @@ function buildCertificateData(caseRow, projectRow) {
     activityType: caseRow.activity_type,
     periodLabel: periodLabel(caseRow.period_snapshot),
     projectTitle: projectRow.project_snapshot?.title || projectRow.project_snapshot?.name || projectRow.legacy_project_id,
-    projectRole: caseRow.activity_type === "Riset" ? "anggota riset" : "peserta magang"
+    projectRole: projectRow.project_snapshot?.role || projectRow.project_snapshot?.position || (caseRow.activity_type === "Riset" ? "anggota riset" : "peserta magang")
   };
 }
 
@@ -539,17 +623,23 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
     }
     const template = await loadActiveTemplateForCertificate(client, { definitionId: row.certificate_document_definition_id, activityType: row.activity_type, outcome: row.outcome });
-    const opened = await openPrivateTemplateVersion({ storageKey: template.storage_key, mimeType: template.mime_type, fileSize: Number(template.file_size) });
+    const opened = await openTemplateBackground(template);
     let pdfBuffer;
     try {
-      const background = await opened.handle.readFile();
-      pdfBuffer = await renderCertificatePdf({ backgroundBytes: background, templateKey: template.template_key, data: buildCertificateData(row, row) });
+      pdfBuffer = await renderCertificatePdf({ backgroundBytes: opened.bytes, templateKey: template.template_key, data: buildCertificateData(row, row) });
     } finally {
-      await opened.handle.close().catch(() => {});
+      await opened.close();
     }
     const versionSnapshot = {
       generator: "certificate_template_v1",
-      template: { id: template.id, key: template.template_key, versionId: template.version_id, versionNumber: template.version_number },
+      template: {
+        id: template.id,
+        key: template.template_key,
+        source: template.template_source || "uploaded",
+        versionId: template.version_id || null,
+        versionNumber: template.version_number == null ? null : Number(template.version_number),
+        fileName: template.original_filename || null
+      },
       student: row.student_snapshot,
       period: row.period_snapshot,
       project: row.project_snapshot,
@@ -595,7 +685,7 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       [
         versionId, documentId, storageKey, `${documentId}-draft.pdf`, `${documentId}-v1.pdf`,
         pdfBuffer.length, crypto.createHash("sha256").update(pdfBuffer).digest("hex"),
-        JSON.stringify(signerSnapshot()), JSON.stringify(versionSnapshot), template.version_id
+        JSON.stringify(signerSnapshot()), JSON.stringify(versionSnapshot), template.version_id || null
       ]
     );
     await client.query(
@@ -618,7 +708,19 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       ]
     );
     await client.query("UPDATE dc_final_activity_case_projects SET certificate_document_id=$2, certificate_status='draft_created', updated_at=NOW() WHERE id=$1", [caseProjectId, documentId]);
-    await insertAudit(client, { authUser: { id: operatorUserId }, ip, event: "final_activity_certificate_generated_draft", target: "document_center_final_activity", detail: { caseProjectId, caseId: row.final_activity_case_id, documentId, templateVersionId: template.version_id } });
+    await insertAudit(client, {
+      authUser: { id: operatorUserId },
+      ip,
+      event: "final_activity_certificate_generated_draft",
+      target: "document_center_final_activity",
+      detail: {
+        caseProjectId,
+        caseId: row.final_activity_case_id,
+        documentId,
+        templateSource: template.template_source || "uploaded",
+        templateVersionId: template.version_id || null
+      }
+    });
     await fs.mkdir(getVersionDirectory(documentId), { recursive: true });
     await fs.rename(stagingPath, finalPath);
     moved = true;
@@ -636,33 +738,44 @@ async function generateCertificateDraft({ id, authUser, ip }) {
 }
 
 async function renderPublishedCertificateVersion({ client, document, documentNumber, issuedAt }) {
-  if (!document.template_version_id) return null;
-  const templateResult = await client.query(
-    `
-    SELECT t.template_key, v.id AS version_id, v.storage_key, v.mime_type, v.file_size
-    FROM dc_document_template_versions v
-    JOIN dc_document_templates t ON t.id = v.document_template_id
-    WHERE v.id=$1
-    LIMIT 1
-    `,
-    [document.template_version_id]
-  );
-  if (!templateResult.rowCount) throw httpError(409, "Template dokumen tidak tersedia.");
-  const template = templateResult.rows[0];
-  const opened = await openPrivateTemplateVersion({ storageKey: template.storage_key, mimeType: template.mime_type, fileSize: Number(template.file_size) });
+  const snapshot = document.version_snapshot_data || {};
+  let template;
+  if (document.template_version_id) {
+    const templateResult = await client.query(
+      `
+      SELECT t.template_key, v.id AS version_id, v.storage_key, v.mime_type, v.file_size, 'uploaded' AS template_source
+      FROM dc_document_template_versions v
+      JOIN dc_document_templates t ON t.id = v.document_template_id
+      WHERE v.id=$1
+      LIMIT 1
+      `,
+      [document.template_version_id]
+    );
+    if (!templateResult.rowCount) throw httpError(409, "Template dokumen tidak tersedia.");
+    template = templateResult.rows[0];
+  } else if (snapshot.template?.source === "builtin" && snapshot.template?.key) {
+    const builtin = await readBuiltinTemplateBackground(snapshot.template.key);
+    template = {
+      template_key: snapshot.template.key,
+      version_id: null,
+      template_source: "builtin",
+      background_bytes: builtin.buffer
+    };
+  } else {
+    return null;
+  }
+  const opened = await openTemplateBackground(template);
   try {
-    const background = await opened.handle.readFile();
-    const snapshot = document.version_snapshot_data || {};
     const pdfBuffer = await renderCertificatePdf({
-      backgroundBytes: background,
+      backgroundBytes: opened.bytes,
       templateKey: template.template_key,
       data: snapshot.certificateData || {},
       documentNumber,
       issuedAt
     });
-    return { pdfBuffer, templateVersionId: template.version_id, signer: signerSnapshot(), snapshotData: { ...snapshot, publishedDocumentNumber: documentNumber, publishedAt: issuedAt } };
+    return { pdfBuffer, templateVersionId: template.version_id || null, signer: signerSnapshot(), snapshotData: { ...snapshot, publishedDocumentNumber: documentNumber, publishedAt: issuedAt } };
   } finally {
-    await opened.handle.close().catch(() => {});
+    await opened.close();
   }
 }
 
