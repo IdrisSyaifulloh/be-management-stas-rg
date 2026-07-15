@@ -6,6 +6,7 @@ const { openPrivateDocumentVersion, STAGING_ROOT, buildStagingFilePath, buildVer
 const { loadRequest, validateRequestDocumentContext, insertAudit } = require("./documentCenterOperatorRequests");
 const { markIssuedForPublishedDocument } = require("./documentCenterFinalActivity");
 const { renderPublishedCertificateVersion } = require("./documentCenterCertificateTemplates");
+const { renderPublishedCompletionLetterVersion } = require("./documentCenterCompletionLetterTemplates");
 
 const ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
 
@@ -57,7 +58,7 @@ async function lockPublishDocument(client, documentId) {
            dd.id AS definition_id, dd.type_code, dd.is_active AS definition_active,
            dv.id AS version_id, dv.storage_key, dv.mime_type, dv.file_size,
            dv.original_filename, dv.download_filename, dv.template_version_id,
-           dv.snapshot_data AS version_snapshot_data,
+           dv.signer_snapshot, dv.snapshot_data AS version_snapshot_data,
            (
              SELECT COUNT(*)::int
              FROM dc_official_document_students ods
@@ -161,7 +162,12 @@ async function publishDocument({ documentId, authUser, ip, body }) {
     const romanMonth = ROMAN_MONTHS[publishTime.sequence_month - 1];
     if (!romanMonth) throw createHttpError(409, "Waktu penerbitan tidak valid.");
     const documentNumber = `${document.type_code}.${String(sequence).padStart(3, "0")}/STASRG/${romanMonth}/${publishTime.sequence_year}`;
-    generatedFinal = await renderPublishedCertificateVersion({
+    generatedFinal = await renderPublishedCompletionLetterVersion({
+      client,
+      document,
+      documentNumber,
+      issuedAt: publishTime.issued_at
+    }) || await renderPublishedCertificateVersion({
       client,
       document,
       documentNumber,
@@ -254,7 +260,7 @@ async function publishDocument({ documentId, authUser, ip, body }) {
           ip || null,
           JSON.stringify({
             module: "document_center",
-            event: "final_activity_certificate_generated_final",
+            event: generatedFinal.auditEvent || "final_activity_certificate_generated_final",
             documentId: safeDocumentId,
             documentNumber,
             versionNumber: nextVersionNumber,

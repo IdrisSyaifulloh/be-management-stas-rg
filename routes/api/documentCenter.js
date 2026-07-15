@@ -52,11 +52,14 @@ const {
 const {
   listTemplates,
   detailTemplate,
-  uploadTemplateVersion,
   activateTemplateVersion,
-  previewTemplate,
   generateCertificateDraft
 } = require("../../utils/documentCenterCertificateTemplates");
+const {
+  uploadDocumentTemplateVersion,
+  previewDocumentTemplate,
+  generateCompletionLetterDraft
+} = require("../../utils/documentCenterCompletionLetterTemplates");
 
 const router = express.Router();
 
@@ -576,6 +579,10 @@ router.post("/operator/final-activity/cases/:id/completion-draft", requireRoleSt
   res.status(201).json(await uploadCompletionDraft({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
 }));
 
+router.post("/operator/final-activity/cases/:id/generate-completion-letter-draft", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await generateCompletionLetterDraft({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
+}));
+
 router.post("/operator/final-activity/case-projects/:id/certificate-draft", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.status(201).json(await uploadCertificateDraft({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
 }));
@@ -593,7 +600,7 @@ router.get("/operator/templates/:id", requireRoleStrict(["operator"]), asyncHand
 }));
 
 router.post("/operator/templates/:id/versions", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
-  res.status(201).json(await uploadTemplateVersion({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
+  res.status(201).json(await uploadDocumentTemplateVersion({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
 }));
 
 router.post("/operator/templates/:id/activate", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
@@ -601,7 +608,7 @@ router.post("/operator/templates/:id/activate", requireRoleStrict(["operator"]),
 }));
 
 router.get("/operator/templates/:id/preview", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
-  const buffer = await previewTemplate({ id: req.params.id, body: {} });
+  const buffer = await previewDocumentTemplate({ id: req.params.id, body: {} });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Length", buffer.length);
   res.setHeader("Content-Disposition", `inline; filename="${req.params.id}-preview.pdf"`);
@@ -609,7 +616,7 @@ router.get("/operator/templates/:id/preview", requireRoleStrict(["operator"]), a
 }));
 
 router.post("/operator/templates/:id/preview", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
-  const buffer = await previewTemplate({ id: req.params.id, body: req.body });
+  const buffer = await previewDocumentTemplate({ id: req.params.id, body: req.body });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Length", buffer.length);
   res.setHeader("Content-Disposition", `inline; filename="${req.params.id}-preview.pdf"`);

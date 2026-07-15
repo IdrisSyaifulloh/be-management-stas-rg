@@ -19,7 +19,7 @@ const {
 const PAGE_WIDTH = 842.25;
 const PAGE_HEIGHT = 595.5;
 const MAX_TEMPLATE_PDF_BYTES = 8 * 1024 * 1024;
-const TEMPLATE_KEYS = ["certificate_completed_internship", "certificate_completed_research"];
+const TEMPLATE_KEYS = ["certificate_completed_internship", "certificate_completed_research", "completion_letter_completed_internship"];
 const MONTHS_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
 
 const CONTENT_CONFIG = {
