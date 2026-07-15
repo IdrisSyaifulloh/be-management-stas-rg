@@ -130,6 +130,7 @@ function mapCaseRow(row) {
     completedAt: row.completed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    certificateCount: Number(row.certificate_count || 0),
     completionDocument: mapDocument(row, "completion"),
     capabilities: {
       canUploadCompletion: row.case_status === "pending" && !row.completion_document_id,
@@ -1125,9 +1126,16 @@ async function listCases(rawQuery) {
       ORDER BY c.created_at DESC, c.id DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}
     )
-    SELECT f.total_count, rows.*
+    SELECT f.total_count, rows.*,
+           COALESCE(project_counts.certificate_count, 0) AS certificate_count
     FROM filtered f
     JOIN LATERAL (${CASE_SELECT} WHERE c.id = f.id) rows ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS certificate_count
+      FROM dc_final_activity_case_projects cp
+      WHERE cp.final_activity_case_id = f.id
+        AND cp.certificate_required = TRUE
+    ) project_counts ON TRUE
     ORDER BY rows.created_at DESC, rows.id DESC
     `,
     params
