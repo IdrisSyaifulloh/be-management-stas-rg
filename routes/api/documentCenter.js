@@ -49,6 +49,14 @@ const {
   uploadCompletionDraft,
   uploadCertificateDraft
 } = require("../../utils/documentCenterFinalActivity");
+const {
+  listTemplates,
+  detailTemplate,
+  uploadTemplateVersion,
+  activateTemplateVersion,
+  previewTemplate,
+  generateCertificateDraft
+} = require("../../utils/documentCenterCertificateTemplates");
 
 const router = express.Router();
 
@@ -570,6 +578,42 @@ router.post("/operator/final-activity/cases/:id/completion-draft", requireRoleSt
 
 router.post("/operator/final-activity/case-projects/:id/certificate-draft", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.status(201).json(await uploadCertificateDraft({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.post("/operator/final-activity/case-projects/:id/generate-certificate-draft", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await generateCertificateDraft({ id: req.params.id, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.get("/operator/templates", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await listTemplates(req.query));
+}));
+
+router.get("/operator/templates/:id", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await detailTemplate(req.params.id));
+}));
+
+router.post("/operator/templates/:id/versions", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.status(201).json(await uploadTemplateVersion({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.post("/operator/templates/:id/activate", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await activateTemplateVersion({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.get("/operator/templates/:id/preview", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  const buffer = await previewTemplate({ id: req.params.id, body: {} });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Length", buffer.length);
+  res.setHeader("Content-Disposition", `inline; filename="${req.params.id}-preview.pdf"`);
+  res.end(buffer);
+}));
+
+router.post("/operator/templates/:id/preview", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  const buffer = await previewTemplate({ id: req.params.id, body: req.body });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Length", buffer.length);
+  res.setHeader("Content-Disposition", `inline; filename="${req.params.id}-preview.pdf"`);
+  res.end(buffer);
 }));
 
 router.post(

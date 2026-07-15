@@ -1,9 +1,11 @@
 const crypto = require("crypto");
+const fs = require("fs/promises");
 const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
-const { openPrivateDocumentVersion } = require("./documentCenterStorage");
+const { openPrivateDocumentVersion, STAGING_ROOT, buildStagingFilePath, buildVersionStorageKey, buildVersionFilePath, getVersionDirectory } = require("./documentCenterStorage");
 const { loadRequest, validateRequestDocumentContext, insertAudit } = require("./documentCenterOperatorRequests");
 const { markIssuedForPublishedDocument } = require("./documentCenterFinalActivity");
+const { renderPublishedCertificateVersion } = require("./documentCenterCertificateTemplates");
 
 const ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
 
@@ -54,6 +56,7 @@ async function lockPublishDocument(client, documentId) {
            od.current_version_number, od.snapshot_data,
            dd.id AS definition_id, dd.type_code, dd.is_active AS definition_active,
            dv.id AS version_id, dv.storage_key, dv.mime_type, dv.file_size,
+           dv.original_filename, dv.download_filename, dv.template_version_id,
            dv.snapshot_data AS version_snapshot_data,
            (
              SELECT COUNT(*)::int
@@ -115,6 +118,10 @@ async function publishDocument({ documentId, authUser, ip, body }) {
   const operatorUserId = requireSafeId(authUser?.id, "userId");
   let client;
   let transactionStarted = false;
+  let generatedFinal = null;
+  let generatedStagingPath = null;
+  let generatedFinalPath = null;
+  let generatedFileMoved = false;
 
   try {
     client = await pool.connect();
@@ -154,6 +161,45 @@ async function publishDocument({ documentId, authUser, ip, body }) {
     const romanMonth = ROMAN_MONTHS[publishTime.sequence_month - 1];
     if (!romanMonth) throw createHttpError(409, "Waktu penerbitan tidak valid.");
     const documentNumber = `${document.type_code}.${String(sequence).padStart(3, "0")}/STASRG/${romanMonth}/${publishTime.sequence_year}`;
+    generatedFinal = await renderPublishedCertificateVersion({
+      client,
+      document,
+      documentNumber,
+      issuedAt: publishTime.issued_at
+    });
+
+    let nextVersionNumber = document.current_version_number;
+    if (generatedFinal) {
+      nextVersionNumber = document.current_version_number + 1;
+      generatedStagingPath = buildStagingFilePath(`${crypto.randomUUID()}.pdf`);
+      const finalStorageKey = buildVersionStorageKey(safeDocumentId, nextVersionNumber);
+      generatedFinalPath = buildVersionFilePath(safeDocumentId, nextVersionNumber);
+      await fs.mkdir(STAGING_ROOT, { recursive: true });
+      await fs.writeFile(generatedStagingPath, generatedFinal.pdfBuffer, { flag: "wx" });
+      await client.query(
+        `
+        INSERT INTO dc_document_versions (
+          id, document_id, version_number, storage_key, original_filename,
+          download_filename, mime_type, file_size, checksum_sha256,
+          signer_snapshot, snapshot_data, version_reason, template_version_id
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,'application/pdf',$7,$8,$9::jsonb,$10::jsonb,'publish_final',$11)
+        `,
+        [
+          `DCVER-${crypto.randomUUID()}`,
+          safeDocumentId,
+          nextVersionNumber,
+          finalStorageKey,
+          document.original_filename || `${safeDocumentId}-final.pdf`,
+          `${safeDocumentId}-v${nextVersionNumber}.pdf`,
+          generatedFinal.pdfBuffer.length,
+          crypto.createHash("sha256").update(generatedFinal.pdfBuffer).digest("hex"),
+          JSON.stringify(generatedFinal.signer),
+          JSON.stringify(generatedFinal.snapshotData),
+          generatedFinal.templateVersionId
+        ]
+      );
+    }
 
     const updated = await client.query(
       `
@@ -162,6 +208,7 @@ async function publishDocument({ documentId, authUser, ip, body }) {
           document_number = $2,
           issued_at = $3,
           issued_by_user_id = $4,
+          current_version_number = $5,
           updated_at = NOW()
       WHERE id = $1
         AND status = 'draft'
@@ -170,7 +217,7 @@ async function publishDocument({ documentId, authUser, ip, body }) {
         AND issued_by_user_id IS NULL
       RETURNING id, status, document_number, issued_at, current_version_number
       `,
-      [safeDocumentId, documentNumber, publishTime.issued_at, operatorUserId]
+      [safeDocumentId, documentNumber, publishTime.issued_at, operatorUserId, nextVersionNumber]
     );
     if (updated.rowCount === 0) {
       throw createHttpError(409, "Dokumen belum memenuhi syarat untuk diterbitkan.");
@@ -191,10 +238,31 @@ async function publishDocument({ documentId, authUser, ip, body }) {
           documentId: safeDocumentId,
           documentNumber,
           definitionId: document.definition_id,
-          versionNumber: document.current_version_number
+          versionNumber: nextVersionNumber,
+          generatedFinal: Boolean(generatedFinal)
         })
       ]
     );
+
+    if (generatedFinal) {
+      await client.query(
+        `INSERT INTO audit_logs (id, user_id, user_role, action, target, ip, detail)
+         VALUES ($1, $2, 'Operator', 'Create', 'document_center_document', $3, $4::jsonb)`,
+        [
+          `AUD-DC-${crypto.randomUUID()}`,
+          operatorUserId,
+          ip || null,
+          JSON.stringify({
+            module: "document_center",
+            event: "final_activity_certificate_generated_final",
+            documentId: safeDocumentId,
+            documentNumber,
+            versionNumber: nextVersionNumber,
+            templateVersionId: generatedFinal.templateVersionId
+          })
+        ]
+      );
+    }
 
     if (linkedRequest) {
       const completed = await client.query(
@@ -218,6 +286,12 @@ async function publishDocument({ documentId, authUser, ip, body }) {
       ip
     });
 
+    if (generatedFinal) {
+      await fs.mkdir(getVersionDirectory(safeDocumentId), { recursive: true });
+      await fs.rename(generatedStagingPath, generatedFinalPath);
+      generatedFileMoved = true;
+    }
+
     await client.query("COMMIT");
     transactionStarted = false;
     const row = updated.rows[0];
@@ -231,6 +305,8 @@ async function publishDocument({ documentId, authUser, ip, body }) {
     };
   } catch (error) {
     if (transactionStarted) await client.query("ROLLBACK").catch(() => {});
+    if (generatedFileMoved && generatedFinalPath) await fs.unlink(generatedFinalPath).catch(() => {});
+    if (generatedStagingPath) await fs.unlink(generatedStagingPath).catch(() => {});
     if (error?.code === "23505") {
       throw createHttpError(409, "Nomor dokumen tidak dapat dialokasikan.");
     }
