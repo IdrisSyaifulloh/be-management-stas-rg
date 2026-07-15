@@ -36,13 +36,13 @@ const PRESETS = {
     activityType: "Magang",
     activityOutcome: "completed",
     layout: {
-      number: { x: 0, y: 171, width: 842.25, fontSize: 13 },
-      name: { x: 91, y: 216, width: 660, fontSize: 25, minFontSize: 18 },
-      paragraph: { x: 94, y: 258, width: 654, fontSize: 17, minFontSize: 13, lineHeight: 24, maxLines: 4 },
-      date: { x: 515, y: 405, width: 235, fontSize: 12 },
-      signerPosition: { x: 515, y: 427, width: 235, fontSize: 12 },
-      signerName: { x: 515, y: 501, width: 235, fontSize: 12 },
-      signerEmployeeNumber: { x: 515, y: 520, width: 235, fontSize: 12 }
+      number: { x: 126, y: 278, width: 150, fontSize: 10 },
+      name: { x: 315, y: 207, width: 430, fontSize: 23, minFontSize: 12 },
+      paragraph: { x: 390, y: 325, width: 390, fontSize: 14, minFontSize: 11, lineHeight: 19, maxLines: 4 },
+      date: { x: 150, y: 422, width: 260, fontSize: 11 },
+      signerPosition: { x: 150, y: 444, width: 260, fontSize: 10 },
+      signerName: { x: 150, y: 518, width: 300, fontSize: 9 },
+      signerEmployeeNumber: { x: 150, y: 537, width: 260, fontSize: 10 }
     }
   },
   certificate_completed_research: {
@@ -50,13 +50,13 @@ const PRESETS = {
     activityType: "Riset",
     activityOutcome: "completed",
     layout: {
-      number: { x: 0, y: 171, width: 842.25, fontSize: 13 },
-      name: { x: 91, y: 216, width: 660, fontSize: 25, minFontSize: 18 },
-      paragraph: { x: 92, y: 258, width: 658, fontSize: 17, minFontSize: 13, lineHeight: 24, maxLines: 4 },
-      date: { x: 515, y: 405, width: 235, fontSize: 12 },
-      signerPosition: { x: 515, y: 427, width: 235, fontSize: 12 },
-      signerName: { x: 515, y: 501, width: 235, fontSize: 12 },
-      signerEmployeeNumber: { x: 515, y: 520, width: 235, fontSize: 12 }
+      number: { x: 126, y: 278, width: 150, fontSize: 10 },
+      name: { x: 315, y: 207, width: 430, fontSize: 23, minFontSize: 12 },
+      paragraph: { x: 390, y: 325, width: 390, fontSize: 14, minFontSize: 11, lineHeight: 19, maxLines: 4 },
+      date: { x: 150, y: 422, width: 260, fontSize: 11 },
+      signerPosition: { x: 150, y: 444, width: 260, fontSize: 10 },
+      signerName: { x: 150, y: 518, width: 300, fontSize: 9 },
+      signerEmployeeNumber: { x: 150, y: 537, width: 260, fontSize: 10 }
     }
   }
 };
@@ -414,9 +414,6 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
 
   const dateText = issuedAt ? `${CONTENT_CONFIG.issuedCity}, ${formatDateId(issuedAt)}` : `${CONTENT_CONFIG.issuedCity}, TANGGAL TERBIT`;
   drawCenteredText(page, dateText, layout.date, regular, layout.date.fontSize);
-  drawCenteredText(page, CONTENT_CONFIG.signerPosition, layout.signerPosition, regular, layout.signerPosition.fontSize);
-  drawCenteredText(page, CONTENT_CONFIG.signerName, layout.signerName, bold, layout.signerName.fontSize);
-  drawCenteredText(page, CONTENT_CONFIG.signerEmployeeNumber, layout.signerEmployeeNumber, regular, layout.signerEmployeeNumber.fontSize);
   return Buffer.from(await pdf.save({ useObjectStreams: false }));
 }
 
