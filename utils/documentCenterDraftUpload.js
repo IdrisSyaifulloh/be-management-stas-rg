@@ -228,7 +228,10 @@ async function resolveParticipantSnapshots(participants, definition) {
   const periodsByStudentId = new Map(studentIds.map((studentId) => [studentId, []]));
   const periodResult = await pool.query(
     `
-    SELECT id, student_id, tipe, mulai, selesai, keterangan
+    SELECT id, student_id, tipe,
+           TO_CHAR(mulai, 'YYYY-MM-DD') AS mulai,
+           TO_CHAR(selesai, 'YYYY-MM-DD') AS selesai,
+           keterangan
     FROM student_periods
     WHERE student_id = ANY($1::text[])
     ORDER BY student_id ASC, mulai ASC, id ASC
