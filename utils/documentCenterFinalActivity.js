@@ -237,7 +237,7 @@ async function loadEligibleContext(client, { studentId, periodId }) {
     SELECT s.id AS student_id, s.user_id, s.nim, s.status AS student_status,
            s.tipe AS student_activity_type, u.name AS student_name, u.prodi,
            gs.id AS graduation_submission_id,
-           TO_CHAR(gs.graduation_completed_at, 'YYYY-MM-DD') AS completed_at,
+           TO_CHAR(COALESCE(sp.selesai, pp.project_end_date, gs.graduation_completed_at::date, CURRENT_DATE), 'YYYY-MM-DD') AS completed_at,
            sp.id AS period_id,
            COALESCE(sp.tipe, s.tipe) AS period_activity_type,
            TO_CHAR(COALESCE(sp.mulai, pp.project_start_date, s.bergabung, gs.graduation_completed_at::date), 'YYYY-MM-DD') AS period_start_date,
@@ -259,7 +259,6 @@ async function loadEligibleContext(client, { studentId, periodId }) {
     LEFT JOIN project_period pp ON pp.student_id = s.id
     WHERE s.id = $1
       AND s.status = 'Alumni'
-      AND gs.graduation_completed_at IS NOT NULL
       AND ${sourcePredicate}
     LIMIT 1
     `,
@@ -732,7 +731,6 @@ async function listEligible(rawQuery) {
   let periodParamIndex = null;
   const predicates = [
     "s.status = 'Alumni'",
-    "gs.graduation_completed_at IS NOT NULL",
     "s.tipe = $1"
   ];
   if (periodId) {
@@ -761,7 +759,7 @@ async function listEligible(rawQuery) {
              TO_CHAR(COALESCE(sp.mulai, pp.project_start_date, s.bergabung, gs.graduation_completed_at::date), 'YYYY-MM-DD') AS period_start_date,
              TO_CHAR(COALESCE(sp.selesai, pp.project_end_date, gs.graduation_completed_at::date), 'YYYY-MM-DD') AS period_end_date,
              COALESCE(sp.keterangan, pp.project_description, 'Periode dari relasi project mahasiswa') AS period_description,
-             TO_CHAR(gs.graduation_completed_at, 'YYYY-MM-DD') AS completed_at,
+             TO_CHAR(COALESCE(sp.selesai, pp.project_end_date, gs.graduation_completed_at::date, CURRENT_DATE), 'YYYY-MM-DD') AS completed_at,
              CASE
                WHEN sp.id IS NOT NULL THEN 'period:' || sp.id
                ELSE 'period:' || s.tipe || ':' ||
