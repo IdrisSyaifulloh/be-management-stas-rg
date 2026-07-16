@@ -251,11 +251,12 @@ async function hasProjectAccess({ userId, role, projectId }) {
     return result.rowCount > 0;
   }
 
+  // Mahasiswa (termasuk alumni dengan peran='Alumni') bisa akses riset mereka
   const result = await query(
     `
     SELECT 1
     FROM research_projects rp
-    LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $1 AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
+    LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $1
     LEFT JOIN board_access ba ON ba.project_id = rp.id AND ba.user_id = $1
     WHERE rp.id = $2
       AND (rm.user_id IS NOT NULL OR ba.user_id IS NOT NULL)
@@ -511,12 +512,12 @@ router.get(
         `
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text,
                rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date,
-               rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url
+               rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url,
+               rm.peran AS my_peran
         FROM research_projects rp
         JOIN research_memberships rm ON rm.project_id = rp.id
         WHERE rm.user_id = $1
           AND COALESCE(rm.status, 'Aktif') = 'Aktif'
-          AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
         ORDER BY rp.id ASC
         LIMIT 500
         `,

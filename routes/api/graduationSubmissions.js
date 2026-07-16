@@ -1099,8 +1099,9 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
     await client.query(
       `
       UPDATE research_memberships
-      SET status = 'Nonaktif',
-          selesai = COALESCE(selesai, CURRENT_DATE)
+      SET peran = 'Alumni',
+          selesai = COALESCE(selesai, CURRENT_DATE),
+          updated_at = NOW()
       WHERE user_id = $1
         AND member_type = 'Mahasiswa'
         AND COALESCE(status, 'Aktif') = 'Aktif'
