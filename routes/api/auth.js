@@ -167,7 +167,7 @@ router.post(
         jti: sessionId
       },
       env.jwtSecret,
-      { expiresIn: "8h" }
+      { expiresIn: "15m" }
     );
 
     await createJwtSession({
@@ -182,7 +182,7 @@ router.post(
     // Set httpOnly cookie (secure, not accessible via JavaScript/console)
     res.cookie("accessToken", token, {
       ...getAuthCookieOptions(),
-      maxAge: 8 * 60 * 60 * 1000  // 8 jam
+      maxAge: 15 * 60 * 1000  // 15 menit
     });
 
     return res.json({
