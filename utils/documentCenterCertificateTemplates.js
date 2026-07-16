@@ -574,13 +574,19 @@ function periodLabel(period) {
   return `${formatDateId(period.startDate)} sampai ${formatDateId(period.endDate)}`;
 }
 
+function certificateActivityType(caseRow, projectRow) {
+  if (caseRow.activity_type !== "Magang") return caseRow.activity_type;
+  return Number(projectRow.display_order || 0) === 0 ? "Magang" : "Riset";
+}
+
 function buildCertificateData(caseRow, projectRow) {
+  const activityType = certificateActivityType(caseRow, projectRow);
   return {
     studentName: caseRow.student_snapshot?.name || caseRow.legacy_student_id,
-    activityType: caseRow.activity_type,
+    activityType,
     periodLabel: periodLabel(caseRow.period_snapshot),
     projectTitle: projectRow.project_snapshot?.title || projectRow.project_snapshot?.name || projectRow.legacy_project_id,
-    projectRole: projectRow.project_snapshot?.role || projectRow.project_snapshot?.position || (caseRow.activity_type === "Riset" ? "anggota riset" : "peserta magang")
+    projectRole: projectRow.project_snapshot?.role || projectRow.project_snapshot?.position || (activityType === "Riset" ? "anggota riset" : "peserta magang")
   };
 }
 
@@ -622,11 +628,13 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     if (row.outcome !== "completed" || !["Magang", "Riset"].includes(row.activity_type) || row.certificate_required !== true || row.certificate_status !== "pending" || row.certificate_document_id || row.case_status === "revoked") {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
     }
-    const template = await loadActiveTemplateForCertificate(client, { definitionId: row.certificate_document_definition_id, activityType: row.activity_type, outcome: row.outcome });
+    const generatedActivityType = certificateActivityType(row, row);
+    const certificateData = buildCertificateData(row, row);
+    const template = await loadActiveTemplateForCertificate(client, { definitionId: row.certificate_document_definition_id, activityType: generatedActivityType, outcome: row.outcome });
     const opened = await openTemplateBackground(template);
     let pdfBuffer;
     try {
-      pdfBuffer = await renderCertificatePdf({ backgroundBytes: opened.bytes, templateKey: template.template_key, data: buildCertificateData(row, row) });
+      pdfBuffer = await renderCertificatePdf({ backgroundBytes: opened.bytes, templateKey: template.template_key, data: certificateData });
     } finally {
       await opened.close();
     }
@@ -643,12 +651,13 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       student: row.student_snapshot,
       period: row.period_snapshot,
       project: row.project_snapshot,
-      certificateData: buildCertificateData(row, row)
+      certificateData
     };
     const documentSnapshot = {
       generator: "certificate_template_v1",
       definitionId: row.certificate_document_definition_id,
-      activityType: row.activity_type,
+      activityType: generatedActivityType,
+      caseActivityType: row.activity_type,
       activityOutcome: row.outcome,
       caseId: row.final_activity_case_id,
       caseProjectId
