@@ -760,8 +760,21 @@ async function renderPublishedCertificateVersion({ client, document, documentNum
       `,
       [document.template_version_id]
     );
-    if (!templateResult.rowCount) throw httpError(409, "Template dokumen tidak tersedia.");
-    template = templateResult.rows[0];
+    if (templateResult.rowCount) {
+      template = templateResult.rows[0];
+    } else {
+      const certificateData = snapshot.certificateData || {};
+      const fallbackTemplateKey = snapshot.template?.key || (certificateData.activityType === "Magang"
+        ? "certificate_completed_internship"
+        : "certificate_completed_research");
+      const builtin = await readBuiltinTemplateBackground(fallbackTemplateKey);
+      template = {
+        template_key: fallbackTemplateKey,
+        version_id: null,
+        template_source: "builtin",
+        background_bytes: builtin.buffer
+      };
+    }
   } else if (snapshot.template?.source === "builtin" && snapshot.template?.key) {
     const builtin = await readBuiltinTemplateBackground(snapshot.template.key);
     template = {
@@ -771,7 +784,17 @@ async function renderPublishedCertificateVersion({ client, document, documentNum
       background_bytes: builtin.buffer
     };
   } else {
-    return null;
+    const certificateData = snapshot.certificateData || {};
+    const fallbackTemplateKey = certificateData.activityType === "Magang"
+      ? "certificate_completed_internship"
+      : "certificate_completed_research";
+    const builtin = await readBuiltinTemplateBackground(fallbackTemplateKey);
+    template = {
+      template_key: fallbackTemplateKey,
+      version_id: null,
+      template_source: "builtin",
+      background_bytes: builtin.buffer
+    };
   }
   const opened = await openTemplateBackground(template);
   try {
@@ -795,5 +818,6 @@ module.exports = {
   activateTemplateVersion,
   previewTemplate,
   generateCertificateDraft,
+  buildCertificateData,
   renderPublishedCertificateVersion
 };

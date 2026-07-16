@@ -202,17 +202,21 @@ async function publishPreparedDocument({
   issueBatch
 }) {
   const generatedFiles = [];
-  const generatedFinal = await renderPublishedCompletionLetterVersion({
-    client,
-    document,
-    documentNumber: issueBatch.documentNumber,
-    issuedAt: issueBatch.issuedAt
-  }) || await renderPublishedCertificateVersion({
-    client,
-    document,
-    documentNumber: issueBatch.documentNumber,
-    issuedAt: issueBatch.issuedAt
-  });
+  const isCompletionLetter = document.definition_id === "DCDEF-COMPLETE-NORMAL-01" ||
+    document.definition_id === "DCDEF-COMPLETE-EARLY-01";
+  const generatedFinal = isCompletionLetter
+    ? await renderPublishedCompletionLetterVersion({
+      client,
+      document,
+      documentNumber: issueBatch.documentNumber,
+      issuedAt: issueBatch.issuedAt
+    })
+    : await renderPublishedCertificateVersion({
+      client,
+      document,
+      documentNumber: issueBatch.documentNumber,
+      issuedAt: issueBatch.issuedAt
+    });
 
   let nextVersionNumber = document.current_version_number;
   if (generatedFinal) {

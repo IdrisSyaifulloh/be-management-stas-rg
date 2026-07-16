@@ -1,10 +1,26 @@
 const crypto = require("crypto");
+const fs = require("fs/promises");
 const { pool } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
 const { buildStudentKey } = require("./documentCenterIdentity");
 const { createDocumentCenterDraft } = require("./documentCenterDraftUpload");
-const { generateCertificateDraft } = require("./documentCenterCertificateTemplates");
-const { generateCompletionLetterDraft } = require("./documentCenterCompletionLetterTemplates");
+const {
+  generateCertificateDraft,
+  buildCertificateData,
+  renderPublishedCertificateVersion
+} = require("./documentCenterCertificateTemplates");
+const {
+  generateCompletionLetterDraft,
+  buildLetterData,
+  renderPublishedCompletionLetterVersion
+} = require("./documentCenterCompletionLetterTemplates");
+const {
+  STAGING_ROOT,
+  buildStagingFilePath,
+  buildVersionStorageKey,
+  buildVersionFilePath,
+  getVersionDirectory
+} = require("./documentCenterStorage");
 
 const COMPLETION_DEFINITION_ID = "DCDEF-COMPLETE-NORMAL-01";
 const CERTIFICATE_DEFINITION_ID = "DCDEF-CERT-NORMAL-01";
@@ -131,6 +147,7 @@ function mapCaseRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     certificateCount: Number(row.certificate_count || 0),
+    certificateSummary: Array.isArray(row.certificate_summary) ? row.certificate_summary : [],
     completionDocument: mapDocument(row, "completion"),
     capabilities: {
       canUploadCompletion: row.case_status === "pending" && !row.completion_document_id,
@@ -1182,8 +1199,22 @@ async function listCases(rawQuery) {
     FROM filtered f
     JOIN LATERAL (${CASE_SELECT} WHERE c.id = f.id) rows ON TRUE
     LEFT JOIN LATERAL (
-      SELECT COUNT(*)::int AS certificate_count
+      SELECT COUNT(*)::int AS certificate_count,
+             COALESCE(
+               jsonb_agg(
+                 jsonb_build_object(
+                   'id', cp.id,
+                   'status', cp.certificate_status,
+                   'documentNumber', od.document_number,
+                   'documentStatus', od.status,
+                   'documentId', od.id
+                 )
+                 ORDER BY cp.display_order, cp.id
+               ) FILTER (WHERE cp.certificate_required = TRUE),
+               '[]'::jsonb
+             ) AS certificate_summary
       FROM dc_final_activity_case_projects cp
+      LEFT JOIN dc_official_documents od ON od.id = cp.certificate_document_id
       WHERE cp.final_activity_case_id = f.id
         AND cp.certificate_required = TRUE
     ) project_counts ON TRUE
@@ -1315,6 +1346,340 @@ async function uploadCertificateDraft({ id, body, authUser, ip }) {
   return { document: result, case: await detailCase(project.final_activity_case_id) };
 }
 
+function optionalText(value, field, maxLength = 200) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") bad(field);
+  const normalized = value.trim();
+  if (normalized.length > maxLength || /[\x00-\x1F\x7F]/.test(normalized)) bad(field);
+  return normalized || null;
+}
+
+function optionalDateText(value, field) {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) bad(field);
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime()) || value !== date.toISOString().slice(0, 10)) bad(field);
+  return value;
+}
+
+function parseCorrectionBody(body) {
+  const payload = requirePlainObject(body, "body");
+  rejectUnexpectedFields(payload, new Set(["student", "period", "projects"]), "body");
+
+  const parsed = { student: {}, period: {}, projects: [] };
+  if (payload.student !== undefined) {
+    const student = requirePlainObject(payload.student, "student");
+    rejectUnexpectedFields(student, new Set(["name", "nim", "prodi"]), "student");
+    parsed.student.name = optionalText(student.name, "student.name", 160);
+    parsed.student.nim = optionalText(student.nim, "student.nim", 60);
+    parsed.student.prodi = optionalText(student.prodi, "student.prodi", 160);
+  }
+  if (payload.period !== undefined) {
+    const period = requirePlainObject(payload.period, "period");
+    rejectUnexpectedFields(period, new Set(["startDate", "endDate", "description"]), "period");
+    parsed.period.startDate = optionalDateText(period.startDate, "period.startDate");
+    parsed.period.endDate = optionalDateText(period.endDate, "period.endDate");
+    parsed.period.description = optionalText(period.description, "period.description", 240);
+    if (parsed.period.startDate && parsed.period.endDate && parsed.period.startDate > parsed.period.endDate) bad("period.endDate");
+  }
+  if (payload.projects !== undefined) {
+    if (!Array.isArray(payload.projects) || payload.projects.length > 20) bad("projects");
+    parsed.projects = payload.projects.map((item, index) => {
+      const project = requirePlainObject(item, `projects.${index}`);
+      rejectUnexpectedFields(project, new Set(["id", "title", "role", "joinedAt", "completedAt"]), `projects.${index}`);
+      const joinedAt = optionalDateText(project.joinedAt, `projects.${index}.joinedAt`);
+      const completedAt = optionalDateText(project.completedAt, `projects.${index}.completedAt`);
+      if (joinedAt && completedAt && joinedAt > completedAt) bad(`projects.${index}.completedAt`);
+      return {
+        id: safeId(project.id, `projects.${index}.id`),
+        title: optionalText(project.title, `projects.${index}.title`, 240),
+        role: optionalText(project.role, `projects.${index}.role`, 160),
+        joinedAt,
+        completedAt
+      };
+    });
+  }
+  if (
+    !Object.values(parsed.student).some((value) => value !== undefined) &&
+    !Object.values(parsed.period).some((value) => value !== undefined) &&
+    !parsed.projects.some((project) => Object.entries(project).some(([key, value]) => key !== "id" && value !== undefined))
+  ) {
+    bad("body");
+  }
+  return parsed;
+}
+
+function applyDefined(target, updates, mapping = {}) {
+  const next = { ...(target || {}) };
+  for (const [key, value] of Object.entries(updates || {})) {
+    if (value !== undefined) next[mapping[key] || key] = value;
+  }
+  return next;
+}
+
+function projectPeriodSnapshot(caseRow, projectRow) {
+  const project = projectRow?.project_snapshot || {};
+  return {
+    ...(caseRow.period_snapshot || {}),
+    startDate: project.joinedAt || caseRow.period_snapshot?.startDate || null,
+    endDate: project.completedAt || caseRow.period_snapshot?.endDate || null,
+    description: project.shortTitle || project.title || caseRow.period_snapshot?.description || null
+  };
+}
+
+async function loadDocumentForRegenerate(client, documentId) {
+  const result = await client.query(
+    `SELECT od.*, od.document_definition_id AS definition_id,
+            dv.id AS version_id, dv.original_filename, dv.template_version_id,
+            dv.signer_snapshot, dv.snapshot_data AS version_snapshot_data
+     FROM dc_official_documents od
+     JOIN dc_document_versions dv
+       ON dv.document_id = od.id
+      AND dv.version_number = od.current_version_number
+     WHERE od.id=$1
+     FOR UPDATE OF od`,
+    [documentId]
+  );
+  if (!result.rowCount) throw httpError(409, "Dokumen belum memiliki versi aktif.");
+  return result.rows[0];
+}
+
+async function insertRegeneratedVersion(client, { document, generated, reason }) {
+  const nextVersionNumber = Number(document.current_version_number) + 1;
+  const stagingPath = buildStagingFilePath(`${crypto.randomUUID()}.pdf`);
+  const finalStorageKey = buildVersionStorageKey(document.id, nextVersionNumber);
+  const finalPath = buildVersionFilePath(document.id, nextVersionNumber);
+  let stagingWritten = false;
+  try {
+    await fs.mkdir(STAGING_ROOT, { recursive: true });
+    await fs.writeFile(stagingPath, generated.pdfBuffer, { flag: "wx" });
+    stagingWritten = true;
+    await client.query(
+      `INSERT INTO dc_document_versions (
+         id, document_id, version_number, storage_key, original_filename,
+         download_filename, mime_type, file_size, checksum_sha256,
+         signer_snapshot, snapshot_data, version_reason, template_version_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,'application/pdf',$7,$8,$9::jsonb,$10::jsonb,$11,$12)`,
+      [
+        `DCVER-${crypto.randomUUID()}`,
+        document.id,
+        nextVersionNumber,
+        finalStorageKey,
+        document.original_filename || `${document.id}-corrected.pdf`,
+        `${document.id}-v${nextVersionNumber}.pdf`,
+        generated.pdfBuffer.length,
+        crypto.createHash("sha256").update(generated.pdfBuffer).digest("hex"),
+        JSON.stringify(generated.signer),
+        JSON.stringify(generated.snapshotData),
+        reason,
+        generated.templateVersionId
+      ]
+    );
+    await client.query(
+      `UPDATE dc_official_documents
+       SET current_version_number=$2, updated_at=NOW()
+       WHERE id=$1`,
+      [document.id, nextVersionNumber]
+    );
+    await fs.mkdir(getVersionDirectory(document.id), { recursive: true });
+    await fs.rename(stagingPath, finalPath);
+    stagingWritten = false;
+    return { versionNumber: nextVersionNumber, finalPath };
+  } catch (error) {
+    if (stagingWritten) await fs.unlink(stagingPath).catch(() => {});
+    throw error;
+  }
+}
+
+async function regenerateCompletionDocument(client, { caseRow, projectRows }) {
+  if (!caseRow.completion_document_id) return null;
+  const document = await loadDocumentForRegenerate(client, caseRow.completion_document_id);
+  if (document.status === "dicabut") return null;
+  const primaryProject = projectRows[0];
+  const primaryPeriod = projectPeriodSnapshot(caseRow, primaryProject);
+  const letterData = buildLetterData({
+    studentSnapshot: caseRow.student_snapshot,
+    periodSnapshot: primaryPeriod,
+    projectSnapshot: primaryProject?.project_snapshot || {}
+  });
+  const snapshot = {
+    ...(document.version_snapshot_data || {}),
+    student: caseRow.student_snapshot,
+    period: primaryPeriod,
+    project: primaryProject?.project_snapshot || null,
+    projects: projectRows.map((row) => row.project_snapshot),
+    letterData
+  };
+  let generated;
+  try {
+    generated = await renderPublishedCompletionLetterVersion({
+      client,
+      document: { ...document, version_snapshot_data: snapshot },
+      documentNumber: document.document_number,
+      issuedAt: document.issued_at
+    });
+  } catch (error) {
+    if (error?.statusCode) throw error;
+    throw httpError(409, `Render SKS gagal: ${error?.message || "template tidak dapat diproses."}`);
+  }
+  if (!generated) throw httpError(409, "Dokumen SKS tidak dapat diperbarui.");
+  try {
+    return { documentId: document.id, ...(await insertRegeneratedVersion(client, { document, generated, reason: "regenerate" })) };
+  } catch (error) {
+    if (error?.statusCode) throw error;
+    throw httpError(409, `Simpan versi SKS gagal: ${error?.message || "file tidak dapat disimpan."}`);
+  }
+}
+
+async function regenerateCertificateDocument(client, { caseRow, projectRow }) {
+  if (!projectRow.certificate_document_id) return null;
+  const document = await loadDocumentForRegenerate(client, projectRow.certificate_document_id);
+  if (document.status === "dicabut") return null;
+  const certificateCaseRow = { ...caseRow, period_snapshot: projectPeriodSnapshot(caseRow, projectRow) };
+  const certificateData = buildCertificateData(certificateCaseRow, projectRow);
+  const snapshot = {
+    ...(document.version_snapshot_data || {}),
+    student: caseRow.student_snapshot,
+    period: certificateCaseRow.period_snapshot,
+    project: projectRow.project_snapshot,
+    certificateData
+  };
+  let generated;
+  try {
+    generated = await renderPublishedCertificateVersion({
+      client,
+      document: { ...document, version_snapshot_data: snapshot },
+      documentNumber: document.document_number,
+      issuedAt: document.issued_at
+    });
+  } catch (error) {
+    if (error?.statusCode) throw error;
+    throw httpError(409, `Render sertifikat gagal: ${error?.message || "template tidak dapat diproses."}`);
+  }
+  if (!generated) throw httpError(409, "Sertifikat tidak dapat diperbarui.");
+  try {
+    return { documentId: document.id, ...(await insertRegeneratedVersion(client, { document, generated, reason: "regenerate" })) };
+  } catch (error) {
+    if (error?.statusCode) throw error;
+    throw httpError(409, `Simpan versi sertifikat gagal: ${error?.message || "file tidak dapat disimpan."}`);
+  }
+}
+
+async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
+  const caseId = safeId(id, "id");
+  const operatorUserId = requireSafeId(authUser?.id, "userId");
+  const parsed = parseCorrectionBody(body);
+  const client = await pool.connect();
+  const generatedFiles = [];
+  try {
+    await client.query("BEGIN");
+    const caseResult = await client.query("SELECT * FROM dc_final_activity_cases WHERE id=$1 FOR UPDATE", [caseId]);
+    if (!caseResult.rowCount) throw httpError(404, "Case tidak ditemukan.");
+    let caseRow = caseResult.rows[0];
+    if (!["draft_created", "issued"].includes(caseRow.case_status)) throw httpError(409, "Data dokumen belum dapat diperbarui.");
+
+    const projectResult = await client.query(
+      "SELECT * FROM dc_final_activity_case_projects WHERE final_activity_case_id=$1 ORDER BY display_order, id FOR UPDATE",
+      [caseId]
+    );
+    if (!projectResult.rowCount) throw httpError(409, "Case belum memiliki project.");
+    let projectRows = projectResult.rows;
+
+    const nextStudent = applyDefined(caseRow.student_snapshot, parsed.student);
+    const nextPeriod = applyDefined(caseRow.period_snapshot, parsed.period);
+    await client.query(
+      `UPDATE dc_final_activity_cases
+       SET student_snapshot=$2::jsonb, period_snapshot=$3::jsonb, updated_at=NOW()
+       WHERE id=$1`,
+      [caseId, JSON.stringify(nextStudent), JSON.stringify(nextPeriod)]
+    );
+    caseRow = { ...caseRow, student_snapshot: nextStudent, period_snapshot: nextPeriod };
+
+    for (const update of parsed.projects) {
+      const current = projectRows.find((row) => row.id === update.id);
+      if (!current) throw httpError(404, "Project case tidak ditemukan.", "projects.id");
+      const nextProjectSnapshot = applyDefined(
+        current.project_snapshot,
+        update,
+        { title: "title", role: "role", joinedAt: "joinedAt", completedAt: "completedAt" }
+      );
+      await client.query(
+        `UPDATE dc_final_activity_case_projects
+         SET project_snapshot=$2::jsonb, updated_at=NOW()
+         WHERE id=$1`,
+        [update.id, JSON.stringify(nextProjectSnapshot)]
+      );
+      projectRows = projectRows.map((row) => row.id === update.id ? { ...row, project_snapshot: nextProjectSnapshot } : row);
+    }
+
+    const completion = await regenerateCompletionDocument(client, { caseRow, projectRows });
+    if (completion?.finalPath) generatedFiles.push(completion.finalPath);
+    const certificates = [];
+    for (const projectRow of projectRows) {
+      const certificate = await regenerateCertificateDocument(client, { caseRow, projectRow });
+      if (certificate?.finalPath) generatedFiles.push(certificate.finalPath);
+      if (certificate) certificates.push(certificate);
+    }
+
+    const participantUpdates = [
+      completion?.documentId,
+      ...certificates.map((item) => item.documentId)
+    ].filter(Boolean);
+    for (const documentId of participantUpdates) {
+      const project = projectRows.find((row) => row.certificate_document_id === documentId) || projectRows[0];
+      const participantPeriod = projectPeriodSnapshot(caseRow, project);
+      await client.query(
+        `UPDATE dc_official_document_students
+         SET name_snapshot=$2,
+             nim_snapshot=$3,
+             prodi_snapshot=$4,
+             project_name_snapshot=$5,
+             period_snapshot=$6,
+             participant_role=$7
+         WHERE document_id=$1`,
+        [
+          documentId,
+          caseRow.student_snapshot?.name || null,
+          caseRow.student_snapshot?.nim || null,
+          caseRow.student_snapshot?.prodi || null,
+          project?.project_snapshot?.title || null,
+          periodText(participantPeriod),
+          project?.project_snapshot?.role || "Peserta"
+        ]
+      );
+    }
+
+    await insertAudit(client, {
+      authUser: { id: operatorUserId },
+      ip,
+      event: "final_activity_document_dynamic_data_updated",
+      target: "document_center_final_activity",
+      detail: {
+        caseId,
+        completionDocumentId: caseRow.completion_document_id || null,
+        certificateDocumentIds: certificates.map((item) => item.documentId),
+        projectIds: parsed.projects.map((item) => item.id)
+      }
+    });
+    await client.query("COMMIT");
+    return {
+      case: await detailCase(caseId),
+      regenerated: {
+        completionDocument: completion ? { id: completion.documentId, versionNumber: completion.versionNumber } : null,
+        certificateDocuments: certificates.map((item) => ({ id: item.documentId, versionNumber: item.versionNumber }))
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    for (const file of generatedFiles) await fs.unlink(file).catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function markIssuedForPublishedDocument(client, { documentId, authUser, ip }) {
   const completion = await client.query("SELECT * FROM dc_final_activity_cases WHERE completion_document_id=$1 FOR UPDATE", [documentId]);
   if (completion.rowCount) {
@@ -1342,5 +1707,6 @@ module.exports = {
   detailCase,
   uploadCompletionDraft,
   uploadCertificateDraft,
+  updateFinalActivityDynamicData,
   markIssuedForPublishedDocument
 };

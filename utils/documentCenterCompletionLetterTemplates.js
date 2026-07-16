@@ -670,17 +670,30 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
 
 async function renderPublishedCompletionLetterVersion({ client, document, documentNumber, issuedAt }) {
   const snapshot = document.version_snapshot_data || {};
-  if (snapshot.generator !== "completion_letter_template_v1") return null;
-  if (!snapshot.letterData) throw httpError(409, "Template dokumen tidak tersedia.");
-  const template = await loadCompletionTemplateVersion(client, {
-    templateId: snapshot.template?.id || TEMPLATE_ID,
-    versionId: document.template_version_id || (snapshot.template?.source === "builtin" ? BUILTIN_VERSION_ID : null)
+  const letterData = snapshot.letterData || buildLetterData({
+    studentSnapshot: snapshot.student,
+    periodSnapshot: snapshot.period,
+    projectSnapshot: snapshot.project,
+    projectSnapshots: snapshot.projects
   });
+  let template;
+  try {
+    template = await loadCompletionTemplateVersion(client, {
+      templateId: snapshot.template?.id || TEMPLATE_ID,
+      versionId: snapshot.template?.source === "builtin" ? BUILTIN_VERSION_ID : document.template_version_id || null
+    });
+  } catch (error) {
+    if (!document.template_version_id || error?.statusCode !== 404) throw error;
+    template = await loadCompletionTemplateVersion(client, {
+      templateId: TEMPLATE_ID,
+      versionId: BUILTIN_VERSION_ID
+    });
+  }
   if (template.template_key !== TEMPLATE_KEY) throw httpError(409, "Template dokumen tidak tersedia.");
   const opened = await openTemplateBytes(template);
   try {
     const finalLetterData = {
-      ...snapshot.letterData,
+      ...letterData,
       documentNumber,
       issuedCity: CONTENT_CONFIG.issuedCity,
       issuedDate: formatDateId(issuedAt)
