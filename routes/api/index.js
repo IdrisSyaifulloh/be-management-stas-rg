@@ -35,10 +35,24 @@ const { requireRoleStrict } = require("../../utils/roleGuard");
 
 const router = express.Router();
 
+const requireStudentsOperatorOrDosen = requireRoleStrict(["operator", "dosen"]);
+const STUDENT_OWN_DOCUMENT_UPLOAD_PATH = /^\/[^/]+\/documents\/[^/]+\/?$/;
+
+function requireStudentsAccess(req, res, next) {
+  const role = String(req.authUser?.role || "").trim().toLowerCase();
+  const isOwnDocumentUpload = req.method === "PUT" && STUDENT_OWN_DOCUMENT_UPLOAD_PATH.test(req.path || "");
+
+  if (role === "mahasiswa" && isOwnDocumentUpload) {
+    return next();
+  }
+
+  return requireStudentsOperatorOrDosen(req, res, next);
+}
+
 router.use("/health", healthRouter);
 router.use("/auth", authRouter);
 
-router.use("/students", requireRoleStrict(["operator", "dosen"]), studentsRouter);
+router.use("/students", requireStudentsAccess, studentsRouter);
 router.use("/operators", operatorsRouter);
 router.use("/lecturers", requireRoleStrict(["operator", "dosen"]), lecturersRouter);
 router.use("/research", researchRouter);
