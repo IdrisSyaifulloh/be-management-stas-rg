@@ -952,8 +952,12 @@ router.put(
   asyncHandler(async (req, res) => {
     await ensureStudentColumns();
 
-    if (req.authUser?.role !== "operator") {
-      return res.status(403).json({ message: "Upload dokumen mahasiswa hanya bisa dilakukan admin/operator." });
+    const role = req.authUser?.role;
+    const isMahasiswa = role === "mahasiswa";
+    const isOperator = role === "operator";
+
+    if (!isMahasiswa && !isOperator) {
+      return res.status(403).json({ message: "Upload dokumen mahasiswa hanya bisa dilakukan oleh mahasiswa (dokumen sendiri) atau operator." });
     }
 
     const id = requireSafeId(req.params.id);
@@ -977,6 +981,11 @@ router.put(
 
     if (studentResult.rowCount === 0) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    // Mahasiswa hanya boleh upload dokumen milik dirinya sendiri
+    if (isMahasiswa && studentResult.rows[0].user_id !== req.authUser.id) {
+      return res.status(403).json({ message: "Anda hanya bisa mengupload dokumen milik Anda sendiri." });
     }
 
     const student = studentResult.rows[0];

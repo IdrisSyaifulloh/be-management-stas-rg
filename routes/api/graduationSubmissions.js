@@ -806,10 +806,9 @@ router.post("/:id/allow-graduation", asyncHandler(async (req, res) => {
     );
 
     const reviewStatus = computeSubmissionReviewStatus(projectsResult.rows);
-    if (reviewStatus !== "Valid") {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Semua link berkas harus ACC dulu sebelum mahasiswa diizinkan lulus." });
-    }
+    const reviewNote = reviewStatus === "Valid"
+      ? "Semua link sudah ACC. Mahasiswa sudah diizinkan klik Jadi Alumni STAS-RG."
+      : "Admin memberikan izin lulus meskipun belum semua link ACC. Mahasiswa sudah diizinkan klik Jadi Alumni STAS-RG.";
 
     await client.query(
       `
@@ -817,13 +816,13 @@ router.post("/:id/allow-graduation", asyncHandler(async (req, res) => {
       SET status = 'Valid',
           reviewed_by = $2,
           reviewed_at = NOW(),
-          review_note = 'Semua link sudah ACC. Mahasiswa sudah diizinkan klik Jadi Alumni STAS-RG.',
+          review_note = $3,
           graduation_allowed_by = $2,
           graduation_allowed_at = COALESCE(graduation_allowed_at, NOW()),
           updated_at = NOW()
       WHERE id = $1
       `,
-      [submissionId, req.authUser.id]
+      [submissionId, req.authUser.id, reviewNote]
     );
 
     await client.query(
