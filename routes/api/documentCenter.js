@@ -562,7 +562,23 @@ router.get("/operator/final-activity/early-exit/eligible", requireRoleStrict(["o
 }));
 
 router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
-  res.status(201).json(await createFinalActivityCases({ body: req.body, authUser: req.authUser, ip: req.ip }));
+  const result = await createFinalActivityCases({ body: req.body, authUser: req.authUser, ip: req.ip });
+  const documentIds = [];
+  for (const item of result.items || []) {
+    if (item?.completionDraft?.documentId) documentIds.push(item.completionDraft.documentId);
+    for (const draft of item?.certificateDrafts || []) {
+      if (draft?.documentId) documentIds.push(draft.documentId);
+    }
+  }
+  const uniqueDocumentIds = [...new Set(documentIds)];
+  if (uniqueDocumentIds.length) {
+    result.autoPublish = await publishDocumentBatch({
+      authUser: req.authUser,
+      ip: req.ip,
+      body: { documentIds: uniqueDocumentIds }
+    });
+  }
+  res.status(201).json(result);
 }));
 
 router.post("/operator/final-activity/early-exit/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
