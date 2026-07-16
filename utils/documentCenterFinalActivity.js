@@ -215,7 +215,7 @@ async function loadEligibleContext(client, { studentId, periodId }) {
   const periodPredicate = periodId ? "AND sp.id = $2" : "";
   const sourcePredicate = periodId
     ? "sp.id IS NOT NULL"
-    : "(sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR s.bergabung IS NOT NULL)";
+    : "(sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR pp.project_end_date IS NOT NULL OR s.bergabung IS NOT NULL OR gs.graduation_completed_at IS NOT NULL)";
   const params = periodId ? [studentId, periodId] : [studentId];
   const result = await client.query(
     `
@@ -812,7 +812,7 @@ async function listEligible(rawQuery) {
           )
       ) pp ON TRUE
       WHERE ${predicates.join(" AND ")}
-        AND (sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR s.bergabung IS NOT NULL)
+        AND (sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR pp.project_end_date IS NOT NULL OR s.bergabung IS NOT NULL OR gs.graduation_completed_at IS NOT NULL)
       ORDER BY u.name ASC, s.id ASC, sp.mulai DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}
     )
