@@ -220,20 +220,25 @@ async function loadEligibleContext(client, { studentId, periodId }) {
   const result = await client.query(
     `
     WITH project_period AS (
-      SELECT gsp.student_id,
+      SELECT ps.id AS student_id,
              MIN(rm.bergabung) AS project_start_date,
              MAX(COALESCE(rm.selesai, gs.graduation_completed_at::date, CURRENT_DATE)) AS project_end_date,
-             STRING_AGG(DISTINCT COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id), ', ' ORDER BY COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id)) AS project_description
-      FROM graduation_submission_projects gsp
-      JOIN graduation_submissions gs ON gs.id = gsp.submission_id
-      JOIN students ps ON ps.id = gsp.student_id
+             STRING_AGG(DISTINCT COALESCE(rp.short_title, rp.title, gsp.project_title, rm.project_id), ', ' ORDER BY COALESCE(rp.short_title, rp.title, gsp.project_title, rm.project_id)) AS project_description
+      FROM students ps
+      JOIN graduation_submissions gs ON gs.student_id = ps.id
       JOIN research_memberships rm
         ON rm.user_id = ps.user_id
-       AND rm.project_id = gsp.project_id
        AND rm.member_type = 'Mahasiswa'
-      JOIN research_projects rp ON rp.id = gsp.project_id
-      WHERE gsp.student_id = $1
-      GROUP BY gsp.student_id
+      JOIN research_projects rp ON rp.id = rm.project_id
+      LEFT JOIN graduation_submission_projects gsp
+        ON gsp.student_id = ps.id
+       AND gsp.project_id = rm.project_id
+      WHERE ps.id = $1
+        AND (
+          NOT EXISTS (SELECT 1 FROM graduation_submission_projects WHERE student_id = ps.id)
+          OR gsp.project_id IS NOT NULL
+        )
+      GROUP BY ps.id
     )
     SELECT s.id AS student_id, s.user_id, s.nim, s.status AS student_status,
            s.tipe AS student_activity_type, u.name AS student_name, u.prodi,
@@ -271,21 +276,31 @@ async function loadEligibleContext(client, { studentId, periodId }) {
 async function loadEligibleProjects(client, studentId) {
   const result = await client.query(
     `
-    SELECT DISTINCT gsp.project_id, gsp.project_title AS graduation_project_title,
+    WITH has_graduation_projects AS (
+      SELECT EXISTS (
+        SELECT 1
+        FROM graduation_submission_projects
+        WHERE student_id = $1
+      ) AS has_projects
+    )
+    SELECT DISTINCT rm.project_id, gsp.project_title AS graduation_project_title,
            rp.title AS project_title, rp.short_title AS project_short_title,
            rp.period_text AS project_period_text, rp.status AS project_status,
            rm.status AS membership_status, rm.peran AS project_role,
            TO_CHAR(rm.bergabung, 'YYYY-MM-DD') AS project_joined_at,
            TO_CHAR(rm.selesai, 'YYYY-MM-DD') AS project_completed_at
-    FROM graduation_submission_projects gsp
-    JOIN students s ON s.id = gsp.student_id
+    FROM students s
     JOIN research_memberships rm
       ON rm.user_id = s.user_id
-     AND rm.project_id = gsp.project_id
      AND rm.member_type = 'Mahasiswa'
-    JOIN research_projects rp ON rp.id = gsp.project_id
-    WHERE gsp.student_id = $1
-    ORDER BY project_short_title, project_title, gsp.project_id
+    JOIN research_projects rp ON rp.id = rm.project_id
+    LEFT JOIN graduation_submission_projects gsp
+      ON gsp.student_id = s.id
+     AND gsp.project_id = rm.project_id
+    CROSS JOIN has_graduation_projects hgp
+    WHERE s.id = $1
+      AND (hgp.has_projects = FALSE OR gsp.project_id IS NOT NULL)
+    ORDER BY project_short_title, project_title, rm.project_id
     `,
     [studentId]
   );
@@ -783,14 +798,18 @@ async function listEligible(rawQuery) {
       LEFT JOIN LATERAL (
         SELECT MIN(rm.bergabung) AS project_start_date,
                MAX(COALESCE(rm.selesai, gs.graduation_completed_at::date, CURRENT_DATE)) AS project_end_date,
-               STRING_AGG(DISTINCT COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id), ', ' ORDER BY COALESCE(rp.short_title, rp.title, gsp.project_title, gsp.project_id)) AS project_description
-        FROM graduation_submission_projects gsp
-        JOIN research_memberships rm
-          ON rm.user_id = s.user_id
-         AND rm.project_id = gsp.project_id
-         AND rm.member_type = 'Mahasiswa'
-        JOIN research_projects rp ON rp.id = gsp.project_id
-        WHERE gsp.student_id = s.id
+               STRING_AGG(DISTINCT COALESCE(rp.short_title, rp.title, gsp.project_title, rm.project_id), ', ' ORDER BY COALESCE(rp.short_title, rp.title, gsp.project_title, rm.project_id)) AS project_description
+        FROM research_memberships rm
+        JOIN research_projects rp ON rp.id = rm.project_id
+        LEFT JOIN graduation_submission_projects gsp
+          ON gsp.student_id = s.id
+         AND gsp.project_id = rm.project_id
+        WHERE rm.user_id = s.user_id
+          AND rm.member_type = 'Mahasiswa'
+          AND (
+            NOT EXISTS (SELECT 1 FROM graduation_submission_projects WHERE student_id = s.id)
+            OR gsp.project_id IS NOT NULL
+          )
       ) pp ON TRUE
       WHERE ${predicates.join(" AND ")}
         AND (sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR s.bergabung IS NOT NULL)
@@ -808,7 +827,7 @@ async function listEligible(rawQuery) {
      AND c.outcome = 'completed'
     LEFT JOIN LATERAL (
       SELECT jsonb_agg(jsonb_build_object(
-        'id', gsp.project_id,
+        'id', rm.project_id,
         'title', rp.title,
         'shortTitle', rp.short_title,
         'role', rm.peran,
@@ -817,11 +836,15 @@ async function listEligible(rawQuery) {
         'joinedAt', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
         'completedAt', TO_CHAR(rm.selesai, 'YYYY-MM-DD')
       ) ORDER BY COALESCE(rp.short_title, rp.title), rp.id) AS items
-      FROM graduation_submission_projects gsp
-      JOIN students s ON s.id = gsp.student_id
-      JOIN research_memberships rm ON rm.user_id = s.user_id AND rm.project_id = gsp.project_id AND rm.member_type = 'Mahasiswa'
-      JOIN research_projects rp ON rp.id = gsp.project_id
-      WHERE gsp.student_id = f.student_id
+      FROM students ps
+      JOIN research_memberships rm ON rm.user_id = ps.user_id AND rm.member_type = 'Mahasiswa'
+      JOIN research_projects rp ON rp.id = rm.project_id
+      LEFT JOIN graduation_submission_projects gsp ON gsp.student_id = ps.id AND gsp.project_id = rm.project_id
+      WHERE ps.id = f.student_id
+        AND (
+          NOT EXISTS (SELECT 1 FROM graduation_submission_projects WHERE student_id = ps.id)
+          OR gsp.project_id IS NOT NULL
+        )
     ) projects ON TRUE
     ORDER BY f.student_name ASC, f.student_id ASC, f.period_start_date DESC
     `,
