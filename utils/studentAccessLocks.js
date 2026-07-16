@@ -511,6 +511,11 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
   await ensureStudentAccessLockTable();
   const student = await resolveStudentRecord(studentIdOrUserId);
   if (!student) return null;
+
+  // Mahasiswa yang sudah tidak aktif (mengundurkan diri, alumni, dll.)
+  // tidak perlu kena access lock apapun — mereka tidak perlu absen lagi.
+  if (student.status && student.status !== 'Aktif') return null;
+
   const settings = await getSettingsAsync();
   if (respectGlobalSetting && !areStudentAccessLocksEnabled(settings)) {
     return null;

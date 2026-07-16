@@ -10,7 +10,7 @@ async function resolveStudentRecord(studentIdOrUserId) {
 
   const result = await query(
     `
-    SELECT s.id, s.user_id, s.nim, u.name
+    SELECT s.id, s.user_id, s.nim, s.status, u.name
     FROM students s
     JOIN users u ON u.id = s.user_id
     WHERE s.id = $1 OR s.user_id = $1
