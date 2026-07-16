@@ -47,7 +47,8 @@ const {
   listCases: listFinalActivityCases,
   detailCase: detailFinalActivityCase,
   uploadCompletionDraft,
-  uploadCertificateDraft
+  uploadCertificateDraft,
+  updateFinalActivityDynamicData
 } = require("../../utils/documentCenterFinalActivity");
 const {
   listTemplates,
@@ -440,6 +441,7 @@ router.get(
     const params = [];
 
     addFilter(predicates, params, options.status, (index) => `od.status = $${index}`);
+    if (!options.status) predicates.push("od.status <> 'dicabut'");
     addFilter(predicates, params, options.documentPurpose, (index) => `dd.document_purpose = $${index}`);
     addFilter(predicates, params, typeCode, (index) => `dd.type_code = $${index}`);
     addFilter(predicates, params, options.projectKey, (index) => `EXISTS (SELECT 1 FROM dc_official_document_students ods_project WHERE ods_project.document_id = od.id AND ods_project.project_key = $${index})`);
@@ -573,6 +575,10 @@ router.get("/operator/final-activity/cases", requireRoleStrict(["operator"]), as
 
 router.get("/operator/final-activity/cases/:id", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.json(await detailFinalActivityCase(req.params.id));
+}));
+
+router.patch("/operator/final-activity/cases/:id/dynamic-data", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await updateFinalActivityDynamicData({ id: req.params.id, body: req.body, authUser: req.authUser, ip: req.ip }));
 }));
 
 router.post("/operator/final-activity/cases/:id/completion-draft", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
