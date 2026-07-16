@@ -11,6 +11,7 @@ const {
 } = require("../../utils/securityValidation");
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 const crypto = require("crypto");
+const { createNotification } = require("../../utils/notificationService");
 const {
   ensureStudentDocumentsTable,
   fetchStudentDocuments,
@@ -23,6 +24,30 @@ const {
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
 let ensureStudentPeriodsPromise = null;
+
+async function notifyOperatorsStudentDocumentUpload({ student, definition, uploaded, senderUserId }) {
+  const operatorsResult = await query(
+    "SELECT id FROM users WHERE role IN ('operator', 'admin') AND is_active = TRUE"
+  );
+
+  if (operatorsResult.rowCount === 0) return;
+
+  const studentName = student?.student_name || student?.nim || "Mahasiswa";
+  const fileSuffix = uploaded?.fileName ? ` (${uploaded.fileName})` : "";
+
+  await Promise.all(
+    operatorsResult.rows.map((row) =>
+      createNotification({
+        recipientUserId: row.id,
+        senderUserId,
+        type: "dokumen",
+        title: "Dokumen Mahasiswa Baru",
+        body: `${studentName} mengunggah ${definition.label}${fileSuffix}.`,
+        eventId: "dokumen"
+      }).catch(() => null)
+    )
+  );
+}
 
 async function ensureStudentColumns() {
   if (!ensureStudentColumnsPromise) {
@@ -971,9 +996,10 @@ router.put(
 
     const studentResult = await query(
       `
-      SELECT id, user_id, status
-      FROM students
-      WHERE id = $1 OR user_id = $1
+      SELECT s.id, s.user_id, s.status, s.nim, u.name AS student_name
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.id = $1 OR s.user_id = $1
       LIMIT 1
       `,
       [id]
@@ -1065,6 +1091,15 @@ router.put(
     }
 
     const documents = await fetchStudentDocuments(student.id, student.status);
+
+    if (isMahasiswa) {
+      await notifyOperatorsStudentDocumentUpload({
+        student,
+        definition,
+        uploaded,
+        senderUserId: req.authUser?.id || student.user_id || null
+      }).catch(() => null);
+    }
 
     res.json({
       message: "Dokumen mahasiswa berhasil diunggah.",
