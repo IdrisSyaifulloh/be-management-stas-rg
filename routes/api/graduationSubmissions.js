@@ -279,8 +279,8 @@ function buildProjectResponse({ student, submission, activeProjects, savedProjec
     graduationAllowed: Boolean(submission?.graduation_allowed_at),
     graduation_allowed: Boolean(submission?.graduation_allowed_at),
     canSubmit: projects.length > 0 && student.status !== "Alumni" && submissionStatus !== "Valid",
-    canBecomeAlumni: student.status !== "Alumni" && submissionStatus === "Valid" && Boolean(submission?.graduation_allowed_at),
-    can_become_alumni: student.status !== "Alumni" && submissionStatus === "Valid" && Boolean(submission?.graduation_allowed_at)
+    canBecomeAlumni: student.status !== "Alumni" && Boolean(submission?.graduation_allowed_at),
+    can_become_alumni: student.status !== "Alumni" && Boolean(submission?.graduation_allowed_at)
   };
 }
 
@@ -1082,11 +1082,9 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
       [submission.id]
     );
 
-    const reviewStatus = computeSubmissionReviewStatus(projectsResult.rows);
-    if (reviewStatus !== "Valid") {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Semua link berkas harus ACC dulu sebelum menjadi Alumni STAS-RG." });
-    }
+    // Jika admin sudah memberi izin lulus (graduation_allowed_at terisi),
+    // mahasiswa diizinkan menjadi Alumni meskipun belum semua link ACC.
+    // Guard graduation_allowed_at di atas sudah cukup sebagai penjaga utama.
 
     await client.query(
       `
