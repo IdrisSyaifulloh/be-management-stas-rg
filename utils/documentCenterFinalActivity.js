@@ -808,11 +808,14 @@ async function listEligible(rawQuery) {
      AND c.outcome = 'completed'
     LEFT JOIN LATERAL (
       SELECT jsonb_agg(jsonb_build_object(
+        'id', gsp.project_id,
         'title', rp.title,
         'shortTitle', rp.short_title,
         'role', rm.peran,
         'status', rp.status,
-        'membershipStatus', rm.status
+        'membershipStatus', rm.status,
+        'joinedAt', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
+        'completedAt', TO_CHAR(rm.selesai, 'YYYY-MM-DD')
       ) ORDER BY COALESCE(rp.short_title, rp.title), rp.id) AS items
       FROM graduation_submission_projects gsp
       JOIN students s ON s.id = gsp.student_id
@@ -856,7 +859,9 @@ async function insertAudit(client, { authUser, ip, event, target, detail }) {
 async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = false }) {
   const studentId = safeId(item.studentId, "studentId");
   const periodId = item.periodId || null;
+  const primaryProjectId = item.primaryProjectId || null;
   if (periodId) safeId(periodId, "periodId");
+  if (primaryProjectId) safeId(primaryProjectId, "primaryProjectId");
   if (!periodId && !allowProjectPeriodFallback) bad("periodId");
   const client = await pool.connect();
   try {
@@ -869,6 +874,22 @@ async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = 
       return { studentId, periodId, status: "invalid", message: "Mahasiswa/periode tidak eligible." };
     }
     const projects = await loadEligibleProjects(client, studentId);
+    let orderedProjects = projects;
+    if (context.period_activity_type === "Magang" && projects.length > 1) {
+      if (!primaryProjectId) {
+        await client.query("ROLLBACK");
+        return { studentId, periodId, status: "invalid", message: "Pilih project utama Magang." };
+      }
+      const primaryProject = projects.find((project) => String(project.project_id) === String(primaryProjectId));
+      if (!primaryProject) {
+        await client.query("ROLLBACK");
+        return { studentId, periodId, status: "invalid", message: "Project utama Magang tidak valid untuk mahasiswa ini." };
+      }
+      orderedProjects = [
+        primaryProject,
+        ...projects.filter((project) => String(project.project_id) !== String(primaryProjectId))
+      ];
+    }
     const studentKey = buildStudentKey(context.student_id);
     const periodKey = context.period_id
       ? `period:${context.period_id}`
@@ -914,8 +935,8 @@ async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = 
       await client.query("ROLLBACK");
       return { studentId, periodId, status: "existing", caseId: existing.rows[0]?.id || null, caseStatus: existing.rows[0]?.case_status || null };
     }
-    for (let index = 0; index < projects.length; index += 1) {
-      const project = projects[index];
+    for (let index = 0; index < orderedProjects.length; index += 1) {
+      const project = orderedProjects[index];
       await client.query(
         `
         INSERT INTO dc_final_activity_case_projects (
@@ -943,10 +964,17 @@ async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = 
       ip,
       event: "final_activity_case_created",
       target: "document_center_final_activity",
-      detail: { caseId, studentId: context.student_id, periodId: context.period_id, outcome: "completed", projectCount: projects.length }
+      detail: {
+        caseId,
+        studentId: context.student_id,
+        periodId: context.period_id,
+        outcome: "completed",
+        projectCount: projects.length,
+        primaryProjectId: primaryProjectId || projects[0]?.project_id || null
+      }
     });
     await client.query("COMMIT");
-    return { studentId, periodId, status: "created", caseId, projectCount: projects.length };
+    return { studentId, periodId, status: "created", caseId, projectCount: projects.length, primaryProjectId: primaryProjectId || projects[0]?.project_id || null };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     if (error?.code === "23505") return { studentId, periodId, status: "existing" };
@@ -964,9 +992,9 @@ async function createCases({ body, authUser, ip }) {
   for (const raw of body.items) {
     try {
       requirePlainObject(raw, "items");
-        rejectUnexpectedFields(raw, new Set(["studentId", "periodId"]), "items");
+      rejectUnexpectedFields(raw, new Set(["studentId", "periodId", "primaryProjectId"]), "items");
       const caseResult = await createOneCase({
-        item: { studentId: raw.studentId, periodId: raw.periodId },
+        item: { studentId: raw.studentId, periodId: raw.periodId, primaryProjectId: raw.primaryProjectId },
         authUser,
         ip,
         allowProjectPeriodFallback: true
