@@ -110,17 +110,23 @@ router.get(
 
     const [
       students,
+      alumni,
       lecturers,
       research,
       leavePending,
       lettersPending,
+      graduationPending,
+      documents,
       latestLogbooks
     ] = await Promise.all([
-      query("SELECT COUNT(*)::int AS total FROM students"),
+      query("SELECT COUNT(*)::int AS total FROM students WHERE status = 'Aktif'"),
+      query("SELECT COUNT(*)::int AS total FROM students WHERE status = 'Alumni'"),
       query("SELECT COUNT(*)::int AS total FROM lecturers"),
       query("SELECT COUNT(*)::int AS total FROM research_projects WHERE status = 'Aktif'"),
       query("SELECT COUNT(*)::int AS total FROM leave_requests WHERE status = 'Menunggu'"),
       query("SELECT COUNT(*)::int AS total FROM letter_requests WHERE status = 'Menunggu'"),
+      query("SELECT COUNT(*)::int AS total FROM graduation_submissions WHERE status = 'Dikirim'"),
+      query("SELECT COUNT(*)::int AS total FROM dc_official_documents"),
       query(
         `
         SELECT le.id, le.date, le.title, su.name AS student_name, rp.short_title AS project_name
@@ -136,10 +142,13 @@ router.get(
 
     res.json({
       totalMahasiswa: students.rows[0].total,
+      totalAlumni: alumni.rows[0].total,
       totalDosen: lecturers.rows[0].total,
       totalRisetAktif: research.rows[0].total,
       cutiMenunggu: leavePending.rows[0].total,
       suratMenunggu: lettersPending.rows[0].total,
+      kelulusanMenunggu: graduationPending.rows[0].total,
+      totalDokumen: documents.rows[0].total,
       logbookTerbaru: latestLogbooks.rows
     });
   })
