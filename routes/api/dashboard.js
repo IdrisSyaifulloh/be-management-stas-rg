@@ -175,6 +175,7 @@ router.get(
         psch.student_id,
         u.name AS student_name,
         u.initials AS student_initials,
+        u.photo_url AS student_photo_url,
         s.nim,
         COUNT(*)::int AS missed_count,
         ARRAY_AGG(TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') ORDER BY psch.schedule_date ASC, psch.id ASC) AS missed_dates,
@@ -204,7 +205,7 @@ router.get(
             AND psub.student_id = psch.student_id
             AND psub.status <> 'Bermasalah'
         )
-      GROUP BY psch.student_id, u.name, u.initials, s.nim
+      GROUP BY psch.student_id, u.name, u.initials, u.photo_url, s.nim
       ORDER BY missed_count DESC, MAX(psch.schedule_date) DESC, u.name ASC
       `,
       [weekStart, queryEnd]
@@ -214,6 +215,7 @@ router.get(
       studentId: row.student_id,
       studentName: row.student_name,
       studentInitials: row.student_initials,
+      studentPhotoUrl: row.student_photo_url,
       nim: row.nim,
       missedCount: Number(row.missed_count) || 0,
       missedDates: row.missed_dates || [],
@@ -275,6 +277,7 @@ router.get(
           s.user_id AS recipient_user_id,
           u.name AS student_name,
           u.initials AS student_initials,
+          u.photo_url AS student_photo_url,
           s.nim,
           $1::date AS reference_date
         FROM students s
@@ -313,6 +316,7 @@ router.get(
               s.user_id AS recipient_user_id,
               u.name AS student_name,
               u.initials AS student_initials,
+              u.photo_url AS student_photo_url,
               s.nim,
               'Belum Absen' AS attendance_status,
               $1::date AS reference_date
@@ -352,6 +356,7 @@ router.get(
           s.user_id AS recipient_user_id,
           u.name AS student_name,
           u.initials AS student_initials,
+          u.photo_url AS student_photo_url,
           s.nim,
           COALESCE(s.jam_minggu_ini, 0) AS current_hours,
           COALESCE(s.jam_minggu_target, 0) AS target_hours,

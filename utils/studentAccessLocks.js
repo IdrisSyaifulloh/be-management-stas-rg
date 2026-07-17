@@ -137,6 +137,8 @@ function mapAccessLockRow(row) {
     studentName: row.student_name || null,
     studentInitials: row.student_initials || null,
     student_initials: row.student_initials || null,
+    studentPhotoUrl: row.student_photo_url || null,
+    student_photo_url: row.student_photo_url || null,
     student_nim: row.nim || null,
     nim: row.nim || null,
     student_tipe: row.tipe || null,
@@ -528,7 +530,7 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
     SELECT sal.id, sal.student_id, TO_CHAR(sal.lock_date, 'YYYY-MM-DD') AS lock_date_text,
            sal.reason, sal.status, sal.locked, sal.active, sal.locked_at,
            sal.unlocked_at, sal.unlocked_by,
-           u.name AS student_name, u.initials AS student_initials, s.nim, s.tipe
+           u.name AS student_name, u.initials AS student_initials, u.photo_url AS student_photo_url, s.nim, s.tipe
     FROM student_access_locks sal
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id
@@ -583,7 +585,7 @@ async function listAccessLocks({ status = null, search = null } = {}) {
     SELECT sal.id, sal.student_id, TO_CHAR(sal.lock_date, 'YYYY-MM-DD') AS lock_date_text,
            sal.reason, sal.status, sal.locked, sal.active, sal.locked_at,
            sal.unlocked_at, sal.unlocked_by,
-           u.name AS student_name, u.initials AS student_initials, s.nim, s.tipe
+           u.name AS student_name, u.initials AS student_initials, u.photo_url AS student_photo_url, s.nim, s.tipe
     FROM student_access_locks sal
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id

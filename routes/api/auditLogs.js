@@ -21,7 +21,7 @@ router.get(
 
     const result = await query(
       `
-      SELECT al.id, al.user_id, u.name AS user_name, u.initials AS user_initials,
+      SELECT al.id, al.user_id, u.name AS user_name, u.initials AS user_initials, u.photo_url AS user_photo_url,
              al.user_role, al.action, al.target, al.ip,
              al.detail, al.logged_at
       FROM audit_logs al
