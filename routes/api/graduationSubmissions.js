@@ -556,8 +556,15 @@ router.get("/", asyncHandler(async (req, res) => {
   const search = String(req.query.q || req.query.search || "").trim();
 
   if (status && status !== "Semua") {
-    params.push(status);
-    clauses.push(`gs.status = $${params.length}`);
+    const statuses = status.split(",").map(s => s.trim()).filter(Boolean);
+    if (statuses.length > 1) {
+      const placeholders = statuses.map((_, i) => `$${params.length + i + 1}`);
+      params.push(...statuses);
+      clauses.push(`gs.status IN (${placeholders.join(", ")})`);
+    } else {
+      params.push(statuses[0]);
+      clauses.push(`gs.status = $${params.length}`);
+    }
   }
 
   if (search) {
