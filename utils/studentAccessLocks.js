@@ -587,7 +587,7 @@ async function listAccessLocks({ status = null, search = null } = {}) {
     FROM student_access_locks sal
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id
-    WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND sal.reason <> $3))
+    WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND sal.reason <> $3 AND s.status = 'Aktif'))
       AND NOT (sal.reason = $2 AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
       ${searchClause}
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
