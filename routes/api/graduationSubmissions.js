@@ -302,6 +302,7 @@ function mapOperatorSubmissionRow(row) {
       nim: row.nim,
       name: row.student_name,
       initials: row.student_initials,
+      photoUrl: row.student_photo_url || null,
       status: row.student_status,
       tipe: row.student_tipe
     }
@@ -445,6 +446,7 @@ const graduationSubmissionListSelect = `
          s.tipe AS student_tipe,
          u.name AS student_name,
          u.initials AS student_initials,
+         u.photo_url AS student_photo_url,
          ru.name AS reviewed_by_name,
          COALESCE(gp.project_count, 0)::int AS project_count,
          COALESCE(gp.project_summary, '') AS project_summary

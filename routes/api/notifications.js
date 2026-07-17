@@ -87,7 +87,7 @@ router.get(
     const result = await query(
       `
       SELECT n.id, n.recipient_user_id, n.sender_user_id, n.type, n.title, n.body, n.read_at, n.created_at,
-             su.name AS sender_name
+             su.name AS sender_name, su.photo_url AS sender_photo_url
       FROM notifications n
       LEFT JOIN users su ON su.id = n.sender_user_id
       ${where}

@@ -180,7 +180,7 @@ router.get(
 
     const result = await query(
       `
-      SELECT le.id, le.student_id, su.name AS student_name, su.initials AS student_initials,
+      SELECT le.id, le.student_id, su.name AS student_name, su.initials AS student_initials, su.photo_url AS student_photo_url,
              le.project_id, COALESCE(rp.short_title, rp.title, 'Logbook Umum') AS project_name,
              ar.status AS attendance_status,
              CASE

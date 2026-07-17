@@ -220,6 +220,7 @@ function mapLetterRequestRow(row) {
     requester_name: row.requester_name,
     studentId: row.student_id,
     student_id: row.student_id,
+    student_photo_url: row.student_photo_url || null,
     student_name: row.student_name,
     student_initials: row.student_initials,
     nim: row.nim,
@@ -246,7 +247,7 @@ async function fetchLetterRequestById(id) {
   const result = await query(
     `
     SELECT lr.id, lr.student_id, lr.requester_type, lr.requester_id,
-           su.name AS student_name, su.initials AS student_initials, s.nim,
+           su.name AS student_name, su.initials AS student_initials, su.photo_url AS student_photo_url, s.nim,
            l.id AS lecturer_id,
            CASE
              WHEN lr.requester_type = 'lecturer' THEN lu.name
@@ -393,7 +394,7 @@ router.get(
     const result = await query(
       `
       SELECT lr.id, lr.student_id, lr.requester_type, lr.requester_id,
-             su.name AS student_name, su.initials AS student_initials,
+             su.name AS student_name, su.initials AS student_initials, su.photo_url AS student_photo_url,
              s.nim, l.id AS lecturer_id,
              CASE
                WHEN lr.requester_type = 'lecturer' THEN lu.name

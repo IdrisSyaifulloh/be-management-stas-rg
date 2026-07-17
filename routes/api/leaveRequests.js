@@ -205,7 +205,8 @@ function mapLeaveRequestRow(row) {
     file_name: row.file_name || null,
     fileName: row.file_name || null,
     created_at: row.created_at || null,
-    createdAt: row.created_at || null
+    createdAt: row.created_at || null,
+    student_photo_url: row.student_photo_url || null
   };
 }
 

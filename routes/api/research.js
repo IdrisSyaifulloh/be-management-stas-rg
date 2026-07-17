@@ -642,7 +642,7 @@ router.get(
 
     const result = await query(
       `
-      SELECT rm.id, rm.project_id, rm.user_id, u.name, u.initials, rm.member_type,
+      SELECT rm.id, rm.project_id, rm.user_id, u.name, u.initials, u.photo_url, rm.member_type,
              rm.peran,
              CASE WHEN rm.selesai IS NOT NULL AND rm.selesai < CURRENT_DATE THEN 'Nonaktif' ELSE rm.status END AS status,
              rm.bergabung, rm.selesai, u.role
@@ -670,7 +670,7 @@ router.get(
 
     const result = await query(
       `
-      SELECT ba.user_id, u.name, u.initials
+      SELECT ba.user_id, u.name, u.initials, u.photo_url
       FROM board_access ba
       JOIN users u ON u.id = ba.user_id
       WHERE ba.project_id = $1

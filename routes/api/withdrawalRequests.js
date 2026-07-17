@@ -43,6 +43,7 @@ const SELECT_WITHDRAWAL = `
     wr.student_id,
     s.nim AS student_nim,
     su.name AS student_name,
+    su.photo_url AS student_photo_url,
     wr.advisor_id,
     au.name AS advisor_name,
     wr.reason,
