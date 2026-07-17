@@ -125,7 +125,7 @@ router.get(
       query("SELECT COUNT(*)::int AS total FROM research_projects WHERE status = 'Aktif'"),
       query("SELECT COUNT(*)::int AS total FROM leave_requests WHERE status = 'Menunggu'"),
       query("SELECT COUNT(*)::int AS total FROM letter_requests WHERE status = 'Menunggu'"),
-      query("SELECT COUNT(*)::int AS total FROM graduation_submissions WHERE status = 'Dikirim'"),
+      query("SELECT COUNT(*)::int AS total FROM graduation_submissions WHERE status IN ('Dikirim', 'Revisi')"),
       query("SELECT COUNT(*)::int AS total FROM dc_official_documents"),
       query(
         `
