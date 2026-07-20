@@ -1126,6 +1126,100 @@ async function generateDraftsForCase({ caseId, authUser, ip }) {
   return { completionDraft, certificateDrafts };
 }
 
+async function cleanupCreatedFinalActivityCases({ caseIds }) {
+  const safeCaseIds = [...new Set((caseIds || []).map((id) => safeId(id, "caseIds")))];
+  if (!safeCaseIds.length) return { caseIds: [], documentIds: [] };
+
+  const client = await pool.connect();
+  const generatedFiles = [];
+  try {
+    await client.query("BEGIN");
+    const lockedCases = await client.query(
+      `
+      SELECT id, completion_document_id
+      FROM dc_final_activity_cases
+      WHERE id = ANY($1::text[])
+      FOR UPDATE
+      `,
+      [safeCaseIds]
+    );
+    const existingCaseIds = lockedCases.rows.map((row) => row.id);
+    if (!existingCaseIds.length) {
+      await client.query("COMMIT");
+      return { caseIds: [], documentIds: [] };
+    }
+
+    const projectRows = await client.query(
+      `
+      SELECT id, certificate_document_id
+      FROM dc_final_activity_case_projects
+      WHERE final_activity_case_id = ANY($1::text[])
+      FOR UPDATE
+      `,
+      [existingCaseIds]
+    );
+
+    const referencedDocumentIds = [
+      ...lockedCases.rows.map((row) => row.completion_document_id).filter(Boolean),
+      ...projectRows.rows.map((row) => row.certificate_document_id).filter(Boolean)
+    ];
+    const documentIds = [...new Set(referencedDocumentIds)];
+
+    if (documentIds.length) {
+      const documents = await client.query(
+        `
+        SELECT id, status
+        FROM dc_official_documents
+        WHERE id = ANY($1::text[])
+        FOR UPDATE
+        `,
+        [documentIds]
+      );
+      const nonDraft = documents.rows.filter((row) => row.status !== "draft");
+      if (nonDraft.length) {
+        throw httpError(409, "Dokumen sudah berubah status dan tidak dapat dibersihkan otomatis.");
+      }
+
+      const versions = await client.query(
+        `
+        SELECT document_id, version_number
+        FROM dc_document_versions
+        WHERE document_id = ANY($1::text[])
+        `,
+        [documentIds]
+      );
+      for (const row of versions.rows) {
+        generatedFiles.push(buildVersionFilePath(row.document_id, row.version_number));
+      }
+    }
+
+    await client.query(
+      `DELETE FROM dc_final_activity_case_projects WHERE final_activity_case_id = ANY($1::text[])`,
+      [existingCaseIds]
+    );
+    await client.query(
+      `DELETE FROM dc_final_activity_cases WHERE id = ANY($1::text[])`,
+      [existingCaseIds]
+    );
+
+    if (documentIds.length) {
+      await client.query(`DELETE FROM dc_official_document_students WHERE document_id = ANY($1::text[])`, [documentIds]);
+      await client.query(`DELETE FROM dc_document_versions WHERE document_id = ANY($1::text[])`, [documentIds]);
+      await client.query(`DELETE FROM dc_official_documents WHERE id = ANY($1::text[])`, [documentIds]);
+    }
+
+    await client.query("COMMIT");
+
+    for (const filePath of generatedFiles) await fs.unlink(filePath).catch(() => {});
+    return { caseIds: existingCaseIds, documentIds };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function createArtifactsForFinalizedAlumni({ studentId, authUser, ip }) {
   const safeStudentId = safeId(studentId, "studentId");
   const caseResult = await createOneCase({
@@ -1708,5 +1802,6 @@ module.exports = {
   uploadCompletionDraft,
   uploadCertificateDraft,
   updateFinalActivityDynamicData,
+  cleanupCreatedFinalActivityCases,
   markIssuedForPublishedDocument
 };
