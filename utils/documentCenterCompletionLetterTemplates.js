@@ -26,7 +26,6 @@ const BUILTIN_VERSION_ID = `builtin:${TEMPLATE_KEY}`;
 const PAGE_WIDTH = 595.32;
 const PAGE_HEIGHT = 841.92;
 const MAX_TEMPLATE_PDF_BYTES = 8 * 1024 * 1024;
-const OVERFLOW_MESSAGE = "Data proyek atau identitas terlalu panjang untuk dimuat pada template. Periksa data lalu coba kembali.";
 const MONTHS_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
 
 const CONTENT_CONFIG = Object.freeze({
@@ -66,10 +65,6 @@ function httpError(statusCode, message, field = null) {
   return error;
 }
 
-function overflowError() {
-  return httpError(422, OVERFLOW_MESSAGE);
-}
-
 function requirePlainObject(value, label = "body") {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw httpError(400, "Input tidak valid.", label);
   return value;
@@ -94,6 +89,12 @@ function requiredText(value) {
   return normalized;
 }
 
+function safeFallbackText(value, fallback = "-") {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized || /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(normalized)) return fallback;
+  return normalized;
+}
+
 function optionalSafeText(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   if (!normalized) return null;
@@ -109,6 +110,18 @@ function requireIsoDate(value) {
     throw httpError(409, "Data periode belum lengkap atau tidak valid.");
   }
   return normalized;
+}
+
+function optionalIsoDate(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null;
+  const parsed = new Date(`${normalized}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) return null;
+  return normalized;
+}
+
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 function sanitizeFilename(value) {
@@ -242,9 +255,11 @@ function formatDateId(value) {
 }
 
 function formatPeriodLabel(periodSnapshot) {
-  const activityType = requiredText(periodSnapshot?.activityType);
-  const startDate = formatDateId(`${requireIsoDate(periodSnapshot?.startDate)}T00:00:00Z`);
-  const endDate = formatDateId(`${requireIsoDate(periodSnapshot?.endDate)}T00:00:00Z`);
+  const activityType = safeFallbackText(periodSnapshot?.activityType, "Magang");
+  const startIso = optionalIsoDate(periodSnapshot?.startDate) || optionalIsoDate(periodSnapshot?.endDate) || todayIsoDate();
+  const endIso = optionalIsoDate(periodSnapshot?.endDate) || startIso;
+  const startDate = formatDateId(`${startIso}T00:00:00Z`);
+  const endDate = formatDateId(`${endIso}T00:00:00Z`);
   return `${activityType} | ${startDate} - ${endDate}`;
 }
 
@@ -271,8 +286,16 @@ function wrapText(text, font, size, maxWidth) {
 function fitSingleLine(text, font, box) {
   let size = box.fontSize;
   while (size > box.minFontSize && font.widthOfTextAtSize(text, size) > box.width) size -= 0.5;
-  if (font.widthOfTextAtSize(text, size) > box.width) throw overflowError();
-  return size;
+  return { size, text: fitTextWithEllipsis(text, font, size, box.width) };
+}
+
+function fitTextWithEllipsis(text, font, size, maxWidth) {
+  const value = safeFallbackText(text);
+  if (font.widthOfTextAtSize(value, size) <= maxWidth) return value;
+  const suffix = "...";
+  let fitted = value;
+  while (fitted.length && font.widthOfTextAtSize(`${fitted}${suffix}`, size) > maxWidth) fitted = fitted.slice(0, -1);
+  return fitted ? `${fitted.trimEnd()}${suffix}` : suffix;
 }
 
 function fitWrappedText(text, font, box) {
@@ -282,21 +305,34 @@ function fitWrappedText(text, font, box) {
     size -= 0.5;
     lines = wrapText(text, font, size, box.width);
   }
-  if (lines.length > box.maxLines || lines.some((line) => font.widthOfTextAtSize(line, size) > box.width)) throw overflowError();
+  if (lines.length > box.maxLines) {
+    lines = lines.slice(0, box.maxLines);
+    lines[lines.length - 1] = fitTextWithEllipsis(`${lines[lines.length - 1]}...`, font, size, box.width);
+  }
+  lines = lines.map((line) => fitTextWithEllipsis(line, font, size, box.width));
   return { size, lines };
 }
 
 function drawSingleLine(page, text, font, box) {
   const value = requiredText(text);
-  const size = fitSingleLine(value, font, box);
-  page.drawText(value, { x: box.x, y: topToPdfY(box.y, size), size, font, color: rgb(0, 0, 0) });
+  const fitted = fitSingleLine(value, font, box);
+  page.drawText(fitted.text, { x: box.x, y: topToPdfY(box.y, fitted.size), size: fitted.size, font, color: rgb(0, 0, 0) });
 }
 
 function drawWrapped(page, text, font, box) {
   const { size, lines } = fitWrappedText(requiredText(text), font, box);
-  const endTop = box.y + ((lines.length - 1) * box.lineHeight) + size;
-  if (endTop >= LAYOUT_CONFIG.protectedSignatureFooter.top) throw overflowError();
-  lines.forEach((line, index) => {
+  const footerTop = LAYOUT_CONFIG.protectedSignatureFooter.top;
+  const availableLines = Math.max(1, Math.floor((footerTop - box.y - size) / box.lineHeight) + 1);
+  const visibleLines = lines.slice(0, availableLines);
+  if (visibleLines.length < lines.length) {
+    visibleLines[visibleLines.length - 1] = fitTextWithEllipsis(
+      `${visibleLines[visibleLines.length - 1]}...`,
+      font,
+      size,
+      box.width
+    );
+  }
+  visibleLines.forEach((line, index) => {
     page.drawText(line, {
       x: box.x,
       y: topToPdfY(box.y + index * box.lineHeight, size),
@@ -308,13 +344,20 @@ function drawWrapped(page, text, font, box) {
 }
 
 function projectTitleFromSnapshot(projectSnapshot) {
-  return requiredText(projectSnapshot?.title || projectSnapshot?.name || projectSnapshot?.shortTitle);
+  return safeFallbackText(projectSnapshot?.title || projectSnapshot?.name || projectSnapshot?.shortTitle, "Project belum diisi");
 }
 
 function buildProjectSummary(projectSnapshots) {
   const snapshots = Array.isArray(projectSnapshots) ? projectSnapshots : [projectSnapshots];
   const normalized = snapshots.filter(Boolean);
-  if (normalized.length < 1) throw httpError(409, "Data proyek belum lengkap.");
+  if (normalized.length < 1) {
+    return {
+      title: "Project belum diisi",
+      titles: ["Project belum diisi"],
+      role: "peserta magang",
+      roles: ["peserta magang"]
+    };
+  }
   const titles = normalized.map(projectTitleFromSnapshot);
   const roles = normalized
     .map((snapshot) => optionalSafeText(snapshot?.role || snapshot?.position))
@@ -323,22 +366,31 @@ function buildProjectSummary(projectSnapshots) {
   return {
     title: titles.join(", "),
     titles,
-    role: normalized.length === 1 || uniqueRoles.length === 1 ? uniqueRoles[0] || null : null,
+    role: normalized.length === 1 || uniqueRoles.length === 1 ? uniqueRoles[0] || "peserta magang" : "peserta magang",
     roles: uniqueRoles
   };
 }
 
-function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot, projectSnapshots }) {
-  const studentName = requiredText(studentSnapshot?.name);
-  const studentNim = requiredText(studentSnapshot?.nim);
-  const studyProgram = requiredText(studentSnapshot?.prodi);
-  const periodStart = requireIsoDate(periodSnapshot?.startDate);
-  const periodEnd = requireIsoDate(periodSnapshot?.endDate);
-  if (periodStart > periodEnd) throw httpError(409, "Data periode belum lengkap atau tidak valid.");
+function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot, projectSnapshots, activityType }) {
+  const studentName = safeFallbackText(studentSnapshot?.name, studentSnapshot?.legacyStudentId || "Mahasiswa");
+  const studentNim = safeFallbackText(studentSnapshot?.nim, "-");
+  const studyProgram = safeFallbackText(studentSnapshot?.prodi, "-");
+  const primaryProject = (Array.isArray(projectSnapshots) ? projectSnapshots.find(Boolean) : projectSnapshot) || {};
+  let periodStart = optionalIsoDate(periodSnapshot?.startDate) || optionalIsoDate(primaryProject.joinedAt) || optionalIsoDate(primaryProject.startDate);
+  let periodEnd = optionalIsoDate(periodSnapshot?.endDate) || optionalIsoDate(primaryProject.completedAt) || optionalIsoDate(primaryProject.endDate);
+  if (!periodStart && periodEnd) periodStart = periodEnd;
+  if (!periodEnd && periodStart) periodEnd = periodStart;
+  if (!periodStart && !periodEnd) periodStart = periodEnd = todayIsoDate();
+  if (periodStart > periodEnd) {
+    const swappedStart = periodEnd;
+    periodEnd = periodStart;
+    periodStart = swappedStart;
+  }
   const projectSummary = buildProjectSummary(projectSnapshots || projectSnapshot);
   const projectTitle = projectSummary.title;
   const projectRole = projectSummary.role;
   const data = {
+    activityType: activityType === "Riset" ? "Riset" : "Magang",
     studentName,
     studentNim,
     studyProgram,
@@ -362,7 +414,10 @@ function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot, pro
 
 function buildActivityParagraph(data) {
   const roleText = data.projectRole ? ` dengan peran sebagai ${data.projectRole}` : "";
-  return `Berdasarkan Surat Penerimaan Magang, yang bersangkutan telah melaksanakan kegiatan magang di ${requiredText(data.organizationLabel || CONTENT_CONFIG.organizationLabel)} sebagai bagian dari proyek "${data.projectTitle}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
+  if (data.activityType === "Riset") {
+    return `Yang bersangkutan telah menyelesaikan kegiatan riset di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
+  }
+  return `Berdasarkan Surat Penerimaan Magang, yang bersangkutan telah melaksanakan kegiatan magang di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
 }
 
 function signerSnapshot() {
@@ -522,7 +577,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       caseRow.activity_type !== "Magang" ||
       caseRow.outcome !== "completed" ||
       caseRow.completion_document_definition_id !== DEFINITION_ID ||
-      caseRow.case_status !== "pending" ||
+      !["pending", "draft_created"].includes(caseRow.case_status) ||
       caseRow.completion_document_id
     ) {
       throw httpError(409, "Case tidak dapat dibuatkan draft surat generator.");
@@ -538,12 +593,14 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const data = buildLetterData({
       studentSnapshot: caseRow.student_snapshot,
       periodSnapshot: caseRow.period_snapshot,
-      projectSnapshot: primaryProjectRow.project_snapshot
+      projectSnapshot: primaryProjectRow.project_snapshot,
+      projectSnapshots,
+      activityType: caseRow.activity_type
     });
     const template = await loadCompletionTemplateVersion(client, { activeOnly: true });
     if (
       template.document_definition_id !== DEFINITION_ID ||
-      template.activity_type !== "Magang" ||
+      !["Magang", "Riset"].includes(caseRow.activity_type) ||
       template.activity_outcome !== "completed"
     ) {
       throw httpError(409, "Template surat aktif belum tersedia.");
@@ -567,6 +624,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     };
     const versionSnapshot = {
       generator: "completion_letter_template_v1",
+      activityType: caseRow.activity_type,
       template: templateSnapshot,
       student: caseRow.student_snapshot,
       period: caseRow.period_snapshot,
@@ -578,7 +636,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const documentSnapshot = {
       generator: "completion_letter_template_v1",
       definitionId: DEFINITION_ID,
-      activityType: "Magang",
+      activityType: caseRow.activity_type,
       activityOutcome: "completed",
       caseId,
       caseProjectId: primaryProjectRow.id,
@@ -594,8 +652,8 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
        ) VALUES ($1,$2,NULL,$3,NULL,$4,'draft','alumni_sync','completed',$5::jsonb,1)`,
       [
         documentId, DEFINITION_ID,
-        `SKS:${caseRow.student_key}:${caseId}:completed`,
-        `Surat Keterangan Selesai Magang - ${data.studentName}`,
+        `SKS:${caseRow.activity_type}:${caseRow.student_key}:${caseId}:completed`,
+        `Surat Keterangan Selesai ${caseRow.activity_type} - ${data.studentName}`,
         JSON.stringify(documentSnapshot)
       ]
     );
@@ -630,7 +688,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const linked = await client.query(
       `UPDATE dc_final_activity_cases
        SET completion_document_id=$2, case_status='draft_created', updated_at=NOW()
-       WHERE id=$1 AND case_status='pending' AND completion_document_id IS NULL
+       WHERE id=$1 AND case_status IN ('pending','draft_created') AND completion_document_id IS NULL
        RETURNING id`,
       [caseId, documentId]
     );
@@ -674,7 +732,8 @@ async function renderPublishedCompletionLetterVersion({ client, document, docume
     studentSnapshot: snapshot.student,
     periodSnapshot: snapshot.period,
     projectSnapshot: snapshot.project,
-    projectSnapshots: snapshot.projects
+    projectSnapshots: snapshot.projects,
+    activityType: snapshot.activityType || snapshot.caseActivityType
   });
   let template;
   try {

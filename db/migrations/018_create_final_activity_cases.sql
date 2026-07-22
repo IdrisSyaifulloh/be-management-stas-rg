@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS dc_final_activity_cases (
     CHECK (outcome <> 'completed' OR completed_at IS NOT NULL),
   CONSTRAINT dc_final_activity_cases_completion_document_status_check
     CHECK (
-      (completion_document_id IS NULL AND case_status = 'pending')
+      (completion_document_id IS NULL AND (case_status = 'pending' OR (activity_type = 'Riset' AND case_status IN ('issued', 'revoked'))))
       OR (completion_document_id IS NOT NULL AND case_status IN ('draft_created', 'issued', 'revoked'))
     )
 );

@@ -30,7 +30,10 @@ const REQUEST_FIELDS = new Set([
 const PARTICIPANT_FIELDS = new Set([
   "legacyStudentId",
   "legacyProjectId",
-  "period"
+  "period",
+  "externalName",
+  "externalIdentifier",
+  "externalInstitution"
 ]);
 
 function createInputError(field) {
@@ -66,6 +69,11 @@ function requireNullableSafeId(value, field) {
   if (value == null) return null;
   if (typeof value !== "string" || value.trim() !== value) throw createInputError(field);
   return requireSafeId(value, field);
+}
+
+function optionalTrimmedText(value, field, maxLength) {
+  if (value == null || value === "") return null;
+  return requireTrimmedText(value, field, maxLength);
 }
 
 function parseActivityOutcome(value) {
@@ -164,7 +172,10 @@ function parseParticipants(value) {
     return {
       legacyStudentId: requireNullableSafeId(participant.legacyStudentId, "legacyStudentId"),
       legacyProjectId: requireNullableSafeId(participant.legacyProjectId, "legacyProjectId"),
-      period: parsePeriodSelection(participant.period)
+      period: parsePeriodSelection(participant.period),
+      externalName: optionalTrimmedText(participant.externalName, "externalName", 200),
+      externalIdentifier: optionalTrimmedText(participant.externalIdentifier, "externalIdentifier", 100),
+      externalInstitution: optionalTrimmedText(participant.externalInstitution, "externalInstitution", 200)
     };
   });
 }
@@ -205,13 +216,17 @@ async function resolveParticipantSnapshots(participants, definition) {
   }
 
   for (const participant of participants) {
-    if (!participant.legacyStudentId) throw createInputError("legacyStudentId");
+    if (!participant.legacyStudentId && !participant.externalName) throw createInputError("legacyStudentId");
+    if (participant.legacyStudentId && participant.externalName) throw createInputError("participants");
+    if (participant.externalName && (definition.requires_project || definition.requires_period)) {
+      throw createInputError("participants");
+    }
     if (definition.requires_project && !participant.legacyProjectId) {
       throw createInputError("legacyProjectId");
     }
   }
 
-  const studentIds = [...new Set(participants.map((participant) => participant.legacyStudentId))];
+  const studentIds = [...new Set(participants.map((participant) => participant.legacyStudentId).filter(Boolean))];
   const studentResult = await pool.query(
     `
     SELECT s.id, s.user_id, s.nim, s.tipe AS student_activity_type, s.status,
@@ -272,6 +287,28 @@ async function resolveParticipantSnapshots(participants, definition) {
   }
 
   const resolved = participants.map((participant, displayOrder) => {
+    if (participant.externalName) {
+      const externalIdentity = `${participant.externalName}|${participant.externalIdentifier || ""}|${participant.externalInstitution || ""}`;
+      return {
+        studentKey: `external:${crypto.createHash("sha256").update(externalIdentity).digest("hex").slice(0, 32)}`,
+        legacyStudentId: null,
+        legacyProjectId: null,
+        legacyPeriodKey: null,
+        projectKey: null,
+        nameSnapshot: participant.externalName,
+        nimSnapshot: participant.externalIdentifier || "-",
+        prodiSnapshot: "-",
+        universitySnapshot: participant.externalInstitution || null,
+        projectNameSnapshot: null,
+        periodSnapshot: null,
+        participantRole: "Pihak Eksternal",
+        displayOrder,
+        actualActivityType: null,
+        studentActivityType: null,
+        projectSnapshot: null,
+        periodSnapshotData: null
+      };
+    }
     const student = studentsById.get(participant.legacyStudentId);
     const legacyPeriods = periodsByStudentId.get(student.id) || [];
     let period = null;
@@ -596,6 +633,7 @@ async function createDocumentCenterDraft({ body, authUser, ip, onDraftCreated, g
       documentNumber: null,
       currentVersionNumber: 1,
       documentDefinitionId: definition.id,
+      typeCode: definition.type_code,
       participantCount: resolved.participants.length,
       canDownload: false
     };
@@ -615,6 +653,40 @@ async function createDocumentCenterDraft({ body, authUser, ip, onDraftCreated, g
   }
 }
 
+async function deleteDocumentCenterDraft({ documentId }) {
+  const safeDocumentId = requireSafeId(documentId, "documentId");
+  const client = await pool.connect();
+  const filePaths = [];
+  try {
+    await client.query("BEGIN");
+    const document = await client.query(
+      "SELECT id, status FROM dc_official_documents WHERE id=$1 FOR UPDATE",
+      [safeDocumentId]
+    );
+    if (!document.rowCount) {
+      await client.query("COMMIT");
+      return;
+    }
+    if (document.rows[0].status !== "draft") throw createInputError("documentId");
+    const versions = await client.query(
+      "SELECT version_number FROM dc_document_versions WHERE document_id=$1",
+      [safeDocumentId]
+    );
+    for (const row of versions.rows) filePaths.push(buildVersionFilePath(safeDocumentId, row.version_number));
+    await client.query("DELETE FROM dc_official_document_students WHERE document_id=$1", [safeDocumentId]);
+    await client.query("DELETE FROM dc_document_versions WHERE document_id=$1", [safeDocumentId]);
+    await client.query("DELETE FROM dc_official_documents WHERE id=$1", [safeDocumentId]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+  for (const filePath of filePaths) await removeIfExists(filePath).catch(() => {});
+}
+
 module.exports = {
-  createDocumentCenterDraft
+  createDocumentCenterDraft,
+  deleteDocumentCenterDraft
 };
