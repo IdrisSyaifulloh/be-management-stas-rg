@@ -174,6 +174,51 @@ async function createIssueBatch(client, { typeCode, publishTime, operatorUserId 
   return { id, typeCode, sequence, documentNumber, issuedAt: publishTime.issued_at };
 }
 
+async function findReleasedUnusedIssueBatch(client, { typeCode, publishTime }) {
+  const result = await client.query(
+    `
+    SELECT
+      b.id,
+      b.type_code,
+      b.sequence_number,
+      b.document_number,
+      b.issued_at
+    FROM dc_issue_batches b
+    JOIN LATERAL (
+      SELECT al.target
+      FROM audit_logs al
+      WHERE al.target IN ('document_center_number_reserved', 'document_center_number_released')
+        AND al.detail->>'issueBatchId' = b.id
+      ORDER BY al.logged_at DESC, al.id DESC
+      LIMIT 1
+    ) latest_event ON TRUE
+    WHERE b.type_code = $1
+      AND b.sequence_year = $2
+      AND b.sequence_month = $3
+      AND latest_event.target = 'document_center_number_released'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM dc_official_documents od
+        WHERE od.issue_batch_id = b.id
+      )
+    ORDER BY b.sequence_number ASC
+    FOR UPDATE OF b SKIP LOCKED
+    LIMIT 1
+    `,
+    [typeCode, publishTime.sequence_year, publishTime.sequence_month]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    typeCode: row.type_code,
+    sequence: Number(row.sequence_number),
+    documentNumber: row.document_number,
+    issuedAt: row.issued_at,
+    recycled: true
+  };
+}
+
 function parseReserveNumberBody(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw createHttpError(400, "Input tidak valid.");
@@ -210,11 +255,16 @@ async function reserveDocumentCenterNumber({ authUser, body }) {
     }
 
     const publishTime = await getPublishTimestamp(client);
-    const batch = await createIssueBatch(client, {
-      typeCode: definition.type_code,
-      publishTime,
-      operatorUserId: authUser.id
-    });
+    const batch =
+      (await findReleasedUnusedIssueBatch(client, {
+        typeCode: definition.type_code,
+        publishTime
+      })) ||
+      (await createIssueBatch(client, {
+        typeCode: definition.type_code,
+        publishTime,
+        operatorUserId: authUser.id
+      }));
 
     await client.query(
       `INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
@@ -228,6 +278,7 @@ async function reserveDocumentCenterNumber({ authUser, body }) {
           documentDefinitionId: definition.id,
           typeCode: definition.type_code,
           documentNumber: batch.documentNumber,
+          recycled: Boolean(batch.recycled),
           note
         })
       ]
