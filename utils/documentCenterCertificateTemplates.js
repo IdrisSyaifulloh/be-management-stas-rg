@@ -440,6 +440,15 @@ function formatDateId(value) {
   return `${date.getDate()} ${MONTHS_ID[date.getMonth()]} ${date.getFullYear()}`;
 }
 
+function fitTextWithEllipsis(text, font, size, maxWidth) {
+  const value = String(text || "-");
+  if (font.widthOfTextAtSize(value, size) <= maxWidth) return value;
+  const suffix = "...";
+  let fitted = value;
+  while (fitted.length && font.widthOfTextAtSize(`${fitted}${suffix}`, size) > maxWidth) fitted = fitted.slice(0, -1);
+  return fitted ? `${fitted.trimEnd()}${suffix}` : suffix;
+}
+
 async function renderCertificatePdf({ backgroundBytes, templateKey, data, documentNumber = null, issuedAt = null }) {
   const preset = PRESETS[templateKey];
   if (!preset) throw httpError(409, "Template tidak didukung.");
@@ -452,10 +461,10 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
   if (documentNumber) {
     drawCenteredText(page, documentNumber, layout.number, regular, layout.number.fontSize, rgb(1, 1, 1));
   }
-  const name = String(data.studentName || "").toUpperCase();
+  let name = String(data.studentName || "-").toUpperCase();
   let nameSize = layout.name.fontSize;
   while (nameSize > layout.name.minFontSize && bold.widthOfTextAtSize(name, nameSize) > layout.name.width) nameSize -= 1;
-  if (bold.widthOfTextAtSize(name, nameSize) > layout.name.width) throw httpError(409, "Nama peserta terlalu panjang untuk template.");
+  name = fitTextWithEllipsis(name, bold, nameSize, layout.name.width);
   drawCenteredText(page, name, layout.name, bold, nameSize);
 
   const paragraph = layout.paragraph;
@@ -466,7 +475,13 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
     lines = wrapRichSegments(buildParagraphSegments(data), fonts, paragraphSize, paragraph.width);
   }
   if (lines.length > paragraph.maxLines || lines.some((line) => measureSegments(line, fonts, paragraphSize) > paragraph.width)) {
-    throw httpError(409, "Paragraf sertifikat melebihi ruang template.");
+    const compactData = {
+      ...data,
+      projectTitle: String(data.projectTitle || "proyek/kegiatan").slice(0, 80),
+      projectRole: String(data.projectRole || (data.activityType === "Riset" ? "anggota riset" : "peserta magang")).slice(0, 40),
+      periodLabel: String(data.periodLabel || "-").slice(0, 60)
+    };
+    lines = wrapRichSegments(buildParagraphSegments(compactData), fonts, paragraphSize, paragraph.width).slice(0, paragraph.maxLines);
   }
   lines.forEach((line, index) => {
     let x = paragraph.x;
@@ -676,7 +691,7 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       [
         documentId,
         row.certificate_document_definition_id,
-        `CERT:${row.student_key}:${row.project_key}:${row.final_activity_case_id}:${row.outcome}`,
+        `CERT:${row.activity_type}:${row.student_key}:${row.project_key}:${row.final_activity_case_id}:${row.outcome}`,
         `Sertifikat - ${row.student_snapshot?.name || row.legacy_student_id}`,
         row.outcome,
         JSON.stringify(documentSnapshot)
@@ -710,9 +725,11 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       [
         `DCPART-${crypto.randomUUID()}`, documentId, row.student_key || buildStudentKey(row.legacy_student_id),
         row.legacy_student_id, row.legacy_project_id, row.period_key, row.project_key,
-        row.student_snapshot?.name || null, row.student_snapshot?.nim || null,
-        row.student_snapshot?.prodi || null, row.student_snapshot?.university || null,
-        row.project_snapshot?.title || row.project_snapshot?.name || null,
+        row.student_snapshot?.name || row.legacy_student_id || "Mahasiswa",
+        row.student_snapshot?.nim || "-",
+        row.student_snapshot?.prodi || "-",
+        row.student_snapshot?.university || CONTENT_CONFIG.universityName || "-",
+        row.project_snapshot?.title || row.project_snapshot?.name || row.legacy_project_id || "Project belum diisi",
         row.period_snapshot
       ]
     );

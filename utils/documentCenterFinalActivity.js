@@ -842,6 +842,7 @@ async function listEligible(rawQuery) {
      AND c.period_key = f.period_key
      AND c.completion_document_definition_id = $${params.length + 1}
      AND c.outcome = 'completed'
+     AND c.case_status IN ('issued', 'revoked')
     LEFT JOIN LATERAL (
       SELECT jsonb_agg(jsonb_build_object(
         'id', rm.project_id,
@@ -973,7 +974,20 @@ async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = 
         [studentKey, COMPLETION_DEFINITION_ID, context.period_activity_type, periodKey]
       );
       await client.query("ROLLBACK");
-      return { studentId, periodId, status: "existing", caseId: existing.rows[0]?.id || null, caseStatus: existing.rows[0]?.case_status || null };
+      const existingCase = existing.rows[0] || null;
+      if (["issued", "revoked"].includes(existingCase?.case_status)) {
+        return {
+          studentId,
+          periodId,
+          status: "conflict",
+          caseId: existingCase.id,
+          caseStatus: existingCase.case_status,
+          message: existingCase.case_status === "issued"
+            ? "Dokumen kandidat sudah terbit sebelumnya dan tidak boleh diberi nomor ulang."
+            : "Dokumen kandidat sudah dicabut dan tidak boleh diterbitkan ulang melalui batch baru."
+        };
+      }
+      return { studentId, periodId, status: "existing", caseId: existingCase?.id || null, caseStatus: existingCase?.case_status || null };
     }
     for (let index = 0; index < orderedProjects.length; index += 1) {
       const project = orderedProjects[index];
@@ -1070,7 +1084,7 @@ async function generateDraftsForCase({ caseId, authUser, ip }) {
   if (
     currentCase.activityType === "Magang" &&
     currentCase.outcome === "completed" &&
-    currentCase.status === "pending" &&
+    ["pending", "draft_created"].includes(currentCase.status) &&
     !currentCase.completionDocument &&
     (currentCase.projects || []).length > 0
   ) {
@@ -1220,6 +1234,123 @@ async function cleanupCreatedFinalActivityCases({ caseIds }) {
   }
 }
 
+async function cleanupFinalActivityDraftDocuments({ caseIds }) {
+  const safeCaseIds = [...new Set((caseIds || []).map((id) => safeId(id, "caseIds")))];
+  if (!safeCaseIds.length) return { caseIds: [], documentIds: [] };
+
+  const client = await pool.connect();
+  const generatedFiles = [];
+  try {
+    await client.query("BEGIN");
+    const lockedCases = await client.query(
+      `
+      SELECT id, case_status, completion_document_id
+      FROM dc_final_activity_cases
+      WHERE id = ANY($1::text[])
+      FOR UPDATE
+      `,
+      [safeCaseIds]
+    );
+    const existingCaseIds = lockedCases.rows.map((row) => row.id);
+    if (!existingCaseIds.length) {
+      await client.query("COMMIT");
+      return { caseIds: [], documentIds: [] };
+    }
+
+    const projectRows = await client.query(
+      `
+      SELECT id, certificate_status, certificate_document_id
+      FROM dc_final_activity_case_projects
+      WHERE final_activity_case_id = ANY($1::text[])
+      FOR UPDATE
+      `,
+      [existingCaseIds]
+    );
+
+    const draftDocumentIds = [
+      ...lockedCases.rows
+        .filter((row) => row.case_status === "draft_created" && row.completion_document_id)
+        .map((row) => row.completion_document_id),
+      ...projectRows.rows
+        .filter((row) => row.certificate_status === "draft_created" && row.certificate_document_id)
+        .map((row) => row.certificate_document_id)
+    ];
+    const candidateDocumentIds = [...new Set(draftDocumentIds)];
+
+    if (!candidateDocumentIds.length) {
+      await client.query("COMMIT");
+      return { caseIds: existingCaseIds, documentIds: [] };
+    }
+
+    const documents = await client.query(
+      `
+      SELECT id, status
+      FROM dc_official_documents
+      WHERE id = ANY($1::text[])
+      FOR UPDATE
+      `,
+      [candidateDocumentIds]
+    );
+    const removableDocumentIds = documents.rows
+      .filter((row) => row.status === "draft")
+      .map((row) => row.id);
+
+    if (!removableDocumentIds.length) {
+      await client.query("COMMIT");
+      return { caseIds: existingCaseIds, documentIds: [] };
+    }
+
+    const versions = await client.query(
+      `
+      SELECT document_id, version_number
+      FROM dc_document_versions
+      WHERE document_id = ANY($1::text[])
+      `,
+      [removableDocumentIds]
+    );
+    for (const row of versions.rows) {
+      generatedFiles.push(buildVersionFilePath(row.document_id, row.version_number));
+    }
+
+    await client.query(
+      `
+      UPDATE dc_final_activity_case_projects
+      SET certificate_document_id = NULL,
+          certificate_status = 'pending',
+          updated_at = NOW()
+      WHERE certificate_document_id = ANY($1::text[])
+        AND certificate_status = 'draft_created'
+      `,
+      [removableDocumentIds]
+    );
+    await client.query(
+      `
+      UPDATE dc_final_activity_cases
+      SET completion_document_id = NULL,
+          case_status = 'pending',
+          updated_at = NOW()
+      WHERE completion_document_id = ANY($1::text[])
+        AND case_status = 'draft_created'
+      `,
+      [removableDocumentIds]
+    );
+
+    await client.query(`DELETE FROM dc_official_document_students WHERE document_id = ANY($1::text[])`, [removableDocumentIds]);
+    await client.query(`DELETE FROM dc_document_versions WHERE document_id = ANY($1::text[])`, [removableDocumentIds]);
+    await client.query(`DELETE FROM dc_official_documents WHERE id = ANY($1::text[])`, [removableDocumentIds]);
+
+    await client.query("COMMIT");
+
+    for (const filePath of generatedFiles) await fs.unlink(filePath).catch(() => {});
+    return { caseIds: existingCaseIds, documentIds: removableDocumentIds };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function createArtifactsForFinalizedAlumni({ studentId, authUser, ip }) {
   const safeStudentId = safeId(studentId, "studentId");
   const caseResult = await createOneCase({
@@ -1268,7 +1399,9 @@ async function listCases(rawQuery) {
   const limit = parseLimit(rawQuery.limit);
   const offset = parseOffset(rawQuery.offset);
   const params = [];
-  const predicates = [];
+  // This endpoint feeds the final register. Incomplete generation states are
+  // internal retry state and must not appear as registered documents.
+  const predicates = status ? [] : ["c.case_status IN ('issued', 'revoked')"];
   if (status) { params.push(status); predicates.push(`c.case_status = $${params.length}`); }
   if (activityType) { params.push(activityType); predicates.push(`c.activity_type = $${params.length}`); }
   if (documentPurpose === "completion_letter") predicates.push("TRUE");
@@ -1596,10 +1729,13 @@ async function regenerateCompletionDocument(client, { caseRow, projectRows }) {
   const letterData = buildLetterData({
     studentSnapshot: caseRow.student_snapshot,
     periodSnapshot: primaryPeriod,
-    projectSnapshot: primaryProject?.project_snapshot || {}
+    projectSnapshot: primaryProject?.project_snapshot || {},
+    projectSnapshots: projectRows.map((row) => row.project_snapshot),
+    activityType: caseRow.activity_type
   });
   const snapshot = {
     ...(document.version_snapshot_data || {}),
+    activityType: caseRow.activity_type,
     student: caseRow.student_snapshot,
     period: primaryPeriod,
     project: primaryProject?.project_snapshot || null,
@@ -1787,6 +1923,22 @@ async function markIssuedForPublishedDocument(client, { documentId, authUser, ip
     const row = certificate.rows[0];
     if (row.certificate_status !== "draft_created") throw httpError(409, "Status sertifikat akhir kegiatan tidak konsisten.");
     await client.query("UPDATE dc_final_activity_case_projects SET certificate_status='issued', updated_at=NOW() WHERE id=$1", [row.id]);
+    await client.query(
+      `UPDATE dc_final_activity_cases c
+       SET case_status='issued', updated_at=NOW()
+       WHERE c.id=$1
+         AND c.activity_type='Riset'
+         AND c.outcome='completed'
+         AND c.case_status IN ('pending','draft_created')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM dc_final_activity_case_projects cp
+           WHERE cp.final_activity_case_id=c.id
+             AND cp.certificate_required=TRUE
+             AND cp.certificate_status <> 'issued'
+         )`,
+      [row.final_activity_case_id]
+    );
     await insertAudit(client, { authUser, ip, event: "final_activity_certificate_issued", target: "document_center_final_activity", detail: { caseProjectId: row.id, caseId: row.final_activity_case_id, documentId } });
   }
 }
@@ -1802,6 +1954,7 @@ module.exports = {
   uploadCompletionDraft,
   uploadCertificateDraft,
   updateFinalActivityDynamicData,
+  cleanupFinalActivityDraftDocuments,
   cleanupCreatedFinalActivityCases,
   markIssuedForPublishedDocument
 };

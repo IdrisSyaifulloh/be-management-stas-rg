@@ -13,8 +13,14 @@ const {
   requireDocumentCenterKey,
   resolveDocumentCenterStudent
 } = require("../../utils/documentCenterIdentity");
-const { createDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
-const { publishDocument, publishDocumentBatch } = require("../../utils/documentCenterPublish");
+const { createDocumentCenterDraft, deleteDocumentCenterDraft } = require("../../utils/documentCenterDraftUpload");
+const {
+  publishDocument,
+  publishDocumentBatch,
+  reserveDocumentCenterNumber,
+  listReservedDocumentCenterNumbers,
+  releaseDocumentCenterNumber
+} = require("../../utils/documentCenterPublish");
 const { revokeDocument } = require("../../utils/documentCenterRevocation");
 const {
   getDefinitions: getStudentRequestDefinitions,
@@ -49,6 +55,7 @@ const {
   uploadCompletionDraft,
   uploadCertificateDraft,
   updateFinalActivityDynamicData,
+  cleanupFinalActivityDraftDocuments,
   cleanupCreatedFinalActivityCases
 } = require("../../utils/documentCenterFinalActivity");
 const {
@@ -520,6 +527,38 @@ router.post(
   })
 );
 
+router.post(
+  "/operator/documents/upload-and-publish",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const issueBatchId = req.body?.issueBatchId;
+    if (typeof issueBatchId !== "string" || !issueBatchId) {
+      throw createRouteError(400, "Ambil nomor dokumen terlebih dahulu.");
+    }
+    const uploadBody = { ...req.body };
+    delete uploadBody.issueBatchId;
+    const draft = await createDocumentCenterDraft({
+      body: uploadBody,
+      authUser: req.authUser,
+      ip: req.ip
+    });
+    try {
+      const published = await publishDocumentBatch({
+        authUser: req.authUser,
+        ip: req.ip,
+        body: {
+          documentIds: [draft.id],
+          issueBatchIdsByTypeCode: { [draft.typeCode]: issueBatchId }
+        }
+      });
+      res.status(201).json({ document: published.items[0], batch: published.batches[0] });
+    } catch (error) {
+      await deleteDocumentCenterDraft({ documentId: draft.id }).catch(() => {});
+      throw error;
+    }
+  })
+);
+
 router.get("/operator/requests", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.json(await listOperatorRequests(req.query));
 }));
@@ -569,7 +608,8 @@ router.get("/operator/final-activity/early-exit/eligible", requireRoleStrict(["o
 }));
 
 router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
-  const result = await createFinalActivityCases({ body: req.body, authUser: req.authUser, ip: req.ip });
+  const issueBatchIdsByTypeCode = req.body?.issueBatchIdsByTypeCode || {};
+  const result = await createFinalActivityCases({ body: { items: req.body?.items }, authUser: req.authUser, ip: req.ip });
   const documentIds = [];
   const caseIds = [];
   const createdCaseIds = [];
@@ -584,6 +624,7 @@ router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), a
   const successfulItems = (result.items || []).filter((item) => ["created", "existing"].includes(item?.status));
   const failedItems = (result.items || []).filter((item) => !["created", "existing"].includes(item?.status));
   if (failedItems.length) {
+    await cleanupFinalActivityDraftDocuments({ caseIds }).catch(() => {});
     await cleanupCreatedFinalActivityCases({ caseIds: createdCaseIds });
     throw createRouteError(409, failedItems[0]?.message || "Dokumen akhir tidak dapat didaftarkan.");
   }
@@ -620,13 +661,22 @@ router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), a
 
     const uniqueDocumentIds = [...new Set(documentIds)];
     if (!uniqueDocumentIds.length) {
-      throw createRouteError(409, "Dokumen akhir tidak dapat dibuat.");
+      if (createdCaseIds.length) {
+        throw createRouteError(409, "Dokumen akhir tidak dapat dibuat.");
+      }
+      result.autoPublish = { items: [], batches: [] };
+      res.status(200).json(result);
+      return;
     }
 
     result.autoPublish = await publishDocumentBatch({
       authUser: req.authUser,
       ip: req.ip,
-      body: { documentIds: uniqueDocumentIds }
+      body: {
+        documentIds: uniqueDocumentIds,
+        ...(issueBatchIdsByTypeCode ? { issueBatchIdsByTypeCode } : {})
+      },
+      reuseFinalActivityIssueBatches: true
     });
 
     const publishedIds = new Set((result.autoPublish?.items || []).filter((item) => item.status === "terbit").map((item) => item.id));
@@ -634,10 +684,11 @@ router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), a
       throw createRouteError(409, "Dokumen akhir belum berhasil diterbitkan otomatis.");
     }
   } catch (error) {
+    await cleanupFinalActivityDraftDocuments({ caseIds }).catch(() => {});
     await cleanupCreatedFinalActivityCases({ caseIds: createdCaseIds }).catch(() => {});
     if (error?.statusCode === 409) throw error;
     throw createRouteError(
-      error?.statusCode === 404 ? 409 : (error?.statusCode || 500),
+      409,
       error?.message || "Generate/publish otomatis gagal."
     );
   }
@@ -825,6 +876,41 @@ router.get(
         isActive: row.is_active
       }))
     });
+  })
+);
+
+router.post(
+  "/operator/numbering/reserve",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const result = await reserveDocumentCenterNumber({
+      authUser: req.authUser,
+      body: req.body
+    });
+    res.status(201).json(result);
+  })
+);
+
+router.get(
+  "/operator/numbering/reserved-final",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const result = await listReservedDocumentCenterNumbers({
+      authUser: req.authUser
+    });
+    res.json(result);
+  })
+);
+
+router.post(
+  "/operator/numbering/release",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const result = await releaseDocumentCenterNumber({
+      authUser: req.authUser,
+      body: req.body
+    });
+    res.json(result);
   })
 );
 

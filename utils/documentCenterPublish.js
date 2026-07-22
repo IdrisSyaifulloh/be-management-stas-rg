@@ -32,7 +32,7 @@ function parseBulkPublishBody(body) {
     throw createHttpError(400, "Input tidak valid.");
   }
   const keys = Object.keys(body);
-  if (keys.some((key) => key !== "documentIds")) {
+  if (keys.some((key) => !["documentIds", "issueBatchIdsByTypeCode"].includes(key))) {
     throw createHttpError(400, "Input tidak valid.");
   }
   if (!Array.isArray(body.documentIds) || body.documentIds.length < 1 || body.documentIds.length > 100) {
@@ -42,7 +42,21 @@ function parseBulkPublishBody(body) {
   if (new Set(documentIds).size !== documentIds.length) {
     throw createHttpError(400, "Input tidak valid.");
   }
-  return documentIds;
+
+  const issueBatchIdsByTypeCode = {};
+  if (body.issueBatchIdsByTypeCode != null) {
+    if (!body.issueBatchIdsByTypeCode || typeof body.issueBatchIdsByTypeCode !== "object" || Array.isArray(body.issueBatchIdsByTypeCode)) {
+      throw createHttpError(400, "Input tidak valid.");
+    }
+    for (const [typeCode, issueBatchId] of Object.entries(body.issueBatchIdsByTypeCode)) {
+      if (!/^[0-9]{2}$/.test(typeCode)) {
+        throw createHttpError(400, "Input tidak valid.");
+      }
+      issueBatchIdsByTypeCode[typeCode] = requireSafeId(issueBatchId, "issueBatchId");
+    }
+  }
+
+  return { documentIds, issueBatchIdsByTypeCode };
 }
 
 function isNonEmptyObject(value) {
@@ -160,6 +174,349 @@ async function createIssueBatch(client, { typeCode, publishTime, operatorUserId 
   return { id, typeCode, sequence, documentNumber, issuedAt: publishTime.issued_at };
 }
 
+function parseReserveNumberBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw createHttpError(400, "Input tidak valid.");
+  }
+  const keys = Object.keys(body);
+  if (keys.some((key) => !["documentDefinitionId", "note"].includes(key))) {
+    throw createHttpError(400, "Input tidak valid.");
+  }
+  const documentDefinitionId = requireSafeId(body.documentDefinitionId, "documentDefinitionId");
+  const note = body.note == null ? null : String(body.note).trim();
+  if (note && note.length > 500) {
+    throw createHttpError(400, "Catatan maksimal 500 karakter.");
+  }
+  return { documentDefinitionId, note: note || null };
+}
+
+async function reserveDocumentCenterNumber({ authUser, body }) {
+  const { documentDefinitionId, note } = parseReserveNumberBody(body);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const definitionResult = await client.query(
+      `
+      SELECT id, type_code, type_name, name, document_purpose, request_mode, is_active
+      FROM dc_document_definitions
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [documentDefinitionId]
+    );
+    const definition = definitionResult.rows[0];
+    if (!definition || !/^[0-9]{2}$/.test(definition.type_code || "")) {
+      throw createHttpError(404, "Jenis dokumen tidak ditemukan.");
+    }
+
+    const publishTime = await getPublishTimestamp(client);
+    const batch = await createIssueBatch(client, {
+      typeCode: definition.type_code,
+      publishTime,
+      operatorUserId: authUser.id
+    });
+
+    await client.query(
+      `INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+       VALUES ($1, $2, 'Operator', 'Create', 'document_center_number_reserved', $3)`,
+      [
+        `AUD-${crypto.randomUUID()}`,
+        authUser.id,
+        JSON.stringify({
+          event: "document_center_number_reserved",
+          issueBatchId: batch.id,
+          documentDefinitionId: definition.id,
+          typeCode: definition.type_code,
+          documentNumber: batch.documentNumber,
+          note
+        })
+      ]
+    );
+
+    await client.query("COMMIT");
+    return {
+      id: batch.id,
+      documentNumber: batch.documentNumber,
+      typeCode: batch.typeCode,
+      sequence: batch.sequence,
+      issuedAt: batch.issuedAt,
+      definition: {
+        id: definition.id,
+        name: definition.name,
+        typeName: definition.type_name,
+        documentPurpose: definition.document_purpose,
+        requestMode: definition.request_mode,
+        isActive: definition.is_active
+      },
+      note
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function parseReleaseNumberBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw createHttpError(400, "Input tidak valid.");
+  }
+  const keys = Object.keys(body);
+  if (keys.some((key) => key !== "issueBatchId")) {
+    throw createHttpError(400, "Input tidak valid.");
+  }
+  return { issueBatchId: requireSafeId(body.issueBatchId, "issueBatchId") };
+}
+
+function mapReservedNumberRow(row) {
+  return {
+    id: row.id,
+    documentNumber: row.document_number,
+    typeCode: row.type_code,
+    sequence: Number(row.sequence_number),
+    issuedAt: row.issued_at,
+    definition: {
+      id: row.definition_id,
+      name: row.definition_name,
+      typeName: row.type_name,
+      documentPurpose: row.document_purpose,
+      requestMode: row.request_mode,
+      isActive: row.is_active
+    },
+    note: row.note || null
+  };
+}
+
+async function listReservedDocumentCenterNumbers({ authUser }) {
+  const result = await pool.query(
+    `
+    WITH number_events AS (
+      SELECT
+        al.logged_at,
+        'reserved' AS event_name,
+        al.detail->>'issueBatchId' AS issue_batch_id,
+        al.detail->>'documentDefinitionId' AS document_definition_id,
+        al.detail->>'typeCode' AS type_code,
+        al.detail->>'note' AS note
+      FROM audit_logs al
+      WHERE al.user_id = $1
+        AND al.target = 'document_center_number_reserved'
+      UNION ALL
+      SELECT
+        al.logged_at,
+        'released' AS event_name,
+        al.detail->>'issueBatchId' AS issue_batch_id,
+        NULL AS document_definition_id,
+        al.detail->>'typeCode' AS type_code,
+        NULL AS note
+      FROM audit_logs al
+      WHERE al.user_id = $1
+        AND al.target = 'document_center_number_released'
+    ),
+    latest_events AS (
+      SELECT DISTINCT ON (type_code) *
+      FROM number_events
+      WHERE type_code IS NOT NULL
+      ORDER BY type_code, logged_at DESC, event_name DESC
+    )
+    SELECT
+      b.id,
+      b.document_number,
+      b.type_code,
+      b.sequence_number,
+      b.issued_at,
+      d.id AS definition_id,
+      d.name AS definition_name,
+      d.type_name,
+      d.document_purpose,
+      d.request_mode,
+      d.is_active,
+      h.note,
+      h.logged_at
+    FROM latest_events h
+    JOIN dc_issue_batches b ON b.id = h.issue_batch_id
+    JOIN dc_document_definitions d ON d.id = h.document_definition_id
+    WHERE h.event_name = 'reserved'
+      AND (
+        b.type_code IN ('09', '13')
+        OR NOT EXISTS (
+          SELECT 1 FROM dc_official_documents od WHERE od.issue_batch_id = b.id
+        )
+      )
+    ORDER BY h.type_code
+    `,
+    [authUser.id]
+  );
+
+  return { items: result.rows.map(mapReservedNumberRow) };
+}
+
+async function releaseDocumentCenterNumber({ authUser, body }) {
+  const { issueBatchId } = parseReleaseNumberBody(body);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `
+      SELECT
+        b.id,
+        b.document_number,
+        b.type_code,
+        b.sequence_number,
+        b.issued_at
+      FROM dc_issue_batches b
+      WHERE b.id = $1
+        AND EXISTS (
+          SELECT 1
+          FROM audit_logs al
+          WHERE al.user_id = $2
+            AND al.target = 'document_center_number_reserved'
+            AND al.detail->>'issueBatchId' = b.id
+        )
+      LIMIT 1
+      `,
+      [issueBatchId, authUser.id]
+    );
+    const batch = result.rows[0];
+    if (!batch) {
+      throw createHttpError(404, "Nomor dokumen tidak ditemukan.");
+    }
+
+    await client.query(
+      `INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+       VALUES ($1, $2, 'Operator', 'Update', 'document_center_number_released', $3)`,
+      [
+        `AUD-${crypto.randomUUID()}`,
+        authUser.id,
+        JSON.stringify({
+          event: "document_center_number_released",
+          issueBatchId: batch.id,
+          typeCode: batch.type_code,
+          documentNumber: batch.document_number
+        })
+      ]
+    );
+
+    await client.query("COMMIT");
+    return {
+      released: true,
+      issueBatchId: batch.id,
+      typeCode: batch.type_code,
+      documentNumber: batch.document_number
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function mapIssueBatchRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    typeCode: row.type_code,
+    sequence: Number(row.sequence_number),
+    documentNumber: row.document_number,
+    issuedAt: row.issued_at,
+    reused: true
+  };
+}
+
+async function findReusableFinalActivityIssueBatch(client, { documentId, typeCode, publishTime }) {
+  const completion = await client.query(
+    `
+    SELECT b.id, b.type_code, b.sequence_number, b.document_number, b.issued_at
+    FROM dc_final_activity_cases current_case
+    JOIN dc_final_activity_cases existing_case
+      ON existing_case.completion_document_definition_id = current_case.completion_document_definition_id
+     AND existing_case.activity_type = current_case.activity_type
+     AND existing_case.period_key = current_case.period_key
+     AND existing_case.outcome = current_case.outcome
+    JOIN dc_official_documents existing_document
+      ON existing_document.id = existing_case.completion_document_id
+    JOIN dc_issue_batches b
+      ON b.id = existing_document.issue_batch_id
+    WHERE current_case.completion_document_id = $1
+      AND existing_case.id <> current_case.id
+      AND existing_document.status IN ('terbit', 'diarsipkan')
+      AND existing_document.document_definition_id = current_case.completion_document_definition_id
+      AND b.type_code = $2
+      AND b.sequence_year = $3
+    ORDER BY b.issued_at ASC, b.created_at ASC, b.id ASC
+    LIMIT 1
+    `,
+    [documentId, typeCode, publishTime.sequence_year]
+  );
+  if (completion.rowCount) return mapIssueBatchRow(completion.rows[0]);
+
+  const certificate = await client.query(
+    `
+    SELECT b.id, b.type_code, b.sequence_number, b.document_number, b.issued_at
+    FROM dc_final_activity_case_projects current_project
+    JOIN dc_final_activity_cases current_case
+      ON current_case.id = current_project.final_activity_case_id
+    JOIN dc_final_activity_case_projects existing_project
+      ON existing_project.certificate_document_definition_id = current_project.certificate_document_definition_id
+    JOIN dc_final_activity_cases existing_case
+      ON existing_case.id = existing_project.final_activity_case_id
+     AND existing_case.activity_type = current_case.activity_type
+     AND existing_case.period_key = current_case.period_key
+     AND existing_case.outcome = current_case.outcome
+    JOIN dc_official_documents existing_document
+      ON existing_document.id = existing_project.certificate_document_id
+    JOIN dc_issue_batches b
+      ON b.id = existing_document.issue_batch_id
+    WHERE current_project.certificate_document_id = $1
+      AND existing_project.id <> current_project.id
+      AND existing_project.certificate_required = TRUE
+      AND existing_document.status IN ('terbit', 'diarsipkan')
+      AND existing_document.document_definition_id = current_project.certificate_document_definition_id
+      AND b.type_code = $2
+      AND b.sequence_year = $3
+    ORDER BY b.issued_at ASC, b.created_at ASC, b.id ASC
+    LIMIT 1
+    `,
+    [documentId, typeCode, publishTime.sequence_year]
+  );
+  if (certificate.rowCount) return mapIssueBatchRow(certificate.rows[0]);
+
+  return null;
+}
+
+async function loadReservedIssueBatches(client, { issueBatchIdsByTypeCode, requiredTypeCodes }) {
+  const entries = Object.entries(issueBatchIdsByTypeCode || {});
+  if (!entries.length) return new Map();
+
+  const required = new Set(requiredTypeCodes);
+  const reserved = new Map();
+  for (const [typeCode, issueBatchId] of entries) {
+    if (!required.has(typeCode)) {
+      // A retry may repair a legacy partial case (for example, certificate
+      // already issued but completion letter still missing). Keep the other
+      // reserved number untouched instead of rejecting the whole operation.
+      continue;
+    }
+    const batch = await client.query(
+      `
+      SELECT id, type_code, sequence_number, document_number, issued_at
+      FROM dc_issue_batches
+      WHERE id=$1 AND type_code=$2
+      FOR UPDATE
+      `,
+      [issueBatchId, typeCode]
+    );
+    if (!batch.rowCount) throw createHttpError(404, "Nomor dokumen tidak ditemukan.");
+
+    const mapped = mapIssueBatchRow(batch.rows[0]);
+    mapped.reserved = true;
+    reserved.set(typeCode, mapped);
+  }
+  return reserved;
+}
+
 async function validateLockedDocumentForPublish(client, safeDocumentId, document) {
   if (!Number.isInteger(document.current_version_number) || document.current_version_number < 1 || !document.version_id) {
     throw unavailableFileError();
@@ -204,6 +561,8 @@ async function publishPreparedDocument({
   const generatedFiles = [];
   const isCompletionLetter = document.definition_id === "DCDEF-COMPLETE-NORMAL-01" ||
     document.definition_id === "DCDEF-COMPLETE-EARLY-01";
+  const isGeneratedCertificate = document.definition_id === "DCDEF-CERT-NORMAL-01" ||
+    document.definition_id === "DCDEF-CERT-EARLY-01";
   const generatedFinal = isCompletionLetter
     ? await renderPublishedCompletionLetterVersion({
       client,
@@ -211,12 +570,14 @@ async function publishPreparedDocument({
       documentNumber: issueBatch.documentNumber,
       issuedAt: issueBatch.issuedAt
     })
-    : await renderPublishedCertificateVersion({
-      client,
-      document,
-      documentNumber: issueBatch.documentNumber,
-      issuedAt: issueBatch.issuedAt
-    });
+    : isGeneratedCertificate
+      ? await renderPublishedCertificateVersion({
+        client,
+        document,
+        documentNumber: issueBatch.documentNumber,
+        issuedAt: issueBatch.issuedAt
+      })
+      : null;
 
   let nextVersionNumber = document.current_version_number;
   if (generatedFinal) {
@@ -344,7 +705,7 @@ async function publishPreparedDocument({
   return { row: updated.rows[0], generatedFiles };
 }
 
-async function publishDocumentsInIssueBatches({ documentIds, authUser, ip }) {
+async function publishDocumentsInIssueBatches({ documentIds, authUser, ip, reuseFinalActivityIssueBatches = false, issueBatchIdsByTypeCode = {} }) {
   const safeDocumentIds = [...new Set(documentIds.map((id) => requireSafeId(id, "documentIds")))].sort();
   const operatorUserId = requireSafeId(authUser?.id, "userId");
   let client;
@@ -367,23 +728,41 @@ async function publishDocumentsInIssueBatches({ documentIds, authUser, ip }) {
     }
 
     const publishTime = await getPublishTimestamp(client);
-    const batchesByTypeCode = new Map();
+    const reservedIssueBatches = await loadReservedIssueBatches(client, {
+      issueBatchIdsByTypeCode,
+      requiredTypeCodes: prepared.map((item) => item.document.type_code)
+    });
+    const batchesByKey = new Map();
     for (const item of prepared) {
-      if (!batchesByTypeCode.has(item.document.type_code)) {
-        batchesByTypeCode.set(
-          item.document.type_code,
-          await createIssueBatch(client, {
+      let issueBatch = reservedIssueBatches.get(item.document.type_code) || null;
+      if (!issueBatch && reuseFinalActivityIssueBatches) {
+        issueBatch = await findReusableFinalActivityIssueBatch(client, {
+          documentId: item.safeDocumentId,
+          typeCode: item.document.type_code,
+          publishTime
+        });
+      }
+      if (!issueBatch && reuseFinalActivityIssueBatches) {
+        throw createHttpError(409, `Ambil nomor dokumen kode ${item.document.type_code} terlebih dahulu.`);
+      }
+
+      const batchKey = issueBatch ? `existing:${issueBatch.id}` : `new:${item.document.type_code}`;
+      if (!batchesByKey.has(batchKey)) {
+        batchesByKey.set(
+          batchKey,
+          issueBatch || await createIssueBatch(client, {
             typeCode: item.document.type_code,
             publishTime,
             operatorUserId
           })
         );
       }
+      item.batchKey = batchKey;
     }
 
     const results = [];
     for (const item of prepared) {
-      const issueBatch = batchesByTypeCode.get(item.document.type_code);
+      const issueBatch = batchesByKey.get(item.batchKey);
       const published = await publishPreparedDocument({
         client,
         document: item.document,
@@ -416,12 +795,14 @@ async function publishDocumentsInIssueBatches({ documentIds, authUser, ip }) {
 
     return {
       items: results,
-      batches: [...batchesByTypeCode.values()].map((batch) => ({
+      batches: [...batchesByKey.values()].map((batch) => ({
         id: batch.id,
         typeCode: batch.typeCode,
         sequence: batch.sequence,
         documentNumber: batch.documentNumber,
-        issuedAt: batch.issuedAt
+        issuedAt: batch.issuedAt,
+        reused: batch.reused === true,
+        reserved: batch.reserved === true
       }))
     };
   } catch (error) {
@@ -443,12 +824,15 @@ async function publishDocument({ documentId, authUser, ip, body }) {
   return result.items[0];
 }
 
-async function publishDocumentBatch({ authUser, ip, body }) {
-  const documentIds = parseBulkPublishBody(body);
-  return publishDocumentsInIssueBatches({ documentIds, authUser, ip });
+async function publishDocumentBatch({ authUser, ip, body, reuseFinalActivityIssueBatches = false }) {
+  const { documentIds, issueBatchIdsByTypeCode } = parseBulkPublishBody(body);
+  return publishDocumentsInIssueBatches({ documentIds, authUser, ip, reuseFinalActivityIssueBatches, issueBatchIdsByTypeCode });
 }
 
 module.exports = {
   publishDocument,
-  publishDocumentBatch
+  publishDocumentBatch,
+  reserveDocumentCenterNumber,
+  listReservedDocumentCenterNumbers,
+  releaseDocumentCenterNumber
 };
