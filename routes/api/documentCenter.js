@@ -48,7 +48,8 @@ const {
   detailCase: detailFinalActivityCase,
   uploadCompletionDraft,
   uploadCertificateDraft,
-  updateFinalActivityDynamicData
+  updateFinalActivityDynamicData,
+  cleanupCreatedFinalActivityCases
 } = require("../../utils/documentCenterFinalActivity");
 const {
   listTemplates,
@@ -116,6 +117,12 @@ function parseDocumentCenterLimit(value) {
     throw error;
   }
   return parseBoundedLimit(parsed, 20, 100);
+}
+
+function createRouteError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
 }
 
 function parseListOptions(req, allowedStatuses) {
@@ -564,19 +571,75 @@ router.get("/operator/final-activity/early-exit/eligible", requireRoleStrict(["o
 router.post("/operator/final-activity/cases", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   const result = await createFinalActivityCases({ body: req.body, authUser: req.authUser, ip: req.ip });
   const documentIds = [];
+  const caseIds = [];
+  const createdCaseIds = [];
   for (const item of result.items || []) {
+    if (["created", "existing"].includes(item?.status) && item?.caseId) caseIds.push(item.caseId);
+    if (item?.status === "created" && item?.caseId) createdCaseIds.push(item.caseId);
     if (item?.completionDraft?.documentId) documentIds.push(item.completionDraft.documentId);
     for (const draft of item?.certificateDrafts || []) {
       if (draft?.documentId) documentIds.push(draft.documentId);
     }
   }
-  const uniqueDocumentIds = [...new Set(documentIds)];
-  if (uniqueDocumentIds.length) {
+  const successfulItems = (result.items || []).filter((item) => ["created", "existing"].includes(item?.status));
+  const failedItems = (result.items || []).filter((item) => !["created", "existing"].includes(item?.status));
+  if (failedItems.length) {
+    await cleanupCreatedFinalActivityCases({ caseIds: createdCaseIds });
+    throw createRouteError(409, failedItems[0]?.message || "Dokumen akhir tidak dapat didaftarkan.");
+  }
+
+  try {
+    for (const item of successfulItems) {
+      const drafts = [
+        item.completionDraft,
+        ...(item.certificateDrafts || [])
+      ].filter(Boolean);
+      const blockedDraft = drafts.find((draft) => !["created", "existing", "not_applicable"].includes(draft?.status));
+      if (blockedDraft) {
+        throw createRouteError(409, blockedDraft.message || "Draft dokumen akhir tidak dapat dibuat.");
+      }
+    }
+
+    for (const caseId of [...new Set(caseIds)]) {
+      const detail = await detailFinalActivityCase(caseId);
+      if (
+        detail?.completionDocument?.status === "draft" &&
+        Number(detail.completionDocument.currentVersionNumber) > 0
+      ) {
+        documentIds.push(detail.completionDocument.id);
+      }
+      for (const project of detail?.projects || []) {
+        if (
+          project?.certificateDocument?.status === "draft" &&
+          Number(project.certificateDocument.currentVersionNumber) > 0
+        ) {
+          documentIds.push(project.certificateDocument.id);
+        }
+      }
+    }
+
+    const uniqueDocumentIds = [...new Set(documentIds)];
+    if (!uniqueDocumentIds.length) {
+      throw createRouteError(409, "Dokumen akhir tidak dapat dibuat.");
+    }
+
     result.autoPublish = await publishDocumentBatch({
       authUser: req.authUser,
       ip: req.ip,
       body: { documentIds: uniqueDocumentIds }
     });
+
+    const publishedIds = new Set((result.autoPublish?.items || []).filter((item) => item.status === "terbit").map((item) => item.id));
+    if (publishedIds.size !== uniqueDocumentIds.length || uniqueDocumentIds.some((id) => !publishedIds.has(id))) {
+      throw createRouteError(409, "Dokumen akhir belum berhasil diterbitkan otomatis.");
+    }
+  } catch (error) {
+    await cleanupCreatedFinalActivityCases({ caseIds: createdCaseIds }).catch(() => {});
+    if (error?.statusCode === 409) throw error;
+    throw createRouteError(
+      error?.statusCode === 404 ? 409 : (error?.statusCode || 500),
+      error?.message || "Generate/publish otomatis gagal."
+    );
   }
   res.status(201).json(result);
 }));
