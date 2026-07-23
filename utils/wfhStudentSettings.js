@@ -9,7 +9,7 @@ async function getWfhStudentSettings() {
       true AS "hasSetting"
     FROM students s
     JOIN users u ON u.id = s.user_id
-    WHERE s.tipe = 'Magang'
+    WHERE s.tipe = 'Magang' AND s.status NOT IN ('Alumni', 'Mengundurkan Diri')
     ORDER BY u.name ASC
     LIMIT 1000
   `);
@@ -24,7 +24,7 @@ async function getDistinctStudents() {
       u.name AS "studentName"
     FROM students s
     JOIN users u ON u.id = s.user_id
-    WHERE s.tipe = 'Magang'
+    WHERE s.tipe = 'Magang' AND s.status NOT IN ('Alumni', 'Mengundurkan Diri')
     ORDER BY u.name ASC
     LIMIT 1000
   `);
