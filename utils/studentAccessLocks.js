@@ -24,7 +24,7 @@ const ACCESS_LOCK_REASON_DETAILS = {
   },
   [ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]: {
     label: "Belum Checkout Sampai 22.00 WIB",
-    message: "Tercatat belum checkout sampai pukul 22.00 WIB, tetapi tidak mengunci akses website."
+    message: "Akses dikunci karena tercatat belum checkout sampai pukul 22.00 WIB."
   },
   [ACCESS_LOCK_REASON_WFH_CHECKIN_MISSING]: {
     label: "WFH Belum Check-in",
@@ -538,7 +538,6 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
       AND sal.active = TRUE
       AND sal.locked = TRUE
       AND sal.status = 'LOCKED'
-      AND sal.reason <> $3
       AND NOT (sal.reason = $2 AND s.tipe = 'Riset')
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
     `,
@@ -589,7 +588,7 @@ async function listAccessLocks({ status = null, search = null } = {}) {
     FROM student_access_locks sal
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id
-    WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND sal.reason <> $3 AND s.status = 'Aktif'))
+    WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND s.status = 'Aktif'))
       AND NOT (sal.reason = $2 AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
       ${searchClause}
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
