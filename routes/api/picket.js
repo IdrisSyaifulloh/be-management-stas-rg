@@ -24,14 +24,17 @@ const {
   listPicketManagers,
   listPicketSchedules,
   listPicketSubmissions,
+  listPicketStudentDays,
   listPicketStudentOptions,
   listPicketTasks,
   replacePicketManagers,
+  randomizePicketStudentDays,
   resyncPicketSchedule,
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
   updatePicketSchedule,
   updatePicketHoliday,
+  setPicketStudentDay,
   updatePicketSettings,
   updatePicketTask
 } = require("../../utils/picketService");
@@ -196,6 +199,42 @@ router.get(
 );
 
 router.get(
+  "/student-days",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const items = await listPicketStudentDays();
+    return res.json({ items, assignments: items });
+  })
+);
+
+router.patch(
+  "/student-days/:studentId",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const studentId = requireSafeId(req.params.studentId, "studentId");
+    const item = await setPicketStudentDay({
+      studentId,
+      dayId: req.body?.dayId ?? req.body?.day_id,
+      assignedBy: req.authUser?.id || null
+    });
+    return res.json({ message: "Hari piket tetap berhasil diperbarui.", item });
+  })
+);
+
+router.post(
+  "/student-days/randomize",
+  asyncHandler(async (req, res) => {
+    if (!(await requirePicketManager(req, res))) return;
+    const items = await randomizePicketStudentDays({ assignedBy: req.authUser?.id || null });
+    return res.json({
+      message: "Hari piket seluruh mahasiswa aktif berhasil diacak ulang.",
+      items,
+      assignments: items
+    });
+  })
+);
+
+router.get(
   "/tasks",
   asyncHandler(async (req, res) => {
     const includeInactive = String(req.query.includeInactive || "true").toLowerCase() !== "false";
@@ -322,11 +361,6 @@ router.post(
     if (!(await requirePicketManager(req, res))) return;
     const result = await generatePicketSchedule({
       date: req.body?.date,
-      peoplePerDay: req.body?.peoplePerDay ?? req.body?.people_per_day,
-      randomize: req.body?.randomize,
-      studentIds: req.body?.studentIds || req.body?.student_ids,
-      replaceExisting: req.body?.replaceExisting ?? req.body?.replace_existing,
-      overwrite: req.body?.overwrite,
       generatedBy: req.authUser?.id || null
     });
     return res.status(201).json(result);

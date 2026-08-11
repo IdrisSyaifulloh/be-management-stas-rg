@@ -313,6 +313,9 @@ autoAlumniJob.startMonitoring();
 var weeklyResearchAttendanceSuspensionJob = require("./jobs/weeklyResearchAttendanceSuspension");
 weeklyResearchAttendanceSuspensionJob.startMonitoring();
 
+var picketScheduleJob = require("./jobs/picketScheduleScheduler");
+picketScheduleJob.startMonitoring();
+
 // ======================================================
 // ROUTES
 // ======================================================

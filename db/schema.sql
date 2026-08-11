@@ -493,6 +493,15 @@ ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name,
     updated_at = NOW();
 
+CREATE TABLE IF NOT EXISTS picket_student_days (
+  student_id TEXT PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+  day_id SMALLINT NOT NULL REFERENCES picket_days(id),
+  effective_from DATE NOT NULL DEFAULT CURRENT_DATE,
+  assigned_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS picket_schedules (
   id TEXT PRIMARY KEY,
   schedule_date DATE NOT NULL,
@@ -539,10 +548,34 @@ CREATE TABLE IF NOT EXISTS picket_leave_requests (
   reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   reviewed_at TIMESTAMPTZ,
   review_note TEXT,
+  replacement_schedule_id TEXT REFERENCES picket_schedules(id) ON DELETE SET NULL,
+  replacement_date DATE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(schedule_id, student_id)
 );
+
+ALTER TABLE picket_leave_requests
+  ADD COLUMN IF NOT EXISTS replacement_schedule_id TEXT,
+  ADD COLUMN IF NOT EXISTS replacement_date DATE;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'picket_leave_requests_replacement_schedule_id_fkey'
+      AND conrelid = 'picket_leave_requests'::regclass
+  ) THEN
+    ALTER TABLE picket_leave_requests
+      ADD CONSTRAINT picket_leave_requests_replacement_schedule_id_fkey
+      FOREIGN KEY (replacement_schedule_id)
+      REFERENCES picket_schedules(id)
+      ON DELETE SET NULL
+      NOT VALID;
+  END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS picket_managers (
   student_id TEXT PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
@@ -649,7 +682,9 @@ CREATE INDEX IF NOT EXISTS idx_picket_schedules_date ON picket_schedules(schedul
 CREATE INDEX IF NOT EXISTS idx_picket_schedules_student_date ON picket_schedules(student_id, schedule_date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_replacement_schedule ON picket_leave_requests(replacement_schedule_id);
 CREATE INDEX IF NOT EXISTS idx_picket_holidays_date ON picket_holidays(holiday_date);
+CREATE INDEX IF NOT EXISTS idx_picket_student_days_day ON picket_student_days(day_id, student_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_logged_at ON audit_logs(logged_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created ON notifications(recipient_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dashboard_reminders_student_date ON dashboard_reminder_logs(student_id, type, reference_date, sent_at DESC);

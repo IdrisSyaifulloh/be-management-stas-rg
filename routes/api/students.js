@@ -1,6 +1,6 @@
 const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
-const { query } = require("../../db/pool");
+const { pool, query } = require("../../db/pool");
 const bcrypt = require("bcrypt");
 const {
   parseBoundedLimit,
@@ -12,6 +12,10 @@ const {
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 const crypto = require("crypto");
 const { createNotification } = require("../../utils/notificationService");
+const {
+  assignPicketDayForStudent,
+  ensurePicketTables
+} = require("../../utils/picketService");
 const {
   ensureStudentDocumentsTable,
   fetchStudentDocuments,
@@ -145,10 +149,16 @@ function normalizeOptionalEmail(value) {
   return normalized;
 }
 
-async function ensureEmailAvailable(email, excludeUserId = null) {
+function runQuery(executor, text, params) {
+  if (typeof executor === "function") return executor(text, params);
+  return executor.query(text, params);
+}
+
+async function ensureEmailAvailable(email, excludeUserId = null, executor = query) {
   if (!email) return;
 
-  const result = await query(
+  const result = await runQuery(
+    executor,
     `
     SELECT id
     FROM users
@@ -275,14 +285,15 @@ async function resolveResearchMemberships(input, fallbackBergabung) {
   return resolved;
 }
 
-async function syncStudentResearchMemberships({ userId, researchMemberships }) {
+async function syncStudentResearchMemberships({ userId, researchMemberships, executor = query }) {
   if (!userId) return;
 
   const memberships = Array.isArray(researchMemberships) ? researchMemberships : [];
   const projectIds = memberships.map((item) => item.projectId);
 
   if (projectIds.length === 0) {
-    await query(
+    await runQuery(
+      executor,
       `
       DELETE FROM research_memberships
       WHERE user_id = $1 AND member_type = 'Mahasiswa'
@@ -292,7 +303,8 @@ async function syncStudentResearchMemberships({ userId, researchMemberships }) {
     return;
   }
 
-  await query(
+  await runQuery(
+    executor,
     `
     DELETE FROM research_memberships
     WHERE user_id = $1
@@ -302,7 +314,8 @@ async function syncStudentResearchMemberships({ userId, researchMemberships }) {
     [userId, projectIds]
   );
 
-  await query(
+  await runQuery(
+    executor,
     `
     INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung, selesai)
     SELECT selected.project_id,
@@ -673,9 +686,14 @@ router.post(
       return res.status(error?.statusCode || 400).json({ message: error.message });
     }
 
-    await query("BEGIN");
+    if (status === "Aktif") {
+      await ensurePicketTables();
+    }
+
+    const client = await pool.connect();
 
     try {
+      await client.query("BEGIN");
       const timestamp = Date.now();
       const randomSuffix = crypto.randomUUID().slice(0, 8);
       const userId = `usr_mhs_${timestamp}${randomSuffix}`;
@@ -683,9 +701,9 @@ router.post(
 
       const passwordHash = await bcrypt.hash(password, 10);
 
-      await ensureEmailAvailable(normalizedEmail);
+      await ensureEmailAvailable(normalizedEmail, null, client);
 
-      await query(
+      await client.query(
         `
         INSERT INTO users (id, name, initials, role, email, prodi, password_hash)
         VALUES ($1, $2, $3, 'mahasiswa', $4, $5, $6)
@@ -693,7 +711,7 @@ router.post(
         [userId, name, initials, normalizedEmail, prodi || null, passwordHash]
       );
 
-      await query(
+      await client.query(
         `
         INSERT INTO students (
           id,
@@ -739,18 +757,33 @@ router.post(
 
       await syncStudentResearchMemberships({
         userId,
-        researchMemberships: resolvedResearchMemberships
+        researchMemberships: resolvedResearchMemberships,
+        executor: client
       });
 
+      const picketDay = status === "Aktif"
+        ? await assignPicketDayForStudent({
+            studentId,
+            assignedBy: req.authUser?.id || null,
+            executor: client
+          })
+        : null;
 
-      await query("COMMIT");
+      await client.query("COMMIT");
 
       return res.status(201).json({
-        message: "Mahasiswa berhasil ditambahkan.",
-        data: { userId, studentId }
+        message: picketDay
+          ? "Mahasiswa berhasil ditambahkan dan mendapatkan hari piket tetap."
+          : "Mahasiswa berhasil ditambahkan.",
+        data: {
+          userId,
+          studentId,
+          picket_day: picketDay,
+          picketDay
+        }
       });
     } catch (error) {
-      await query("ROLLBACK");
+      await client.query("ROLLBACK");
       if (error?.statusCode) {
         return res.status(error.statusCode).json({ message: error.message });
       }
@@ -758,6 +791,8 @@ router.post(
         return res.status(409).json({ message: "Email sudah digunakan oleh akun lain." });
       }
       throw error;
+    } finally {
+      client.release();
     }
   })
 );

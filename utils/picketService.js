@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { pool, query } = require("../db/pool");
 const { getJakartaDateIso } = require("./attendanceHistory");
 const { resolveStudentId, resolveStudentRecord } = require("./studentResolver");
+const { addIsoDays, findNextPicketReplacementDate } = require("./picketLeaveReplacement");
 const {
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
@@ -62,17 +63,6 @@ function normalizeNonNegativeInteger(value, fallback, label) {
     throw error;
   }
   return parsed;
-}
-
-function normalizeBoolean(value, fallback = false) {
-  if (value == null || value === "") return fallback;
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value !== 0;
-
-  const normalized = String(value).trim().toLowerCase();
-  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
-  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
-  return Boolean(value);
 }
 
 function sanitizeFilenameBase(name) {
@@ -174,6 +164,18 @@ async function ensurePicketTables() {
         SET name = EXCLUDED.name,
             updated_at = NOW();
 
+        CREATE TABLE IF NOT EXISTS picket_student_days (
+          student_id TEXT PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+          day_id SMALLINT NOT NULL REFERENCES picket_days(id),
+          effective_from DATE NOT NULL DEFAULT CURRENT_DATE,
+          assigned_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        ALTER TABLE picket_student_days
+        ADD COLUMN IF NOT EXISTS effective_from DATE NOT NULL DEFAULT CURRENT_DATE;
+
         CREATE TABLE IF NOT EXISTS picket_schedules (
           id TEXT PRIMARY KEY,
           schedule_date DATE NOT NULL,
@@ -220,6 +222,8 @@ async function ensurePicketTables() {
           reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           reviewed_at TIMESTAMPTZ,
           review_note TEXT,
+          replacement_schedule_id TEXT REFERENCES picket_schedules(id) ON DELETE SET NULL,
+          replacement_date DATE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE(schedule_id, student_id)
@@ -247,6 +251,7 @@ async function ensurePicketTables() {
         CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
         CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
         CREATE INDEX IF NOT EXISTS idx_picket_holidays_date ON picket_holidays(holiday_date);
+        CREATE INDEX IF NOT EXISTS idx_picket_student_days_day ON picket_student_days(day_id, student_id);
       `);
 
       await query(`
@@ -263,6 +268,7 @@ async function ensurePicketTables() {
             ON CONFLICT (id) DO NOTHING;
           END IF;
         END $$;
+
       `);
 
       await query(`
@@ -304,6 +310,10 @@ async function ensurePicketTables() {
         ALTER TABLE picket_leave_requests
         ADD COLUMN IF NOT EXISTS schedule_id TEXT;
 
+        ALTER TABLE picket_leave_requests
+        ADD COLUMN IF NOT EXISTS replacement_schedule_id TEXT,
+        ADD COLUMN IF NOT EXISTS replacement_date DATE;
+
         UPDATE picket_leave_requests
         SET schedule_id = COALESCE(schedule_id, assignment_id)
         WHERE schedule_id IS NULL;
@@ -334,7 +344,19 @@ async function ensurePicketTables() {
             ALTER TABLE picket_leave_requests
             ADD CONSTRAINT picket_leave_requests_schedule_id_student_id_key UNIQUE (schedule_id, student_id);
           END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'picket_leave_requests_replacement_schedule_id_fkey'
+          ) THEN
+            ALTER TABLE picket_leave_requests
+            ADD CONSTRAINT picket_leave_requests_replacement_schedule_id_fkey
+            FOREIGN KEY (replacement_schedule_id) REFERENCES picket_schedules(id) ON DELETE SET NULL
+            NOT VALID;
+          END IF;
         END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_replacement_schedule
+        ON picket_leave_requests(replacement_schedule_id);
       `);
 
       await query(`
@@ -350,6 +372,8 @@ async function ensurePicketTables() {
         `,
         [DEFAULT_SETTINGS_ID]
       );
+
+      await initializePicketStudentDays();
     })();
   }
 
@@ -381,7 +405,7 @@ function normalizeWeeklySchedule(value) {
   const byDay = new Map();
 
   for (const item of items) {
-    const dayOfWeek = Number(item?.dayOfWeek ?? item?.day_of_week);
+    const dayOfWeek = Number(item?.dayOfWeek ?? item?.day_of_week ?? item?.dayId ?? item?.day_id);
     if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) continue;
 
     const studentIds = [...new Set((item?.studentIds || item?.student_ids || [])
@@ -393,7 +417,9 @@ function normalizeWeeklySchedule(value) {
       dayOfWeek,
       day_of_week: dayOfWeek,
       label: String(item?.label || "").trim(),
-      enabled: item?.enabled === undefined ? true : Boolean(item.enabled),
+      enabled: item?.enabled === undefined && item?.active === undefined
+        ? true
+        : Boolean(item?.enabled ?? item?.active),
       peoplePerDay: normalizePositiveInteger(
         item?.peoplePerDay ?? item?.people_per_day,
         fallbackPeoplePerDay,
@@ -418,9 +444,244 @@ function getJakartaDayOfWeek(isoDate) {
   return parsed.getUTCDay();
 }
 
-function getWeeklyScheduleForDate(settings, isoDate) {
-  const dayOfWeek = getJakartaDayOfWeek(isoDate);
-  return (settings.weeklySchedule || []).find((item) => item.enabled !== false && item.dayOfWeek === dayOfWeek) || null;
+function chooseLeastLoadedPicketDay(dayIds, countsByDay, random = Math.random) {
+  if (!Array.isArray(dayIds) || dayIds.length === 0) return null;
+  const minimum = Math.min(...dayIds.map((dayId) => Number(countsByDay.get(dayId) || 0)));
+  const candidates = dayIds.filter((dayId) => Number(countsByDay.get(dayId) || 0) === minimum);
+  return candidates[Math.floor(random() * candidates.length)] ?? candidates[0] ?? null;
+}
+
+function buildRandomizedPicketDayAssignments(studentIds, dayIds, random = Math.random) {
+  if (!Array.isArray(dayIds) || dayIds.length === 0) return [];
+  const randomizedStudents = shuffle(studentIds, random);
+  const randomizedDays = shuffle(dayIds, random);
+  return randomizedStudents.map((studentId, index) => ({
+    studentId,
+    dayId: randomizedDays[index % randomizedDays.length]
+  }));
+}
+
+async function getFixedPicketDayConfig(executor = query) {
+  const [settingsResult, daysResult] = await Promise.all([
+    runQuery(executor, "SELECT * FROM picket_settings WHERE id = $1 LIMIT 1", [DEFAULT_SETTINGS_ID]),
+    runQuery(executor, "SELECT id, name FROM picket_days WHERE active = TRUE ORDER BY id ASC")
+  ]);
+  const settings = mapSettings(settingsResult.rows[0]);
+  const activeDays = daysResult.rows.map((row) => ({ id: Number(row.id), name: row.name }));
+  const activeDayIds = new Set(activeDays.map((day) => day.id));
+  const configuredDayIds = settings.weeklySchedule
+    .filter((item) => item.enabled !== false && activeDayIds.has(item.dayOfWeek))
+    .map((item) => item.dayOfWeek);
+
+  return {
+    settings,
+    activeDays,
+    dayIds: configuredDayIds.length > 0 ? configuredDayIds : [...activeDayIds]
+  };
+}
+
+async function syncWeeklyScheduleFromFixedDays(executor = query) {
+  const { settings, activeDays, dayIds } = await getFixedPicketDayConfig(executor);
+  const assignments = await runQuery(
+    executor,
+    `
+    SELECT psd.student_id, psd.day_id
+    FROM picket_student_days psd
+    JOIN students s ON s.id = psd.student_id
+    JOIN users u ON u.id = s.user_id
+    WHERE s.status = 'Aktif' AND u.is_active = TRUE
+    ORDER BY psd.day_id ASC, psd.student_id ASC
+    `
+  );
+  const studentIdsByDay = new Map(dayIds.map((dayId) => [dayId, []]));
+  for (const row of assignments.rows) {
+    const dayId = Number(row.day_id);
+    if (studentIdsByDay.has(dayId)) studentIdsByDay.get(dayId).push(row.student_id);
+  }
+
+  const dayNames = new Map(activeDays.map((day) => [day.id, day.name]));
+  const existingByDay = new Map(settings.weeklySchedule.map((item) => [item.dayOfWeek, item]));
+  const weeklySchedule = dayIds.map((dayId) => {
+    const current = existingByDay.get(dayId);
+    const studentIds = studentIdsByDay.get(dayId) || [];
+    const peoplePerDay = Math.max(1, studentIds.length, Number(current?.peoplePerDay || settings.peoplePerDay));
+    return {
+      dayOfWeek: dayId,
+      day_of_week: dayId,
+      label: current?.label || dayNames.get(dayId) || "",
+      enabled: true,
+      peoplePerDay,
+      people_per_day: peoplePerDay,
+      studentIds,
+      student_ids: studentIds
+    };
+  });
+
+  await runQuery(
+    executor,
+    "UPDATE picket_settings SET weekly_schedule = $2::jsonb, updated_at = NOW() WHERE id = $1",
+    [DEFAULT_SETTINGS_ID, JSON.stringify(weeklySchedule)]
+  );
+  return weeklySchedule;
+}
+
+async function initializePicketStudentDays() {
+  const { settings, dayIds } = await getFixedPicketDayConfig(query);
+  if (dayIds.length === 0) return;
+
+  for (const item of settings.weeklySchedule) {
+    if (!dayIds.includes(item.dayOfWeek)) continue;
+    for (const studentId of item.studentIds) {
+      await query(
+        `
+        INSERT INTO picket_student_days (student_id, day_id)
+        SELECT s.id, $2
+        FROM students s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.id = $1 AND s.status = 'Aktif' AND u.is_active = TRUE
+        ON CONFLICT (student_id) DO NOTHING
+        `,
+        [studentId, item.dayOfWeek]
+      );
+    }
+  }
+
+  await query(
+    `
+    WITH historical_frequency AS (
+      SELECT psch.student_id,
+             EXTRACT(DOW FROM psch.schedule_date)::smallint AS day_id,
+             COUNT(*) AS occurrence_count,
+             MAX(psch.schedule_date) AS latest_date
+      FROM picket_schedules psch
+      WHERE EXTRACT(DOW FROM psch.schedule_date)::smallint = ANY($1::smallint[])
+      GROUP BY psch.student_id, EXTRACT(DOW FROM psch.schedule_date)::smallint
+    ), ranked_history AS (
+      SELECT frequency.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY frequency.student_id
+               ORDER BY frequency.occurrence_count DESC,
+                        frequency.latest_date DESC,
+                        frequency.day_id ASC
+             ) AS rank_number
+      FROM historical_frequency frequency
+    )
+    INSERT INTO picket_student_days (student_id, day_id, effective_from)
+    SELECT s.id, history.day_id, CURRENT_DATE
+    FROM ranked_history history
+    JOIN students s ON s.id = history.student_id
+    JOIN users u ON u.id = s.user_id
+    WHERE history.rank_number = 1
+      AND s.status = 'Aktif'
+      AND u.is_active = TRUE
+    ON CONFLICT (student_id) DO NOTHING
+    `,
+    [dayIds]
+  );
+
+  const [missingResult, countsResult] = await Promise.all([
+    query(
+      `
+      SELECT s.id
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      LEFT JOIN picket_student_days psd ON psd.student_id = s.id
+      WHERE s.status = 'Aktif' AND u.is_active = TRUE AND psd.student_id IS NULL
+      ORDER BY s.id ASC
+      `
+    ),
+    query("SELECT day_id, COUNT(*)::int AS total FROM picket_student_days GROUP BY day_id")
+  ]);
+  const countsByDay = new Map(countsResult.rows.map((row) => [Number(row.day_id), Number(row.total)]));
+
+  for (const student of shuffle(missingResult.rows)) {
+    const dayId = chooseLeastLoadedPicketDay(dayIds, countsByDay);
+    await query(
+      "INSERT INTO picket_student_days (student_id, day_id) VALUES ($1, $2) ON CONFLICT (student_id) DO NOTHING",
+      [student.id, dayId]
+    );
+    countsByDay.set(dayId, Number(countsByDay.get(dayId) || 0) + 1);
+  }
+
+  await syncWeeklyScheduleFromFixedDays(query);
+}
+
+async function applyWeeklyScheduleToFixedDays(weeklySchedule, assignedBy, executor = query) {
+  const enabledItems = weeklySchedule.filter((item) => item.enabled !== false);
+  const { activeDays } = await getFixedPicketDayConfig(executor);
+  const activeDayIds = new Set(activeDays.map((day) => day.id));
+  const dayIds = enabledItems.map((item) => item.dayOfWeek).filter((dayId) => activeDayIds.has(dayId));
+  if (dayIds.length === 0) return;
+
+  const explicitDayByStudent = new Map();
+  for (const item of enabledItems) {
+    if (!dayIds.includes(item.dayOfWeek)) continue;
+    for (const studentId of item.studentIds) {
+      if (explicitDayByStudent.has(studentId) && explicitDayByStudent.get(studentId) !== item.dayOfWeek) {
+        const error = new Error(`Mahasiswa ${studentId} tidak boleh ditempatkan pada lebih dari satu hari piket.`);
+        error.statusCode = 400;
+        throw error;
+      }
+      explicitDayByStudent.set(studentId, item.dayOfWeek);
+    }
+  }
+
+  for (const [studentId, dayId] of explicitDayByStudent) {
+    await runQuery(
+      executor,
+      `
+      INSERT INTO picket_student_days (student_id, day_id, effective_from, assigned_by)
+      SELECT s.id, $2, CURRENT_DATE + 1, $3
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.id = $1 AND s.status = 'Aktif' AND u.is_active = TRUE
+      ON CONFLICT (student_id)
+      DO UPDATE SET day_id = EXCLUDED.day_id,
+                    assigned_by = EXCLUDED.assigned_by,
+                    effective_from = EXCLUDED.effective_from,
+                    assigned_at = NOW(),
+                    updated_at = NOW()
+      `,
+      [studentId, dayId, assignedBy]
+    );
+  }
+
+  const studentsResult = await runQuery(
+    executor,
+    `
+    SELECT s.id, psd.day_id
+    FROM students s
+    JOIN users u ON u.id = s.user_id
+    LEFT JOIN picket_student_days psd ON psd.student_id = s.id
+    WHERE s.status = 'Aktif' AND u.is_active = TRUE
+    ORDER BY s.id ASC
+    `
+  );
+  const countsByDay = new Map(dayIds.map((dayId) => [dayId, 0]));
+  for (const row of studentsResult.rows) {
+    const dayId = Number(row.day_id);
+    if (dayIds.includes(dayId)) countsByDay.set(dayId, countsByDay.get(dayId) + 1);
+  }
+  for (const row of shuffle(studentsResult.rows)) {
+    const currentDayId = Number(row.day_id);
+    if (dayIds.includes(currentDayId)) continue;
+    const dayId = chooseLeastLoadedPicketDay(dayIds, countsByDay);
+    await runQuery(
+      executor,
+      `
+      INSERT INTO picket_student_days (student_id, day_id, effective_from, assigned_by)
+      VALUES ($1, $2, CURRENT_DATE + 1, $3)
+      ON CONFLICT (student_id)
+      DO UPDATE SET day_id = EXCLUDED.day_id,
+                    assigned_by = EXCLUDED.assigned_by,
+                    effective_from = EXCLUDED.effective_from,
+                    assigned_at = NOW(),
+                    updated_at = NOW()
+      `,
+      [row.id, dayId, assignedBy]
+    );
+    countsByDay.set(dayId, countsByDay.get(dayId) + 1);
+  }
 }
 
 function getWeeklySchedulePayload(payload = {}) {
@@ -627,6 +888,10 @@ function mapLeaveRequest(row) {
     reviewedAt: row.reviewed_at || null,
     review_note: row.review_note || null,
     reviewNote: row.review_note || null,
+    replacement_schedule_id: row.replacement_schedule_id || null,
+    replacementScheduleId: row.replacement_schedule_id || null,
+    replacement_date: row.replacement_date_text || row.replacement_date || null,
+    replacementDate: row.replacement_date_text || row.replacement_date || null,
     created_at: row.created_at,
     createdAt: row.created_at
   };
@@ -863,6 +1128,9 @@ async function updatePicketSettings(payload = {}) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    if (hasWeeklySchedulePayload) {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", ["picket-student-day-assignment"]);
+    }
     const result = await client.query(
       `
       UPDATE picket_settings
@@ -887,7 +1155,20 @@ async function updatePicketSettings(payload = {}) {
       ]
     );
 
-    const settings = mapSettings(result.rows[0]);
+    let settings = mapSettings(result.rows[0]);
+    if (hasWeeklySchedulePayload) {
+      await applyWeeklyScheduleToFixedDays(
+        settings.weeklySchedule,
+        payload.updatedBy || payload.updated_by || null,
+        client
+      );
+      const syncedWeeklySchedule = await syncWeeklyScheduleFromFixedDays(client);
+      settings = {
+        ...settings,
+        weekly_schedule: syncedWeeklySchedule,
+        weeklySchedule: syncedWeeklySchedule
+      };
+    }
     const shouldSync = Boolean(
       syncDate &&
       hasWeeklySchedulePayload &&
@@ -900,7 +1181,6 @@ async function updatePicketSettings(payload = {}) {
     if (shouldSync) {
       sync = await reconcilePicketAssignmentsForDate({
         date: syncDate,
-        settings,
         generatedBy: payload.updatedBy || payload.updated_by || null,
         executor: client
       });
@@ -1007,9 +1287,13 @@ async function listPicketStudentOptions() {
   await ensurePicketTables();
   const result = await query(
     `
-    SELECT s.id, s.nim, s.tipe, u.name, u.initials
+    SELECT s.id, s.nim, s.tipe, u.name, u.initials,
+           psd.day_id, TO_CHAR(psd.effective_from, 'YYYY-MM-DD') AS effective_from_text,
+           pd.name AS day_name
     FROM students s
     JOIN users u ON u.id = s.user_id
+    LEFT JOIN picket_student_days psd ON psd.student_id = s.id
+    LEFT JOIN picket_days pd ON pd.id = psd.day_id
     WHERE s.status = 'Aktif'
       AND u.is_active = TRUE
     ORDER BY u.name ASC
@@ -1024,7 +1308,13 @@ async function listPicketStudentOptions() {
     studentName: row.name,
     nim: row.nim || null,
     initials: row.initials || String(row.name || "M").slice(0, 2).toUpperCase(),
-    tipe: row.tipe || null
+    tipe: row.tipe || null,
+    day_id: row.day_id == null ? null : Number(row.day_id),
+    dayId: row.day_id == null ? null : Number(row.day_id),
+    day_name: row.day_name || null,
+    dayName: row.day_name || null,
+    effective_from: row.effective_from_text || null,
+    effectiveFrom: row.effective_from_text || null
   }));
 }
 
@@ -1190,6 +1480,7 @@ async function resolvePicketScheduleForSubmission({ scheduleId, studentId, date 
 
 async function listPicketSchedules({ date = null, studentId = null, dayId = null } = {}) {
   await ensurePicketTables();
+  if (date) await materializePicketSchedulesForDate(date);
   const params = [];
   const clauses = [];
   if (date) {
@@ -1484,77 +1775,228 @@ async function replacePicketManagers(studentIds = [], createdBy = null) {
   return listPicketManagers();
 }
 
-function shuffle(items) {
+function shuffle(items, random = Math.random) {
   const copy = [...items];
   for (let index = copy.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const swapIndex = Math.floor(random() * (index + 1));
     [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
   }
   return copy;
 }
 
-async function fetchCandidateStudents({ date, excludeOnLeave, gapDays }) {
-  const gapClause = gapDays > 0
-    ? `
-      AND NOT EXISTS (
-        SELECT 1
-        FROM picket_schedules recent
-        WHERE recent.student_id = s.id
-          AND recent.schedule_date < $1::date
-          AND recent.schedule_date >= ($1::date - ($2::int * INTERVAL '1 day'))
-      )
-    `
-    : "";
-  const params = gapDays > 0 ? [date, gapDays, excludeOnLeave] : [date, excludeOnLeave];
-  const leaveParam = gapDays > 0 ? 3 : 2;
-
-  const result = await query(
-    `
-    SELECT s.id, s.nim, u.name AS student_name
-    FROM students s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.status = 'Aktif'
-      AND u.is_active = TRUE
-      AND NOT EXISTS (
-        SELECT 1
-        FROM picket_schedules existing
-        WHERE existing.student_id = s.id
-          AND existing.schedule_date = $1::date
-      )
-      AND (
-        $${leaveParam}::boolean = FALSE
-        OR NOT EXISTS (
-          SELECT 1
-          FROM leave_requests lr
-          WHERE lr.student_id = s.id
-            AND lr.status = 'Disetujui'
-            AND $1::date BETWEEN lr.periode_start AND lr.periode_end
-        )
-      )
-      ${gapClause}
-    ORDER BY u.name ASC
-    `,
-    params
-  );
-  return result.rows;
+function chooseRandomPicketTask(activeTasks, random = Math.random) {
+  if (!Array.isArray(activeTasks) || activeTasks.length === 0) return null;
+  return activeTasks[Math.floor(random() * activeTasks.length)] || activeTasks[0];
 }
 
-async function chooseTaskForStudent(studentId, activeTasks) {
-  if (activeTasks.length <= 1) return activeTasks[0];
+function mapPicketStudentDay(row) {
+  return {
+    student_id: row.student_id,
+    studentId: row.student_id,
+    student_name: row.student_name || null,
+    studentName: row.student_name || null,
+    nim: row.nim || null,
+    day_id: Number(row.day_id),
+    dayId: Number(row.day_id),
+    day_name: row.day_name || null,
+    dayName: row.day_name || null,
+    assigned_by: row.assigned_by || null,
+    assignedBy: row.assigned_by || null,
+    assigned_at: row.assigned_at || null,
+    assignedAt: row.assigned_at || null,
+    effective_from: row.effective_from_text || row.effective_from || null,
+    effectiveFrom: row.effective_from_text || row.effective_from || null,
+    updated_at: row.updated_at || null,
+    updatedAt: row.updated_at || null
+  };
+}
 
-  const previous = await query(
+async function getPicketStudentDay(studentId, executor = query) {
+  const result = await runQuery(
+    executor,
     `
-    SELECT task_id
-    FROM picket_schedules
-    WHERE student_id = $1 AND task_id IS NOT NULL
-    ORDER BY schedule_date DESC, generated_at DESC
+    SELECT psd.*, TO_CHAR(psd.effective_from, 'YYYY-MM-DD') AS effective_from_text,
+           pd.name AS day_name, s.nim, u.name AS student_name
+    FROM picket_student_days psd
+    JOIN picket_days pd ON pd.id = psd.day_id
+    JOIN students s ON s.id = psd.student_id
+    JOIN users u ON u.id = s.user_id
+    WHERE psd.student_id = $1
     LIMIT 1
     `,
     [studentId]
   );
-  const previousTaskId = previous.rows[0]?.task_id;
-  const candidates = activeTasks.filter((task) => task.id !== previousTaskId);
-  return candidates[Math.floor(Math.random() * candidates.length)] || activeTasks[0];
+  return result.rows[0] ? mapPicketStudentDay(result.rows[0]) : null;
+}
+
+async function listPicketStudentDays() {
+  await ensurePicketTables();
+  const result = await query(
+    `
+    SELECT psd.*, TO_CHAR(psd.effective_from, 'YYYY-MM-DD') AS effective_from_text,
+           pd.name AS day_name, s.nim, u.name AS student_name
+    FROM picket_student_days psd
+    JOIN picket_days pd ON pd.id = psd.day_id
+    JOIN students s ON s.id = psd.student_id
+    JOIN users u ON u.id = s.user_id
+    WHERE s.status = 'Aktif' AND u.is_active = TRUE
+    ORDER BY psd.day_id ASC, u.name ASC
+    `
+  );
+  return result.rows.map(mapPicketStudentDay);
+}
+
+async function assignPicketDayForStudent({
+  studentId,
+  assignedBy = null,
+  executor = query,
+  random = Math.random
+} = {}) {
+  await ensurePicketTables();
+  const normalizedStudentId = String(studentId || "").trim();
+  const studentResult = await runQuery(
+    executor,
+    `
+    SELECT s.id, s.status, u.is_active
+    FROM students s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.id = $1
+    LIMIT 1
+    `,
+    [normalizedStudentId]
+  );
+  const student = studentResult.rows[0];
+  if (!student) {
+    const error = new Error("Mahasiswa tidak ditemukan untuk penetapan hari piket.");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (student.status !== "Aktif" || student.is_active !== true) return null;
+
+  await runQuery(executor, "SELECT pg_advisory_xact_lock(hashtext($1))", ["picket-student-day-assignment"]);
+  const existing = await getPicketStudentDay(normalizedStudentId, executor);
+  if (existing) return existing;
+
+  const { dayIds } = await getFixedPicketDayConfig(executor);
+  if (dayIds.length === 0) {
+    const error = new Error("Belum ada hari piket aktif.");
+    error.statusCode = 409;
+    throw error;
+  }
+  const countsResult = await runQuery(
+    executor,
+    "SELECT day_id, COUNT(*)::int AS total FROM picket_student_days GROUP BY day_id"
+  );
+  const countsByDay = new Map(countsResult.rows.map((row) => [Number(row.day_id), Number(row.total)]));
+  const dayId = chooseLeastLoadedPicketDay(dayIds, countsByDay, random);
+
+  await runQuery(
+    executor,
+    `
+    INSERT INTO picket_student_days (student_id, day_id, effective_from, assigned_by)
+    VALUES ($1, $2, CURRENT_DATE + 1, $3)
+    ON CONFLICT (student_id) DO NOTHING
+    `,
+    [normalizedStudentId, dayId, assignedBy]
+  );
+  await syncWeeklyScheduleFromFixedDays(executor);
+  return getPicketStudentDay(normalizedStudentId, executor);
+}
+
+async function setPicketStudentDay({ studentId, dayId, assignedBy = null } = {}) {
+  await ensurePicketTables();
+  const normalizedStudentId = await resolveStudentId(studentId);
+  const normalizedDayId = Number(dayId);
+  if (!normalizedStudentId || !Number.isInteger(normalizedDayId) || normalizedDayId < 0 || normalizedDayId > 6) {
+    const error = new Error("studentId dan dayId (0-6) wajib valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", ["picket-student-day-assignment"]);
+    const { dayIds } = await getFixedPicketDayConfig(client);
+    if (!dayIds.includes(normalizedDayId)) {
+      const error = new Error("Hari tersebut tidak aktif untuk piket.");
+      error.statusCode = 400;
+      throw error;
+    }
+    await client.query(
+      `
+      INSERT INTO picket_student_days (student_id, day_id, effective_from, assigned_by)
+      VALUES ($1, $2, CURRENT_DATE + 1, $3)
+      ON CONFLICT (student_id)
+      DO UPDATE SET day_id = EXCLUDED.day_id,
+                    effective_from = EXCLUDED.effective_from,
+                    assigned_by = EXCLUDED.assigned_by,
+                    assigned_at = NOW(),
+                    updated_at = NOW()
+      `,
+      [normalizedStudentId, normalizedDayId, assignedBy]
+    );
+    await syncWeeklyScheduleFromFixedDays(client);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+  return getPicketStudentDay(normalizedStudentId);
+}
+
+async function randomizePicketStudentDays({ assignedBy = null, random = Math.random } = {}) {
+  await ensurePicketTables();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", ["picket-student-day-assignment"]);
+    const { dayIds } = await getFixedPicketDayConfig(client);
+    if (dayIds.length === 0) {
+      const error = new Error("Belum ada hari piket aktif.");
+      error.statusCode = 409;
+      throw error;
+    }
+    const students = await client.query(
+      `
+      SELECT s.id
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.status = 'Aktif' AND u.is_active = TRUE
+      ORDER BY s.id ASC
+      `
+    );
+    const assignments = buildRandomizedPicketDayAssignments(
+      students.rows.map((student) => student.id),
+      dayIds,
+      random
+    );
+    await client.query(
+      `
+      DELETE FROM picket_student_days psd
+      USING students s, users u
+      WHERE s.id = psd.student_id
+        AND u.id = s.user_id
+        AND s.status = 'Aktif'
+        AND u.is_active = TRUE
+      `
+    );
+    for (const assignment of assignments) {
+      await client.query(
+        "INSERT INTO picket_student_days (student_id, day_id, effective_from, assigned_by) VALUES ($1, $2, CURRENT_DATE + 1, $3)",
+        [assignment.studentId, assignment.dayId, assignedBy]
+      );
+    }
+    await syncWeeklyScheduleFromFixedDays(client);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+  return listPicketStudentDays();
 }
 
 async function fetchAssignmentsByDate(date, executor = query) {
@@ -1596,224 +2038,21 @@ async function fetchAssignmentsByDate(date, executor = query) {
   return result.rows.map(mapAssignment);
 }
 
-async function normalizeManualStudentIds(studentIds, { allowEmpty = false, activeOnly = true } = {}) {
-  const uniqueIds = [...new Set((studentIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
-  if (uniqueIds.length === 0) {
-    if (allowEmpty) return [];
-
-    const error = new Error("studentIds wajib diisi untuk mode manual.");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const result = await query(
-    `
-    SELECT s.id
-    FROM students s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.id = ANY($1::text[])
-      AND (
-        $2::boolean = FALSE
-        OR (s.status = 'Aktif' AND u.is_active = TRUE)
-      )
-    `,
-    [uniqueIds, activeOnly]
-  );
-  const foundIds = new Set(result.rows.map((row) => row.id));
-  const missingIds = uniqueIds.filter((id) => !foundIds.has(id));
-  if (missingIds.length > 0) {
-    const reason = activeOnly ? "tidak valid atau tidak aktif" : "tidak valid";
-    const error = new Error(`studentIds ${reason}: ${missingIds.join(", ")}`);
-    error.statusCode = 400;
-    throw error;
-  }
-
-  return uniqueIds;
-}
-
-async function generateManualPicketSchedule({ date, studentIds, activeTasks, generatedBy = null, allowEmptyStudentIds = false }) {
-  const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  await ensurePicketDateIsNotHoliday(targetDate);
-  const manualStudentIds = await normalizeManualStudentIds(studentIds, { allowEmpty: allowEmptyStudentIds });
-  const createdIds = [];
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-    await client.query(
-      `
-      DELETE FROM picket_schedules psch
-      WHERE psch.schedule_date = $1::date
-        AND NOT EXISTS (
-          SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = psch.id
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM picket_leave_requests plr WHERE plr.schedule_id = psch.id
-        )
-      `,
-      [targetDate]
-    );
-
-    for (let index = 0; index < manualStudentIds.length; index += 1) {
-      const studentId = manualStudentIds[index];
-      const task = activeTasks.length > 1
-        ? activeTasks[index % activeTasks.length]
-        : await chooseTaskForStudent(studentId, activeTasks);
-      const id = buildId("PKT-SCH");
-
-      const result = await client.query(
-        `
-        INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
-        VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
-        ON CONFLICT (schedule_date, student_id)
-        DO UPDATE SET task_id = EXCLUDED.task_id,
-                      status = 'Ditugaskan',
-                      generated_by = EXCLUDED.generated_by,
-                      generated_at = NOW(),
-                      updated_by = EXCLUDED.updated_by,
-                      updated_at = NOW()
-        RETURNING id
-        `,
-        [id, targetDate, getJakartaDayOfWeek(targetDate), studentId, task.id, generatedBy]
-      );
-      createdIds.push(result.rows[0].id);
-    }
-
-    await client.query("COMMIT");
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
-
-  return {
-    date: targetDate,
-    assignments: await fetchAssignmentsByDate(targetDate),
-    created: createdIds
-  };
-}
-
 async function generatePicketSchedule({
   date,
-  peoplePerDay,
-  randomize,
-  studentIds,
-  replaceExisting,
-  overwrite,
   generatedBy = null
 } = {}) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
   await ensurePicketDateIsNotHoliday(targetDate);
-  const settings = await getPicketSettings();
-  const weeklySchedule = getWeeklyScheduleForDate(settings, targetDate);
-  const weeklyStudentIds = weeklySchedule?.studentIds || [];
-  const explicitStudentIdsProvided = Array.isArray(studentIds);
-  const shouldReplaceExisting = normalizeBoolean(replaceExisting ?? overwrite, false);
-  const effectiveStudentIds =
-    explicitStudentIdsProvided
-      ? studentIds
-      : weeklySchedule
-        ? weeklyStudentIds
-        : studentIds;
-  const targetCount = Array.isArray(effectiveStudentIds) && effectiveStudentIds.length > 0
-    ? effectiveStudentIds.length
-    : normalizePositiveInteger(
-        peoplePerDay ?? weeklySchedule?.peoplePerDay,
-        settings.peoplePerDay,
-        "peoplePerDay"
-      );
-  const useRandom = normalizeBoolean(randomize, settings.randomizeEnabled);
-
-  if (shouldReplaceExisting && !Array.isArray(effectiveStudentIds)) {
-    const error = new Error("studentIds wajib diisi saat replaceExisting atau overwrite bernilai true.");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (Array.isArray(effectiveStudentIds) && (shouldReplaceExisting || effectiveStudentIds.length > 0)) {
-    const allowEmptyStudentIds = shouldReplaceExisting || explicitStudentIdsProvided;
-    const manualStudentIds = await normalizeManualStudentIds(effectiveStudentIds, { allowEmpty: allowEmptyStudentIds });
-    const activeTasks = manualStudentIds.length > 0
-      ? await listPicketTasks({ includeInactive: false })
-      : [];
-    if (manualStudentIds.length > 0 && activeTasks.length === 0) {
-      const error = new Error("Belum ada tugas piket aktif.");
-      error.statusCode = 400;
-      throw error;
-    }
-
-    return generateManualPicketSchedule({
-      date: targetDate,
-      studentIds: manualStudentIds,
-      activeTasks,
-      generatedBy,
-      allowEmptyStudentIds
-    });
-  }
-
-  const activeTasks = await listPicketTasks({ includeInactive: false });
-  if (activeTasks.length === 0) {
-    const error = new Error("Belum ada tugas piket aktif.");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const existing = await fetchAssignmentsByDate(targetDate);
-  const missingCount = Math.max(0, targetCount - existing.length);
-  if (missingCount === 0) {
-    return { date: targetDate, assignments: existing, created: [] };
-  }
-
-  let candidates = await fetchCandidateStudents({
-    date: targetDate,
-    excludeOnLeave: settings.excludeOnLeave,
-    gapDays: settings.allowSameStudentGapDays
-  });
-  if (candidates.length < missingCount && settings.allowSameStudentGapDays > 0) {
-    candidates = await fetchCandidateStudents({
-      date: targetDate,
-      excludeOnLeave: settings.excludeOnLeave,
-      gapDays: 0
-    });
-  }
-
-  const selected = (useRandom ? shuffle(candidates) : candidates).slice(0, missingCount);
-  const createdIds = [];
-
-  for (const student of selected) {
-    const task = await chooseTaskForStudent(student.id, activeTasks);
-    const id = buildId("PKT-SCH");
-    const result = await query(
-      `
-      INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
-      VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
-      ON CONFLICT (schedule_date, student_id) DO NOTHING
-      RETURNING id
-      `,
-      [id, targetDate, getJakartaDayOfWeek(targetDate), student.id, task.id, generatedBy]
-    );
-    if (result.rowCount > 0) createdIds.push(result.rows[0].id);
-  }
-
-  return {
-    date: targetDate,
-    assignments: await fetchAssignmentsByDate(targetDate),
-    created: createdIds
-  };
+  return reconcilePicketAssignmentsForDate({ date: targetDate, generatedBy });
 }
 
-async function reconcilePicketAssignmentsForDate({ date, settings = null, generatedBy = null, executor = null } = {}) {
+async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, executor = null } = {}) {
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
   await ensurePicketDateIsNotHoliday(targetDate, executor || query);
-  const effectiveSettings = settings || await getPicketSettings();
-  const weeklySchedule = getWeeklyScheduleForDate(effectiveSettings, targetDate);
-  const weeklyStudentIds = await normalizeManualStudentIds(weeklySchedule?.studentIds || [], {
-    allowEmpty: true,
-    activeOnly: false
-  });
   const dayOfWeek = getJakartaDayOfWeek(targetDate);
+  let weeklyStudentIds = [];
   const createdIds = [];
   const updatedIds = [];
   const client = executor || await pool.connect();
@@ -1821,6 +2060,23 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
 
   try {
     if (ownsTransaction) await client.query("BEGIN");
+    await runQuery(client, "SELECT pg_advisory_xact_lock(hashtext($1))", ["picket-student-day-assignment"]);
+    const fixedStudents = await runQuery(
+      client,
+      `
+      SELECT psd.student_id
+      FROM picket_student_days psd
+      JOIN students s ON s.id = psd.student_id
+      JOIN users u ON u.id = s.user_id
+      WHERE psd.day_id = $1
+        AND psd.effective_from <= $2::date
+        AND s.status = 'Aktif'
+        AND u.is_active = TRUE
+      ORDER BY psd.student_id ASC
+      `,
+      [dayOfWeek, targetDate]
+    );
+    weeklyStudentIds = fixedStudents.rows.map((row) => row.student_id);
 
     const removed = await runQuery(
       client,
@@ -1829,7 +2085,7 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
         SELECT pa.id,
                pa.student_id,
                (ps.id IS NOT NULL) AS has_submission,
-               (plr.id IS NOT NULL) AS has_leave_request,
+               (plr.id IS NOT NULL OR replacement_plr.id IS NOT NULL) AS has_leave_request,
                ROW_NUMBER() OVER (
                  PARTITION BY pa.student_id
                  ORDER BY (ps.id IS NOT NULL) DESC, pa.generated_at DESC, pa.created_at DESC, pa.id ASC
@@ -1837,6 +2093,7 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
         FROM picket_schedules pa
         LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
         LEFT JOIN picket_leave_requests plr ON plr.schedule_id = pa.id
+        LEFT JOIN picket_leave_requests replacement_plr ON replacement_plr.replacement_schedule_id = pa.id
         WHERE pa.schedule_date = $1::date
       )
       DELETE FROM picket_schedules pa
@@ -1844,13 +2101,14 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
       WHERE pa.id = ranked.id
         AND ranked.has_submission = FALSE
         AND ranked.has_leave_request = FALSE
+        AND $3::boolean = TRUE
         AND (
           NOT (ranked.student_id = ANY($2::text[]))
           OR ranked.student_rank > 1
         )
       RETURNING pa.id, pa.student_id
       `,
-      [targetDate, weeklyStudentIds]
+      [targetDate, weeklyStudentIds, targetDate > getJakartaDateIso()]
     );
 
     const existing = await runQuery(
@@ -1886,47 +2144,25 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
 
     for (let index = 0; index < weeklyStudentIds.length; index += 1) {
       const studentId = weeklyStudentIds[index];
-      const task = activeTasks[index % activeTasks.length];
       const existingId = existingByStudentId.get(studentId);
 
       if (existingId) {
-        const result = await runQuery(
-          client,
-          `
-          UPDATE picket_schedules
-          SET task_id = $2,
-              status = 'Ditugaskan',
-              generated_by = $3,
-              generated_at = NOW(),
-              updated_by = $3,
-              updated_at = NOW()
-          WHERE id = $1
-          RETURNING id
-          `,
-          [existingId, task.id, generatedBy]
-        );
-        if (result.rowCount > 0) updatedIds.push(result.rows[0].id);
         continue;
       }
 
+      const task = chooseRandomPicketTask(activeTasks);
       const id = buildId("PKT-SCH");
       const result = await runQuery(
         client,
         `
         INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
         VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
-        ON CONFLICT (schedule_date, student_id)
-        DO UPDATE SET task_id = EXCLUDED.task_id,
-                      status = 'Ditugaskan',
-                      generated_by = EXCLUDED.generated_by,
-                      generated_at = NOW(),
-                      updated_by = EXCLUDED.updated_by,
-                      updated_at = NOW()
+        ON CONFLICT (schedule_date, student_id) DO NOTHING
         RETURNING id
         `,
         [id, targetDate, dayOfWeek, studentId, task.id, generatedBy]
       );
-      createdIds.push(result.rows[0].id);
+      if (result.rowCount > 0) createdIds.push(result.rows[0].id);
     }
 
     const assignments = await fetchAssignmentsByDate(targetDate, client);
@@ -1953,6 +2189,20 @@ async function reconcilePicketAssignmentsForDate({ date, settings = null, genera
 async function resyncPicketSchedule({ date, generatedBy = null } = {}) {
   await ensurePicketTables();
   return reconcilePicketAssignmentsForDate({ date, generatedBy });
+}
+
+async function materializePicketSchedulesForDate(date = getJakartaDateIso(), generatedBy = null) {
+  await ensurePicketTables();
+  const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  const today = getJakartaDateIso();
+  if (targetDate < today) {
+    return { date: targetDate, assignments: [], created: [], updated: [], skipped: true, reason: "historical_date" };
+  }
+  const holiday = await getPicketHolidayByDate(targetDate);
+  if (holiday) {
+    return { date: targetDate, holiday, assignments: [], created: [], updated: [], skipped: true };
+  }
+  return reconcilePicketAssignmentsForDate({ date: targetDate, generatedBy });
 }
 
 async function listSubmissions({ date = null, studentId = null } = {}) {
@@ -2063,6 +2313,7 @@ async function listPicketSubmissions({
 async function getPicketOverview(date) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
+  const sync = await materializePicketSchedulesForDate(targetDate);
   const [assignments, submissions, leaveRequests, holiday] = await Promise.all([
     fetchAssignmentsByDate(targetDate),
     listSubmissions({ date: targetDate }),
@@ -2078,56 +2329,60 @@ async function getPicketOverview(date) {
     assignments,
     submissions,
     leaveRequests,
-    sync: {
-      date: targetDate,
-      skipped: true,
-      reason: "overview_read_only"
-    }
+    sync
   };
 }
 
 async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDateIso()) {
   await ensurePicketTables();
   const studentId = await resolveStudentId(studentIdOrUserId);
-  if (!studentId) return { assignment: null, holiday: null, isHoliday: false, is_holiday: false };
+  if (!studentId) {
+    return { assignment: null, fixedDay: null, fixed_day: null, holiday: null, isHoliday: false, is_holiday: false };
+  }
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
   const holiday = await getPicketHolidayByDate(targetDate);
-  const result = await query(
-    `
-    SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
-           pa.schedule_date, pa.day_id, pd.name AS day_name,
-           pa.student_id, pa.task_id, pa.status, pa.notes,
-           pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
-           pa.created_at, pa.updated_at,
-           s.nim, u.name AS student_name,
-           pt.name AS task_name, pt.description AS task_description,
-           ph.id AS holiday_id, TO_CHAR(ph.holiday_date, 'YYYY-MM-DD') AS holiday_date_text,
-           ph.name AS holiday_name, ph.notes AS holiday_notes,
-           ps.id AS submission_id,
-           ps.schedule_id AS submission_schedule_id,
-           ps.assignment_id AS submission_assignment_id,
-           ps.status AS submission_status,
-           ps.photo_url AS submission_photo_url,
-           ps.file_url AS submission_file_url,
-           ps.photo_file_name AS submission_photo_file_name,
-           ps.submitted_at AS submission_submitted_at,
-           ps.reviewed_at AS submission_reviewed_at,
-           ps.reviewed_by AS submission_reviewed_by,
-           ps.review_note AS submission_review_note
-    FROM picket_schedules pa
-    JOIN picket_days pd ON pd.id = pa.day_id
-    JOIN students s ON s.id = pa.student_id
-    JOIN users u ON u.id = s.user_id
-    LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
-    LEFT JOIN picket_holidays ph ON ph.holiday_date = pa.schedule_date
-    LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
-    WHERE pa.student_id = $1 AND pa.schedule_date = $2::date
-    LIMIT 1
-    `,
-    [studentId, targetDate]
-  );
+  if (!holiday) await materializePicketSchedulesForDate(targetDate);
+  const [result, fixedDay] = await Promise.all([
+    query(
+      `
+      SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
+             pa.schedule_date, pa.day_id, pd.name AS day_name,
+             pa.student_id, pa.task_id, pa.status, pa.notes,
+             pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
+             pa.created_at, pa.updated_at,
+             s.nim, u.name AS student_name,
+             pt.name AS task_name, pt.description AS task_description,
+             ph.id AS holiday_id, TO_CHAR(ph.holiday_date, 'YYYY-MM-DD') AS holiday_date_text,
+             ph.name AS holiday_name, ph.notes AS holiday_notes,
+             ps.id AS submission_id,
+             ps.schedule_id AS submission_schedule_id,
+             ps.assignment_id AS submission_assignment_id,
+             ps.status AS submission_status,
+             ps.photo_url AS submission_photo_url,
+             ps.file_url AS submission_file_url,
+             ps.photo_file_name AS submission_photo_file_name,
+             ps.submitted_at AS submission_submitted_at,
+             ps.reviewed_at AS submission_reviewed_at,
+             ps.reviewed_by AS submission_reviewed_by,
+             ps.review_note AS submission_review_note
+      FROM picket_schedules pa
+      JOIN picket_days pd ON pd.id = pa.day_id
+      JOIN students s ON s.id = pa.student_id
+      JOIN users u ON u.id = s.user_id
+      LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
+      LEFT JOIN picket_holidays ph ON ph.holiday_date = pa.schedule_date
+      LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
+      WHERE pa.student_id = $1 AND pa.schedule_date = $2::date
+      LIMIT 1
+      `,
+      [studentId, targetDate]
+    ),
+    getPicketStudentDay(studentId)
+  ]);
   return {
     assignment: result.rows[0] ? mapAssignment(result.rows[0]) : null,
+    fixed_day: fixedDay,
+    fixedDay,
     holiday,
     is_holiday: Boolean(holiday),
     isHoliday: Boolean(holiday),
@@ -2363,6 +2618,58 @@ async function reviewPicketSubmission(id, payload = {}) {
   return submission;
 }
 
+async function findTemporaryPicketReplacementDate({ originalDate, studentId, executor = query }) {
+  const baseDate = originalDate > getJakartaDateIso() ? originalDate : getJakartaDateIso();
+  const endDate = addIsoDays(baseDate, 14);
+  const { dayIds } = await getFixedPicketDayConfig(executor);
+  if (dayIds.length === 0) {
+    const error = new Error("Belum ada hari piket aktif untuk jadwal pengganti.");
+    error.statusCode = 409;
+    throw error;
+  }
+  const [studentDay, holidays, occupied] = await Promise.all([
+    runQuery(
+      executor,
+      "SELECT day_id FROM picket_student_days WHERE student_id = $1 LIMIT 1",
+      [studentId]
+    ),
+    runQuery(
+      executor,
+      `
+      SELECT TO_CHAR(holiday_date, 'YYYY-MM-DD') AS date_text
+      FROM picket_holidays
+      WHERE holiday_date > $1::date AND holiday_date <= $2::date
+      `,
+      [baseDate, endDate]
+    ),
+    runQuery(
+      executor,
+      `
+      SELECT TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text
+      FROM picket_schedules
+      WHERE student_id = $1
+        AND schedule_date > $2::date
+        AND schedule_date <= $3::date
+      `,
+      [studentId, baseDate, endDate]
+    )
+  ]);
+  const replacementDate = findNextPicketReplacementDate({
+    afterDate: baseDate,
+    activeDayIds: dayIds,
+    excludedDayIds: studentDay.rowCount > 0 ? [studentDay.rows[0].day_id] : [],
+    holidayDates: new Set(holidays.rows.map((row) => row.date_text)),
+    occupiedDates: new Set(occupied.rows.map((row) => row.date_text)),
+    maxDays: 14
+  });
+  if (!replacementDate) {
+    const error = new Error("Tidak ditemukan hari piket pengganti dalam 14 hari ke depan.");
+    error.statusCode = 409;
+    throw error;
+  }
+  return replacementDate;
+}
+
 async function listPicketLeaveRequests({ studentId = null, date = null } = {}) {
   await ensurePicketTables();
   const params = [];
@@ -2379,7 +2686,9 @@ async function listPicketLeaveRequests({ studentId = null, date = null } = {}) {
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const result = await query(
     `
-    SELECT plr.*, TO_CHAR(plr.date, 'YYYY-MM-DD') AS date_text, s.nim, u.name AS student_name
+    SELECT plr.*, TO_CHAR(plr.date, 'YYYY-MM-DD') AS date_text,
+           TO_CHAR(plr.replacement_date, 'YYYY-MM-DD') AS replacement_date_text,
+           s.nim, u.name AS student_name
     FROM picket_leave_requests plr
     JOIN students s ON s.id = plr.student_id
     JOIN users u ON u.id = s.user_id
@@ -2419,6 +2728,16 @@ async function createPicketLeaveRequest(payload = {}) {
     throw error;
   }
 
+  const approvedExisting = await query(
+    "SELECT 1 FROM picket_leave_requests WHERE schedule_id = $1 AND student_id = $2 AND status = 'Disetujui' LIMIT 1",
+    [scheduleId, studentId]
+  );
+  if (approvedExisting.rowCount > 0) {
+    const error = new Error("Izin piket yang sudah disetujui tidak dapat diajukan ulang.");
+    error.statusCode = 409;
+    throw error;
+  }
+
   const result = await query(
     `
     INSERT INTO picket_leave_requests (id, schedule_id, assignment_id, student_id, date, reason, status)
@@ -2430,6 +2749,8 @@ async function createPicketLeaveRequest(payload = {}) {
                   reviewed_by = NULL,
                   reviewed_at = NULL,
                   review_note = NULL,
+                  replacement_schedule_id = NULL,
+                  replacement_date = NULL,
                   updated_at = NOW()
     RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text
     `,
@@ -2446,24 +2767,165 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
     error.statusCode = 400;
     throw error;
   }
+  const reviewedBy = payload.reviewedBy || payload.reviewed_by || null;
+  const reviewNote = payload.reviewNote ?? payload.review_note ?? null;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const leaveResult = await client.query(
+      `
+      SELECT plr.*, TO_CHAR(plr.date, 'YYYY-MM-DD') AS date_text,
+             TO_CHAR(plr.replacement_date, 'YYYY-MM-DD') AS replacement_date_text,
+             psch.task_id, psch.status AS schedule_status
+      FROM picket_leave_requests plr
+      JOIN picket_schedules psch ON psch.id = plr.schedule_id
+      WHERE plr.id = $1
+      FOR UPDATE OF plr, psch
+      `,
+      [id]
+    );
+    if (leaveResult.rowCount === 0) {
+      await client.query("COMMIT");
+      return null;
+    }
 
+    const leave = leaveResult.rows[0];
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`picket-leave-replacement:${leave.student_id}`]);
+
+    if (status === "Disetujui" && !leave.replacement_schedule_id) {
+      const submitted = await client.query(
+        "SELECT 1 FROM picket_submissions WHERE schedule_id = $1 LIMIT 1",
+        [leave.schedule_id]
+      );
+      if (submitted.rowCount > 0) {
+        const error = new Error("Izin tidak dapat disetujui karena jadwal asal sudah memiliki submission.");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const replacementDate = await findTemporaryPicketReplacementDate({
+        originalDate: leave.date_text,
+        studentId: leave.student_id,
+        executor: client
+      });
+      const replacementScheduleId = buildId("PKT-SCH-RPL");
+      await client.query(
+        `
+        INSERT INTO picket_schedules (
+          id, schedule_date, day_id, student_id, task_id, status, notes,
+          generated_by, created_by, updated_by
+        )
+        VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $7, $7, $7)
+        `,
+        [
+          replacementScheduleId,
+          replacementDate,
+          getJakartaDayOfWeek(replacementDate),
+          leave.student_id,
+          leave.task_id,
+          `Jadwal pengganti sementara untuk izin piket ${leave.id}.`,
+          reviewedBy
+        ]
+      );
+      leave.replacement_schedule_id = replacementScheduleId;
+      leave.replacement_date_text = replacementDate;
+    }
+
+    if (status === "Disetujui") {
+      await client.query(
+        "UPDATE picket_schedules SET status = 'Izin', updated_by = $2, updated_at = NOW() WHERE id = $1",
+        [leave.schedule_id, reviewedBy]
+      );
+    }
+
+    if (status !== "Disetujui" && leave.replacement_schedule_id) {
+      const replacementSubmission = await client.query(
+        "SELECT 1 FROM picket_submissions WHERE schedule_id = $1 LIMIT 1",
+        [leave.replacement_schedule_id]
+      );
+      if (replacementSubmission.rowCount > 0) {
+        const error = new Error("Status izin tidak dapat dibatalkan karena jadwal pengganti sudah memiliki submission.");
+        error.statusCode = 409;
+        throw error;
+      }
+      await client.query("DELETE FROM picket_schedules WHERE id = $1", [leave.replacement_schedule_id]);
+      await client.query(
+        "UPDATE picket_schedules SET status = 'Ditugaskan', updated_by = $2, updated_at = NOW() WHERE id = $1 AND status = 'Izin'",
+        [leave.schedule_id, reviewedBy]
+      );
+      leave.replacement_schedule_id = null;
+      leave.replacement_date_text = null;
+    }
+
+    const result = await client.query(
+      `
+      UPDATE picket_leave_requests
+      SET status = $2,
+          reviewed_by = CASE WHEN $2 = 'Menunggu' THEN NULL ELSE $3 END,
+          reviewed_at = CASE WHEN $2 = 'Menunggu' THEN NULL ELSE NOW() END,
+          review_note = $4,
+          replacement_schedule_id = $5,
+          replacement_date = $6::date,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text,
+                   TO_CHAR(replacement_date, 'YYYY-MM-DD') AS replacement_date_text
+      `,
+      [
+        id,
+        status,
+        reviewedBy,
+        reviewNote,
+        status === "Disetujui" ? leave.replacement_schedule_id : null,
+        status === "Disetujui" ? leave.replacement_date_text : null
+      ]
+    );
+    await client.query("COMMIT");
+    return mapLeaveRequest(result.rows[0]);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function backfillApprovedPicketLeaveReplacements() {
+  await ensurePicketTables();
+  const today = getJakartaDateIso();
   const result = await query(
     `
-    UPDATE picket_leave_requests
-    SET status = $2,
-        reviewed_by = $3,
-        reviewed_at = CASE WHEN $2 = 'Menunggu' THEN NULL ELSE NOW() END,
-        review_note = $4,
-        updated_at = NOW()
-    WHERE id = $1
-    RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text
+    SELECT id, reviewed_by, review_note
+    FROM picket_leave_requests
+    WHERE status = 'Disetujui'
+      AND replacement_schedule_id IS NULL
+      AND date >= $1::date
+    ORDER BY date ASC, created_at ASC
     `,
-    [id, status, payload.reviewedBy || payload.reviewed_by || null, payload.reviewNote ?? payload.review_note ?? null]
+    [today]
   );
-  return result.rows[0] ? mapLeaveRequest(result.rows[0]) : null;
+  const summary = { found: result.rowCount, created: 0, failed: [] };
+  for (const row of result.rows) {
+    try {
+      const reviewed = await reviewPicketLeaveRequest(row.id, {
+        status: "Disetujui",
+        reviewedBy: row.reviewed_by,
+        reviewNote: row.review_note
+      });
+      if (reviewed?.replacementScheduleId) summary.created += 1;
+    } catch (error) {
+      summary.failed.push({ id: row.id, message: error.message });
+    }
+  }
+  return summary;
 }
 
 module.exports = {
+  assignPicketDayForStudent,
+  backfillApprovedPicketLeaveReplacements,
+  buildRandomizedPicketDayAssignments,
+  chooseLeastLoadedPicketDay,
+  chooseRandomPicketTask,
   createPicketHoliday,
   createPicketLeaveRequest,
   createPicketSchedule,
@@ -2487,12 +2949,16 @@ module.exports = {
   listPicketManagers,
   listPicketSchedules,
   listPicketSubmissions,
+  listPicketStudentDays,
   listPicketStudentOptions,
   listPicketTasks,
+  materializePicketSchedulesForDate,
+  randomizePicketStudentDays,
   replacePicketManagers,
   resyncPicketSchedule,
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
+  setPicketStudentDay,
   updatePicketSchedule,
   updatePicketHoliday,
   updatePicketSettings,

@@ -678,6 +678,8 @@ async function studentAccessLockMiddleware(req, res, next) {
     path.startsWith("/api/v1/user-ui-state") ||
     (method === "GET" && (path === "/api/picket/managers/me" || path === "/api/v1/picket/managers/me")) ||
     (method === "GET" && (path === "/api/picket/students" || path === "/api/v1/picket/students")) ||
+    path.startsWith("/api/picket/student-days") ||
+    path.startsWith("/api/v1/picket/student-days") ||
     (method === "GET" && (path === "/api/picket/today" || path === "/api/v1/picket/today")) ||
     (method === "GET" && (path === "/api/picket/history" || path === "/api/v1/picket/history")) ||
     (method === "POST" && (path === "/api/picket/submissions" || path === "/api/v1/picket/submissions")) ||
