@@ -463,6 +463,7 @@ async function notifyMilestoneUpdate(projectId, actorUserId, actionLabel, milest
 router.get(
   "/assigned",
   asyncHandler(async (req, res) => {
+    await ensureResearchJoinRequestsTable();
     const roleFromToken = extractRole(req);
     const queryUserId = String(req.query.userId || "");
     const requesterUserId = resolveRequesterUserId(req);
@@ -513,11 +514,13 @@ router.get(
         SELECT DISTINCT rp.id, rp.title, rp.short_title, rp.status, rp.progress, rp.period_text,
                rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date,
                rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url,
-               rm.peran AS my_peran
+               rm.peran AS my_peran,
+               rjr.status AS join_request_status
         FROM research_projects rp
         JOIN research_memberships rm ON rm.project_id = rp.id
+        LEFT JOIN research_join_requests rjr ON rjr.project_id = rp.id AND rjr.student_id = $1 AND rjr.status = 'Menunggu'
         WHERE rm.user_id = $1
-          AND COALESCE(rm.status, 'Aktif') = 'Aktif'
+          AND COALESCE(rm.status, 'Aktif') != 'Ditolak'
         ORDER BY rp.id ASC
         LIMIT 500
         `,
@@ -1769,6 +1772,136 @@ router.delete(
     }
 
     res.json({ message: "Anggota riset berhasil dihapus." });
+  })
+);
+
+router.post(
+  "/:id/join-requests",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (role !== "mahasiswa") {
+      return res.status(403).json({ message: "Hanya mahasiswa yang dapat mengajukan permintaan join." });
+    }
+    const studentId = resolveRequesterUserId(req);
+
+    // Check if already active
+    const memberCheck = await query(
+      "SELECT status, peran FROM research_memberships WHERE project_id = $1 AND user_id = $2",
+      [req.params.id, studentId]
+    );
+
+    if (memberCheck.rows.length > 0) {
+      if (memberCheck.rows[0].status === 'Aktif' && memberCheck.rows[0].peran !== 'Alumni') {
+        return res.status(400).json({ message: "Kamu sudah menjadi anggota aktif di riset ini." });
+      }
+    }
+
+    await query(
+      `
+      INSERT INTO research_join_requests (project_id, student_id, status)
+      VALUES ($1, $2, 'Menunggu')
+      ON CONFLICT (project_id, student_id)
+      DO UPDATE SET status = 'Menunggu', updated_at = NOW()
+      `,
+      [req.params.id, studentId]
+    );
+
+    res.status(201).json({ message: "Permintaan join berhasil dikirim." });
+  })
+);
+
+router.get(
+  "/:id/join-requests",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (!["operator", "dosen"].includes(role)) {
+      return res.status(403).json({ message: "Role tidak diizinkan." });
+    }
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
+
+    const result = await query(
+      `
+      SELECT rjr.id, rjr.project_id, rjr.student_id, rjr.status, rjr.created_at,
+             u.full_name AS student_name, s.nim
+      FROM research_join_requests rjr
+      JOIN users u ON u.id = rjr.student_id
+      JOIN students s ON s.user_id = rjr.student_id
+      WHERE rjr.project_id = $1 AND rjr.status = 'Menunggu'
+      ORDER BY rjr.created_at ASC
+      `,
+      [req.params.id]
+    );
+
+    res.json(result.rows);
+  })
+);
+
+router.patch(
+  "/:id/join-requests/:requestId/approve",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (!["operator", "dosen"].includes(role)) {
+      return res.status(403).json({ message: "Role tidak diizinkan." });
+    }
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
+
+    const { requestId } = req.params;
+
+    const reqData = await query(
+      "UPDATE research_join_requests SET status = 'Disetujui', updated_at = NOW() WHERE id = $1 RETURNING student_id",
+      [requestId]
+    );
+
+    if (reqData.rows.length === 0) {
+      return res.status(404).json({ message: "Permintaan tidak ditemukan." });
+    }
+
+    const studentId = reqData.rows[0].student_id;
+
+    await query(
+      `
+      INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung, selesai)
+      VALUES ($1, $2, 'Mahasiswa', 'Mahasiswa', 'Aktif', CURRENT_DATE, NULL)
+      ON CONFLICT (project_id, user_id)
+      DO UPDATE SET status = 'Aktif', peran = 'Mahasiswa', selesai = NULL
+      `,
+      [req.params.id, studentId]
+    );
+
+    res.json({ message: "Permintaan disetujui." });
+  })
+);
+
+router.patch(
+  "/:id/join-requests/:requestId/reject",
+  asyncHandler(async (req, res) => {
+    const role = extractRole(req);
+    if (!["operator", "dosen"].includes(role)) {
+      return res.status(403).json({ message: "Role tidak diizinkan." });
+    }
+    const allowed = await hasProjectAccess({ userId: resolveRequesterUserId(req), role, projectId: req.params.id });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
+
+    const { requestId } = req.params;
+
+    const result = await query(
+      "UPDATE research_join_requests SET status = 'Ditolak', updated_at = NOW() WHERE id = $1",
+      [requestId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Permintaan tidak ditemukan." });
+    }
+
+    res.json({ message: "Permintaan ditolak." });
   })
 );
 

@@ -638,6 +638,51 @@ router.get(
   })
 );
 
+router.get(
+  "/me/history",
+  asyncHandler(async (req, res) => {
+    if (!requireMahasiswa(req, res)) return;
+
+    await ensureGraduationSubmissionsTables();
+
+    const student = await getStudentByUserId(req.authUser.id);
+    if (!student) {
+      return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
+    }
+
+    const submissionsResult = await query(
+      `
+      SELECT *
+      FROM graduation_submissions
+      WHERE student_id = $1 AND is_archived = TRUE
+      ORDER BY created_at DESC
+      `,
+      [student.id]
+    );
+
+    const history = [];
+    for (const sub of submissionsResult.rows) {
+      const projectsResult = await query(
+        `
+        SELECT *
+        FROM graduation_submission_projects
+        WHERE submission_id = $1
+        ORDER BY project_title ASC
+        `,
+        [sub.id]
+      );
+      history.push(buildProjectResponse({
+        student,
+        submission: sub,
+        activeProjects: [],
+        savedProjects: projectsResult.rows
+      }));
+    }
+
+    res.json(history);
+  })
+);
+
 router.patch("/:id/projects/:projectRowId/fields/:fieldKey/review", asyncHandler(async (req, res) => {
   if (!requireOperator(req, res)) return;
 

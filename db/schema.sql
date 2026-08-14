@@ -719,4 +719,16 @@ CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_submitted ON withdrawal_reque
 CREATE INDEX IF NOT EXISTS idx_jwt_sessions_user_active ON jwt_sessions(user_id, expires_at DESC) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_at);
 
+CREATE TABLE IF NOT EXISTS research_join_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id TEXT REFERENCES research_projects(id) ON DELETE CASCADE,
+  student_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT DEFAULT 'Menunggu' CHECK (status IN ('Menunggu', 'Disetujui', 'Ditolak')),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE (project_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_join_requests_project ON research_join_requests(project_id);
+CREATE INDEX IF NOT EXISTS idx_research_join_requests_student ON research_join_requests(student_id);
+
 COMMIT;
