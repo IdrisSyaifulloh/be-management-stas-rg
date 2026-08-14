@@ -720,7 +720,7 @@ CREATE INDEX IF NOT EXISTS idx_jwt_sessions_user_active ON jwt_sessions(user_id,
 CREATE INDEX IF NOT EXISTS idx_jwt_sessions_expires_at ON jwt_sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS research_join_requests (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id SERIAL PRIMARY KEY,
   project_id TEXT REFERENCES research_projects(id) ON DELETE CASCADE,
   student_id TEXT REFERENCES users(id) ON DELETE CASCADE,
   status TEXT DEFAULT 'Menunggu' CHECK (status IN ('Menunggu', 'Disetujui', 'Ditolak')),

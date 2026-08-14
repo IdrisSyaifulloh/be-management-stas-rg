@@ -26,7 +26,7 @@ async function ensureResearchJoinRequestsTable() {
   if (!ensureJoinRequestsPromise) {
     ensureJoinRequestsPromise = query(`
       CREATE TABLE IF NOT EXISTS research_join_requests (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        id SERIAL PRIMARY KEY,
         project_id TEXT REFERENCES research_projects(id) ON DELETE CASCADE,
         student_id TEXT REFERENCES users(id) ON DELETE CASCADE,
         status TEXT DEFAULT 'Menunggu' CHECK (status IN ('Menunggu', 'Disetujui', 'Ditolak')),
