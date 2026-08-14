@@ -173,10 +173,27 @@ router.get(
       studentId = await resolveStudentId(studentId) || studentId;
     }
 
-    const { whereClause, params } = buildWhereClause([
+    const filters = [
       { value: studentId, sql: (index) => `le.student_id = $${index}` },
       { value: normalizedProjectId, sql: (index) => `le.project_id = $${index}` }
-    ]);
+    ];
+
+    if (role === "dosen") {
+      filters.push({
+        value: req.authUser?.id,
+        sql: (index) => `
+          le.project_id IN (
+            SELECT rp.id
+            FROM research_projects rp
+            LEFT JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $${index} AND COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
+            LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id AND l.user_id = $${index}
+            WHERE rm.user_id IS NOT NULL OR l.user_id IS NOT NULL
+          )
+        `
+      });
+    }
+
+    const { whereClause, params } = buildWhereClause(filters);
 
     const result = await query(
       `

@@ -560,7 +560,7 @@ router.get("/", asyncHandler(async (req, res) => {
 
   await ensureGraduationSubmissionsTables();
 
-  const clauses = ["gs.is_archived = FALSE"];
+  const clauses = [];
   const params = [];
   
   if (req.authUser.role === "dosen") {
