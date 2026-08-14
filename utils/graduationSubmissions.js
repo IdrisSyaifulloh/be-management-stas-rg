@@ -161,12 +161,11 @@ async function ensureGraduationSubmissionsTables() {
           ON graduation_submission_projects(student_id, project_id);
       `);
 
-      // Migration: Set is_archived = TRUE for existing alumni
+      // Migration: Set is_archived = TRUE for existing alumni / valid submissions
       await query(`
-        UPDATE graduation_submissions gs
+        UPDATE graduation_submissions
         SET is_archived = TRUE
-        FROM students s
-        WHERE s.id = gs.student_id AND s.status = 'Alumni' AND gs.is_archived = FALSE;
+        WHERE status = 'Valid' AND is_archived = FALSE;
       `);
     })().catch((error) => {
       ensureGraduationSubmissionsPromise = null;
