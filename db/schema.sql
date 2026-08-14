@@ -80,8 +80,12 @@ CREATE TABLE IF NOT EXISTS graduation_submissions (
   graduation_completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (student_id)
+  is_archived BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_graduation_submissions_active 
+  ON graduation_submissions(student_id) 
+  WHERE is_archived = FALSE;
 
 CREATE TABLE IF NOT EXISTS graduation_submission_projects (
   id TEXT PRIMARY KEY,

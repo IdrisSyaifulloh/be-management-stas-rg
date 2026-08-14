@@ -122,6 +122,14 @@ function requireOperator(req, res) {
   return true;
 }
 
+function requireOperatorOrLecturer(req, res) {
+  if (!["operator", "admin", "dosen"].includes(req.authUser?.role)) {
+    res.status(403).json({ message: "Akses tidak diizinkan." });
+    return false;
+  }
+  return true;
+}
+
 async function getStudentByUserId(userId) {
   const result = await query(
     `
@@ -166,7 +174,7 @@ async function getSavedSubmission(studentId) {
     `
     SELECT *
     FROM graduation_submissions
-    WHERE student_id = $1
+    WHERE student_id = $1 AND is_archived = FALSE
     LIMIT 1
     `,
     [studentId]
@@ -548,12 +556,28 @@ function validateSubmissionProjects(payloadProjects, expectedProjects) {
 }
 
 router.get("/", asyncHandler(async (req, res) => {
-  if (!requireOperator(req, res)) return;
+  if (!requireOperatorOrLecturer(req, res)) return;
 
   await ensureGraduationSubmissionsTables();
 
-  const clauses = [];
+  const clauses = ["gs.is_archived = FALSE"];
   const params = [];
+  
+  if (req.authUser.role === "dosen") {
+    const lecturerRes = await query("SELECT id FROM lecturers WHERE user_id = $1", [req.authUser.id]);
+    const lecturerId = lecturerRes.rows[0]?.id;
+    if (lecturerId) {
+      clauses.push(`gs.id IN (
+        SELECT gsp.submission_id 
+        FROM graduation_submission_projects gsp
+        JOIN research_projects rp ON rp.id = gsp.project_id
+        WHERE rp.supervisor_lecturer_id = '${lecturerId}'
+      )`);
+    } else {
+      clauses.push(`1 = 0`);
+    }
+  }
+
   const status = String(req.query.status || "").trim();
   const search = String(req.query.q || req.query.search || "").trim();
 
@@ -919,7 +943,7 @@ router.post("/me/draft", asyncHandler(async (req, res) => {
       `
       INSERT INTO graduation_submissions (id, student_id, user_id, status, submitted_at)
       VALUES ($1, $2, $3, 'Draft', NULL)
-      ON CONFLICT (student_id)
+      ON CONFLICT (student_id) WHERE is_archived = FALSE
       DO UPDATE SET status = CASE
                         WHEN graduation_submissions.submitted_at IS NULL THEN 'Draft'
                         ELSE graduation_submissions.status
@@ -1230,7 +1254,7 @@ router.post(
         `
         INSERT INTO graduation_submissions (id, student_id, user_id, status, submitted_at)
         VALUES ($1, $2, $3, 'Dikirim', NOW())
-        ON CONFLICT (student_id)
+        ON CONFLICT (student_id) WHERE is_archived = FALSE
         DO UPDATE SET status = 'Dikirim',
                       submitted_at = NOW(),
                       reviewed_by = NULL,
