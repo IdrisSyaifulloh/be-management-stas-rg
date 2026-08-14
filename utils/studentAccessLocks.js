@@ -539,7 +539,7 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
       AND sal.active = TRUE
       AND sal.locked = TRUE
       AND sal.status = 'LOCKED'
-      AND NOT (sal.reason = $2 AND s.tipe = 'Riset')
+      AND NOT (sal.reason IN ($2, $3) AND s.tipe = 'Riset')
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
     `,
     [student.id, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT, ACCESS_LOCK_REASON_CHECKOUT_MISSING_22]
@@ -590,7 +590,7 @@ async function listAccessLocks({ status = null, search = null } = {}) {
     JOIN students s ON s.id = sal.student_id
     JOIN users u ON u.id = s.user_id
     WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND s.status = 'Aktif'))
-      AND NOT (sal.reason = $2 AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
+      AND NOT (sal.reason IN ($2, $3) AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
       ${searchClause}
     ORDER BY sal.lock_date DESC, sal.locked_at DESC
     LIMIT 500
