@@ -1890,7 +1890,7 @@ router.get(
     const result = await query(
       `
       SELECT rjr.id, rjr.project_id, rjr.student_id, rjr.status, rjr.created_at,
-             u.full_name AS student_name, s.nim
+             u.name AS student_name, s.nim
       FROM research_join_requests rjr
       JOIN users u ON u.id = rjr.student_id
       JOIN students s ON s.user_id = rjr.student_id
