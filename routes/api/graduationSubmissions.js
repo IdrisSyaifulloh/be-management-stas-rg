@@ -1261,7 +1261,7 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
   });
 }));
 router.get("/:id", asyncHandler(async (req, res) => {
-  if (!requireOperator(req, res)) return;
+  if (!requireOperatorOrLecturer(req, res)) return;
 
   await ensureGraduationSubmissionsTables();
 
