@@ -110,7 +110,6 @@ async function ensureGraduationSubmissionsTables() {
           id TEXT PRIMARY KEY,
           student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
           user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          project_id TEXT REFERENCES research_projects(id) ON DELETE SET NULL,
           status TEXT NOT NULL DEFAULT 'Menunggu' CHECK (status IN ('Menunggu', 'Disetujui', 'Ditolak')),
           note TEXT,
           reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,

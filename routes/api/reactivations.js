@@ -73,28 +73,23 @@ router.post("/me/request", asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Hanya Alumni yang dapat mengajukan reaktivasi riset." });
   }
 
-  const { projectId } = req.body;
-  if (!projectId) {
-    return res.status(400).json({ message: "Pilih riset yang akan dilanjutkan." });
-  }
-
   // Cek apakah pengajuan dengan project ini masih pending
   const pendingCheck = await query(
-    `SELECT id FROM reactivation_requests WHERE student_id = $1 AND project_id = $2 AND status = 'Menunggu'`,
-    [student.id, projectId]
+    `SELECT id FROM reactivation_requests WHERE student_id = $1 AND status = 'Menunggu'`,
+    [student.id]
   );
 
   if (pendingCheck.rowCount > 0) {
-    return res.status(400).json({ message: "Anda sudah memiliki pengajuan aktif untuk riset ini." });
+    return res.status(400).json({ message: "Anda sudah memiliki pengajuan reaktivasi yang sedang aktif." });
   }
 
   const requestId = `RREQ-${crypto.randomUUID()}`;
   await query(
     `
-    INSERT INTO reactivation_requests (id, student_id, user_id, project_id, status)
-    VALUES ($1, $2, $3, $4, 'Menunggu')
+    INSERT INTO reactivation_requests (id, student_id, user_id, status)
+    VALUES ($1, $2, $3, 'Menunggu')
     `,
-    [requestId, student.id, req.authUser.id, projectId]
+    [requestId, student.id, req.authUser.id]
   );
 
   res.status(201).json({ message: "Pengajuan reaktivasi riset berhasil dikirim. Menunggu persetujuan admin." });
@@ -106,11 +101,10 @@ router.get("/", asyncHandler(async (req, res) => {
 
   const result = await query(
     `
-    SELECT r.*, u.name as student_name, s.nim, rp.title as project_title, rp.short_title
+    SELECT r.*, u.name as student_name, s.nim
     FROM reactivation_requests r
     JOIN users u ON u.id = r.user_id
     JOIN students s ON s.id = r.student_id
-    LEFT JOIN research_projects rp ON rp.id = r.project_id
     ORDER BY r.created_at DESC
     LIMIT 200
     `
@@ -120,8 +114,6 @@ router.get("/", asyncHandler(async (req, res) => {
     id: r.id,
     studentId: r.student_id,
     userId: r.user_id,
-    projectId: r.project_id,
-    projectTitle: r.project_title || r.short_title || "Tidak Diketahui",
     studentName: r.student_name,
     nim: r.nim,
     status: r.status,
@@ -171,19 +163,6 @@ router.post("/:id/approve", asyncHandler(async (req, res) => {
       `UPDATE students SET status = 'Aktif', updated_at = NOW() WHERE id = $1`,
       [request.student_id]
     );
-
-    // Reactivate research_memberships
-    if (request.project_id) {
-      await client.query(
-        `
-        INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung, selesai)
-        VALUES ($1, $2, 'Mahasiswa', 'Mahasiswa', 'Aktif', CURRENT_DATE, NULL)
-        ON CONFLICT (project_id, user_id)
-        DO UPDATE SET status = 'Aktif', peran = 'Mahasiswa', selesai = NULL
-        `,
-        [request.project_id, request.user_id]
-      );
-    }
 
     // Archive previous graduation submissions
     await client.query(
