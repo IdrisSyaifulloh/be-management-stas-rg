@@ -537,6 +537,8 @@ router.get(
                rp.research_type, rp.agreement_type, rp.agreement_start_date, rp.agreement_end_date,
                rp.agreement_file_url, rp.proposal_file_url, rp.rab_file_url,
                rm.peran AS my_peran,
+               rm.selesai AS my_selesai,
+               rm.status AS membership_status,
                rjr.status AS join_request_status
         FROM research_projects rp
         JOIN research_memberships rm ON rm.project_id = rp.id

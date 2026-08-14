@@ -639,11 +639,33 @@ router.get(
 );
 
 router.get(
+  "/debug-dump",
+  asyncHandler(async (req, res) => {
+    const studentId = req.query.studentId;
+    const result = await query("SELECT id, status, is_archived, submitted_at FROM graduation_submissions WHERE student_id = $1", [studentId]);
+    res.json(result.rows);
+  })
+);
+
+router.get(
   "/me/history",
   asyncHandler(async (req, res) => {
     if (!requireMahasiswa(req, res)) return;
 
     await ensureGraduationSubmissionsTables();
+
+    // Force migration on every hit just to be safe
+    await query(`
+      UPDATE graduation_submissions
+      SET is_archived = FALSE
+      WHERE is_archived IS NULL
+    `);
+    
+    await query(`
+      UPDATE graduation_submissions
+      SET is_archived = TRUE
+      WHERE status = 'Valid' AND is_archived = FALSE
+    `);
 
     const student = await getStudentByUserId(req.authUser.id);
     if (!student) {

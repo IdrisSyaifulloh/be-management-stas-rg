@@ -164,6 +164,12 @@ async function ensureGraduationSubmissionsTables() {
       // Migration: Set is_archived = TRUE for existing alumni / valid submissions
       await query(`
         UPDATE graduation_submissions
+        SET is_archived = FALSE
+        WHERE is_archived IS NULL;
+      `);
+      
+      await query(`
+        UPDATE graduation_submissions
         SET is_archived = TRUE
         WHERE status = 'Valid' AND is_archived = FALSE;
       `);
