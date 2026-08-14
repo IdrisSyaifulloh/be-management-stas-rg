@@ -1272,6 +1272,26 @@ router.get("/:id", asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "Submit berkas kelulusan tidak ditemukan." });
   }
 
+  if (req.authUser.role === "dosen") {
+    const lecturerRes = await query("SELECT id FROM lecturers WHERE user_id = $1", [req.authUser.id]);
+    const lecturerId = lecturerRes.rows[0]?.id;
+    if (lecturerId) {
+      const validProjects = await query(
+        `
+        SELECT gsp.project_id
+        FROM graduation_submission_projects gsp
+        JOIN research_projects rp ON rp.id = gsp.project_id
+        WHERE gsp.submission_id = $1 AND rp.supervisor_lecturer_id = $2
+        `,
+        [submissionId, lecturerId]
+      );
+      const validProjectIds = new Set(validProjects.rows.map(r => r.project_id));
+      detail.projects = detail.projects.filter(p => validProjectIds.has(p.projectId || p.project_id));
+    } else {
+      detail.projects = [];
+    }
+  }
+
   res.json(detail);
 }));
 
