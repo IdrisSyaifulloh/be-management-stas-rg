@@ -1808,6 +1808,8 @@ router.post(
     }
     const studentId = resolveRequesterUserId(req);
 
+    await ensureResearchJoinRequestsTable();
+
     // Check if already active
     const memberCheck = await query(
       "SELECT status, peran FROM research_memberships WHERE project_id = $1 AND user_id = $2",
@@ -1882,6 +1884,8 @@ router.get(
     if (!allowed) {
       return res.status(403).json({ message: "Akses ditolak." });
     }
+
+    await ensureResearchJoinRequestsTable();
 
     const result = await query(
       `
