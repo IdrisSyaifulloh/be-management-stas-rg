@@ -1830,6 +1830,43 @@ router.post(
       [req.params.id, studentId]
     );
 
+    // Send notifications to Dosen and Admins
+    try {
+      const projInfo = await query(
+        `
+        SELECT rp.title, l.user_id AS supervisor_user_id, u.name AS student_name
+        FROM research_projects rp
+        LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
+        LEFT JOIN users u ON u.id = $2
+        WHERE rp.id = $1
+        `,
+        [req.params.id, studentId]
+      );
+
+      if (projInfo.rows.length > 0) {
+        const p = projInfo.rows[0];
+        const title = "Permintaan Join Kembali Riset";
+        const body = `Mahasiswa ${p.student_name || 'Alumni'} meminta untuk bergabung kembali ke riset "${p.title}".`;
+
+        const ops = await query("SELECT id FROM users WHERE role IN ('operator', 'admin')");
+        const recipients = new Set(ops.rows.map(o => o.id));
+        if (p.supervisor_user_id) recipients.add(p.supervisor_user_id);
+
+        for (const recipientId of recipients) {
+          await createNotification({
+            id: `req-join-${req.params.id}-${studentId}-${Date.now()}-${recipientId}`,
+            recipientUserId: recipientId,
+            senderUserId: studentId,
+            type: "pengumuman",
+            title,
+            body
+          }).catch(err => console.error("Notif join request error:", err));
+        }
+      }
+    } catch (err) {
+      console.error("Error sending join request notifications:", err);
+    }
+
     res.status(201).json({ message: "Permintaan join berhasil dikirim." });
   })
 );
