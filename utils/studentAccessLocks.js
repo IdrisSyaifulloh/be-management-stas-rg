@@ -402,6 +402,7 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
     FROM picket_schedules psch
     WHERE psch.student_id = $1
       AND psch.schedule_date < $2::date
+      AND psch.status <> 'Selesai'
       ${holidayExclusion}
       AND NOT EXISTS (
         SELECT 1

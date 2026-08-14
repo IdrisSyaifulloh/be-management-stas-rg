@@ -11,6 +11,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { requireSafeId } = require("../../utils/securityValidation");
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
+const { syncStudentLeaveToPicket } = require("../../utils/picketService");
 
 const router = express.Router();
 
@@ -732,6 +733,7 @@ router.patch(
         lr.jenis_pengajuan,
         lr.counts_against_wfh_quota,
         lr.periode_start,
+        lr.periode_end,
         COALESCE(s.wfh_quota, 0)::int AS wfh_quota,
         s.tipe AS student_tipe
       FROM leave_requests lr
@@ -749,6 +751,7 @@ router.patch(
     }
 
     const requestRow = existingRequest.rows[0];
+    const effectiveReviewerId = reviewedBy || req.authUser?.id || null;
 
     if (
       status === "Disetujui" &&
@@ -765,6 +768,16 @@ router.patch(
       }
     }
 
+    const picketSync = await syncStudentLeaveToPicket({
+      leaveRequestId,
+      studentId: requestRow.student_id,
+      leaveType: requestRow.jenis_pengajuan,
+      status,
+      startDate: requestRow.periode_start,
+      endDate: requestRow.periode_end,
+      reviewedBy: effectiveReviewerId
+    });
+
     const result = await query(
       `
       UPDATE leave_requests
@@ -777,7 +790,7 @@ router.patch(
       WHERE id = $1
       RETURNING id
       `,
-      [leaveRequestId, status, reviewedBy || null, reviewNote || null]
+      [leaveRequestId, status, effectiveReviewerId, reviewNote || null]
     );
 
     if (result.rowCount === 0) {
@@ -810,7 +823,7 @@ router.patch(
         body: `Pengajuan ${getLeaveLabel(
           leaveRow.rows[0]?.jenis_pengajuan
         )} Anda untuk ID ${leaveRequestId} telah ${status.toLowerCase()}.`,
-        senderUserId: reviewedBy || null,
+        senderUserId: effectiveReviewerId,
         type: "cuti",
         eventId: "cuti_request"
       });
@@ -823,7 +836,7 @@ router.patch(
       `,
       [
         `AUD-${crypto.randomUUID()}`,
-        reviewedBy || req.authUser?.id || null,
+        effectiveReviewerId,
         status === "Disetujui" ? "Approve" : "Update",
         JSON.stringify({
           leave_request_id: leaveRequestId,
@@ -831,13 +844,15 @@ router.patch(
           student_name: leaveRow.rows[0]?.student_name || null,
           jenis_pengajuan: leaveRow.rows[0]?.jenis_pengajuan || requestRow.jenis_pengajuan,
           status,
-          review_note: reviewNote || null
+          review_note: reviewNote || null,
+          picket_sync: picketSync
         })
       ]
     );
 
     res.json({
-      message: "Status cuti berhasil diperbarui."
+      message: "Status cuti berhasil diperbarui.",
+      picketSync
     });
   })
 );
@@ -857,19 +872,40 @@ router.delete(
 
     const leaveRequestId = requireSafeId(req.params.id, "id");
 
-    const result = await query(
-      "DELETE FROM leave_requests WHERE id = $1 RETURNING id, file_url",
+    const existingRequest = await query(
+      `
+      SELECT id, student_id, jenis_pengajuan, periode_start, periode_end, status, file_url
+      FROM leave_requests
+      WHERE id = $1
+      LIMIT 1
+      `,
       [leaveRequestId]
     );
 
-    if (result.rowCount === 0) {
+    if (existingRequest.rowCount === 0) {
       return res.status(404).json({
         message: "Pengajuan cuti tidak ditemukan."
       });
     }
 
+    const requestRow = existingRequest.rows[0];
+    await syncStudentLeaveToPicket({
+      leaveRequestId,
+      studentId: requestRow.student_id,
+      leaveType: requestRow.jenis_pengajuan,
+      status: "Ditolak",
+      startDate: requestRow.periode_start,
+      endDate: requestRow.periode_end,
+      reviewedBy: req.authUser?.id || null
+    });
+
+    const result = await query(
+      "DELETE FROM leave_requests WHERE id = $1 RETURNING id, file_url",
+      [leaveRequestId]
+    );
+
     try {
-      await removeLeaveAttachment(result.rows[0].file_url);
+      await removeLeaveAttachment(requestRow.file_url);
     } catch {
       // Row sudah terhapus; abaikan kegagalan cleanup file.
     }

@@ -510,6 +510,8 @@ CREATE TABLE IF NOT EXISTS picket_schedules (
   task_id TEXT REFERENCES picket_tasks(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'Ditugaskan',
   notes TEXT,
+  auto_leave_request_id TEXT REFERENCES leave_requests(id) ON DELETE SET NULL,
+  auto_leave_type TEXT CHECK (auto_leave_type IS NULL OR auto_leave_type IN ('cuti', 'izin', 'sakit', 'wfh')),
   generated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
@@ -548,6 +550,7 @@ CREATE TABLE IF NOT EXISTS picket_leave_requests (
   reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   reviewed_at TIMESTAMPTZ,
   review_note TEXT,
+  source_leave_request_id TEXT REFERENCES leave_requests(id) ON DELETE SET NULL,
   replacement_schedule_id TEXT REFERENCES picket_schedules(id) ON DELETE SET NULL,
   replacement_date DATE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -683,6 +686,7 @@ CREATE INDEX IF NOT EXISTS idx_picket_schedules_student_date ON picket_schedules
 CREATE INDEX IF NOT EXISTS idx_picket_submissions_student_date ON picket_submissions(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_replacement_schedule ON picket_leave_requests(replacement_schedule_id);
+CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_source_leave ON picket_leave_requests(source_leave_request_id);
 CREATE INDEX IF NOT EXISTS idx_picket_holidays_date ON picket_holidays(holiday_date);
 CREATE INDEX IF NOT EXISTS idx_picket_student_days_day ON picket_student_days(day_id, student_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_logged_at ON audit_logs(logged_at DESC);

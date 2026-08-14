@@ -6,6 +6,12 @@ const { getJakartaDateIso } = require("./attendanceHistory");
 const { resolveStudentId, resolveStudentRecord } = require("./studentResolver");
 const { addIsoDays, findNextPicketReplacementDate } = require("./picketLeaveReplacement");
 const {
+  expandIsoDateRange,
+  normalizeStudentLeaveType,
+  resolveStudentLeavePicketAction,
+  selectPicketSchedulesOnLeaveDates
+} = require("./studentLeavePicketPolicy");
+const {
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
   ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
   createPicketSubmissionInvalidLocks,
@@ -184,6 +190,8 @@ async function ensurePicketTables() {
           task_id TEXT REFERENCES picket_tasks(id) ON DELETE SET NULL,
           status TEXT NOT NULL DEFAULT 'Ditugaskan',
           notes TEXT,
+          auto_leave_request_id TEXT,
+          auto_leave_type TEXT,
           generated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
@@ -222,6 +230,7 @@ async function ensurePicketTables() {
           reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           reviewed_at TIMESTAMPTZ,
           review_note TEXT,
+          source_leave_request_id TEXT,
           replacement_schedule_id TEXT REFERENCES picket_schedules(id) ON DELETE SET NULL,
           replacement_date DATE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -252,6 +261,18 @@ async function ensurePicketTables() {
         CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_student_date ON picket_leave_requests(student_id, date DESC);
         CREATE INDEX IF NOT EXISTS idx_picket_holidays_date ON picket_holidays(holiday_date);
         CREATE INDEX IF NOT EXISTS idx_picket_student_days_day ON picket_student_days(day_id, student_id);
+      `);
+
+      await query(`
+        ALTER TABLE picket_schedules
+        ADD COLUMN IF NOT EXISTS auto_leave_request_id TEXT,
+        ADD COLUMN IF NOT EXISTS auto_leave_type TEXT;
+
+        ALTER TABLE picket_leave_requests
+        ADD COLUMN IF NOT EXISTS source_leave_request_id TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_picket_leave_requests_source_leave
+        ON picket_leave_requests(source_leave_request_id);
       `);
 
       await query(`
@@ -735,6 +756,8 @@ function mapAssignment(row) {
   if (!row) return null;
   const date = row.date_text || row.schedule_date_text || row.schedule_date || row.date;
   const isHoliday = Boolean(row.holiday_id);
+  const autoCompletedByWfh =
+    row.auto_leave_type === "wfh" && Boolean(row.auto_leave_request_id);
   return {
     id: row.id,
     schedule_id: row.id,
@@ -774,7 +797,13 @@ function mapAssignment(row) {
           notes: row.holiday_notes || null
         }
       : null,
-    submitted: Boolean(row.submission_id),
+    submitted: Boolean(row.submission_id) || autoCompletedByWfh,
+    auto_completed_by_wfh: autoCompletedByWfh,
+    autoCompletedByWfh,
+    auto_leave_request_id: row.auto_leave_request_id || null,
+    autoLeaveRequestId: row.auto_leave_request_id || null,
+    auto_leave_type: row.auto_leave_type || null,
+    autoLeaveType: row.auto_leave_type || null,
     submission_id: row.submission_id || null,
     submissionId: row.submission_id || null,
     submission_status: row.submission_status || null,
@@ -888,6 +917,8 @@ function mapLeaveRequest(row) {
     reviewedAt: row.reviewed_at || null,
     review_note: row.review_note || null,
     reviewNote: row.review_note || null,
+    source_leave_request_id: row.source_leave_request_id || null,
+    sourceLeaveRequestId: row.source_leave_request_id || null,
     replacement_schedule_id: row.replacement_schedule_id || null,
     replacementScheduleId: row.replacement_schedule_id || null,
     replacement_date: row.replacement_date_text || row.replacement_date || null,
@@ -1509,6 +1540,7 @@ async function listPicketSchedules({ date = null, studentId = null, dayId = null
     SELECT psch.id, TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') AS date_text,
            psch.schedule_date, psch.day_id, pd.name AS day_name,
            psch.student_id, psch.task_id, psch.status, psch.notes,
+           psch.auto_leave_request_id, psch.auto_leave_type,
            psch.generated_by, psch.generated_at, psch.created_by, psch.updated_by,
            psch.created_at, psch.updated_at,
            s.nim, u.name AS student_name,
@@ -1538,6 +1570,7 @@ async function getPicketScheduleById(id, executor = query) {
     SELECT psch.id, TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') AS date_text,
            psch.schedule_date, psch.day_id, pd.name AS day_name,
            psch.student_id, psch.task_id, psch.status, psch.notes,
+           psch.auto_leave_request_id, psch.auto_leave_type,
            psch.generated_by, psch.generated_at, psch.created_by, psch.updated_by,
            psch.created_at, psch.updated_at,
            s.nim, u.name AS student_name,
@@ -2006,6 +2039,7 @@ async function fetchAssignmentsByDate(date, executor = query) {
     SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
            pa.schedule_date, pa.day_id, pd.name AS day_name,
            pa.student_id, pa.task_id, pa.status, pa.notes,
+           pa.auto_leave_request_id, pa.auto_leave_type,
            pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
@@ -2348,6 +2382,7 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
       SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
              pa.schedule_date, pa.day_id, pd.name AS day_name,
              pa.student_id, pa.task_id, pa.status, pa.notes,
+             pa.auto_leave_request_id, pa.auto_leave_type,
              pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
              pa.created_at, pa.updated_at,
              s.nim, u.name AS student_name,
@@ -2400,6 +2435,7 @@ async function getPicketHistory(studentIdOrUserId) {
     SELECT pa.id, TO_CHAR(pa.schedule_date, 'YYYY-MM-DD') AS date_text,
            pa.schedule_date, pa.day_id, pd.name AS day_name,
            pa.student_id, pa.task_id, pa.status, pa.notes,
+           pa.auto_leave_request_id, pa.auto_leave_type,
            pa.generated_by, pa.generated_at, pa.created_by, pa.updated_by,
            pa.created_at, pa.updated_at,
            s.nim, u.name AS student_name,
@@ -2668,6 +2704,270 @@ async function findTemporaryPicketReplacementDate({ originalDate, studentId, exe
     throw error;
   }
   return replacementDate;
+}
+
+async function syncStudentLeaveToPicket({
+  leaveRequestId,
+  studentId,
+  leaveType,
+  status,
+  startDate,
+  endDate,
+  reviewedBy = null
+} = {}) {
+  await ensurePicketTables();
+  const normalizedLeaveRequestId = String(leaveRequestId || "").trim();
+  const normalizedStudentId = await resolveStudentId(studentId);
+  const normalizedLeaveType = normalizeStudentLeaveType(leaveType);
+  const dates = expandIsoDateRange(startDate, endDate);
+  const action = resolveStudentLeavePicketAction({ leaveType: normalizedLeaveType, status });
+
+  if (!normalizedLeaveRequestId || !normalizedStudentId || !normalizedLeaveType) {
+    const error = new Error("Data sinkronisasi izin mahasiswa ke piket tidak valid.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (action !== "clear") {
+    for (const date of dates) {
+      await materializePicketSchedulesForDate(date, reviewedBy);
+    }
+  }
+
+  const summary = {
+    action,
+    leaveRequestId: normalizedLeaveRequestId,
+    leaveType: normalizedLeaveType,
+    scheduledDates: [],
+    picketLeaveGranted: [],
+    wfhAutoCompleted: [],
+    alreadyCompleted: [],
+    cleared: [],
+    warnings: []
+  };
+  let scheduleRows = [];
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      `student-leave-picket:${normalizedStudentId}`
+    ]);
+
+    const schedules = await client.query(
+      `
+      SELECT psch.id,
+             TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') AS date_text,
+             psch.auto_leave_request_id,
+             psch.auto_leave_type,
+             EXISTS (
+               SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = psch.id
+             ) AS has_submission
+      FROM picket_schedules psch
+      WHERE psch.student_id = $1
+        AND psch.schedule_date BETWEEN $2::date AND $3::date
+      ORDER BY psch.schedule_date ASC
+      FOR UPDATE OF psch
+      `,
+      [normalizedStudentId, dates[0], dates[dates.length - 1]]
+    );
+    // WFH/izin hanya boleh memengaruhi jadwal yang tanggalnya benar-benar
+    // berada di dalam periode izin. Tanpa jadwal pada tanggal itu, tidak ada
+    // status piket yang dibuat atau diselesaikan otomatis.
+    scheduleRows = selectPicketSchedulesOnLeaveDates(schedules.rows, dates);
+    summary.scheduledDates = scheduleRows.map((row) => row.date_text);
+
+    if (action === "clear") {
+      const automaticLeaves = await client.query(
+        `
+        SELECT schedule_id, replacement_schedule_id
+        FROM picket_leave_requests
+        WHERE source_leave_request_id = $1
+        FOR UPDATE
+        `,
+        [normalizedLeaveRequestId]
+      );
+      const affectedScheduleIds = automaticLeaves.rows.map((row) => row.schedule_id);
+
+      for (const leave of automaticLeaves.rows) {
+        if (leave.replacement_schedule_id) {
+          const replacementSubmission = await client.query(
+            "SELECT 1 FROM picket_submissions WHERE schedule_id = $1 LIMIT 1",
+            [leave.replacement_schedule_id]
+          );
+          if (replacementSubmission.rowCount > 0) continue;
+          await client.query("DELETE FROM picket_schedules WHERE id = $1", [leave.replacement_schedule_id]);
+        }
+        await client.query(
+          "DELETE FROM picket_leave_requests WHERE schedule_id = $1 AND source_leave_request_id = $2",
+          [leave.schedule_id, normalizedLeaveRequestId]
+        );
+        summary.cleared.push(leave.schedule_id);
+      }
+
+      const autoCompletedSchedules = await client.query(
+        "SELECT id FROM picket_schedules WHERE auto_leave_request_id = $1 FOR UPDATE",
+        [normalizedLeaveRequestId]
+      );
+      const resetScheduleIds = [
+        ...new Set([
+          ...affectedScheduleIds,
+          ...autoCompletedSchedules.rows.map((row) => row.id)
+        ])
+      ];
+
+      for (const scheduleId of resetScheduleIds) {
+        await client.query(
+          `
+          UPDATE picket_schedules psch
+          SET status = CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM picket_submissions psub
+                  WHERE psub.schedule_id = psch.id AND psub.status = 'Bermasalah'
+                ) THEN 'Bermasalah'
+                WHEN EXISTS (
+                  SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = psch.id
+                ) THEN 'Selesai'
+                WHEN EXISTS (
+                  SELECT 1 FROM picket_leave_requests plr
+                  WHERE plr.schedule_id = psch.id AND plr.status = 'Disetujui'
+                ) THEN 'Izin'
+                ELSE 'Ditugaskan'
+              END,
+              auto_leave_request_id = CASE
+                WHEN auto_leave_request_id = $2 THEN NULL ELSE auto_leave_request_id
+              END,
+              auto_leave_type = CASE
+                WHEN auto_leave_request_id = $2 THEN NULL ELSE auto_leave_type
+              END,
+              updated_by = $3,
+              updated_at = NOW()
+          WHERE psch.id = $1
+          `,
+          [scheduleId, normalizedLeaveRequestId, reviewedBy]
+        );
+      }
+    } else {
+      for (const schedule of scheduleRows) {
+        if (schedule.has_submission) {
+          summary.alreadyCompleted.push(schedule.id);
+          continue;
+        }
+
+        if (
+          action === "leave" &&
+          schedule.auto_leave_type === "wfh" &&
+          schedule.auto_leave_request_id
+        ) {
+          summary.alreadyCompleted.push(schedule.id);
+          continue;
+        }
+
+        if (action === "complete") {
+          await client.query(
+            `
+            UPDATE picket_schedules
+            SET status = 'Selesai',
+                auto_leave_request_id = $2,
+                auto_leave_type = 'wfh',
+                updated_by = $3,
+                updated_at = NOW()
+            WHERE id = $1
+            `,
+            [schedule.id, normalizedLeaveRequestId, reviewedBy]
+          );
+          summary.wfhAutoCompleted.push(schedule.id);
+          continue;
+        }
+
+        const reason = `Izin piket otomatis dari pengajuan ${normalizedLeaveType} mahasiswa ${normalizedLeaveRequestId}.`;
+        await client.query(
+          `
+          INSERT INTO picket_leave_requests (
+            id, schedule_id, assignment_id, student_id, date, reason, status,
+            reviewed_by, reviewed_at, review_note, source_leave_request_id
+          )
+          VALUES ($1, $2, $2, $3, $4::date, $5, 'Disetujui', $6, NOW(), $7, $8)
+          ON CONFLICT (schedule_id, student_id)
+          DO UPDATE SET status = 'Disetujui',
+                        reviewed_by = EXCLUDED.reviewed_by,
+                        reviewed_at = NOW(),
+                        review_note = EXCLUDED.review_note,
+                        source_leave_request_id = CASE
+                          WHEN picket_leave_requests.status = 'Disetujui'
+                            THEN picket_leave_requests.source_leave_request_id
+                          ELSE EXCLUDED.source_leave_request_id
+                        END,
+                        updated_at = NOW()
+          `,
+          [
+            buildId("PKT-LV-AUTO"),
+            schedule.id,
+            normalizedStudentId,
+            schedule.date_text,
+            reason,
+            reviewedBy,
+            `Disetujui otomatis bersama pengajuan ${normalizedLeaveType} mahasiswa.`,
+            normalizedLeaveRequestId
+          ]
+        );
+        await client.query(
+          `
+          UPDATE picket_schedules
+          SET status = 'Izin',
+              auto_leave_request_id = NULL,
+              auto_leave_type = NULL,
+              updated_by = $2,
+              updated_at = NOW()
+          WHERE id = $1
+          `,
+          [schedule.id, reviewedBy]
+        );
+        summary.picketLeaveGranted.push(schedule.id);
+      }
+    }
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const lockScheduleIds = [...summary.picketLeaveGranted, ...summary.wfhAutoCompleted];
+  for (const scheduleId of lockScheduleIds) {
+    const schedule = scheduleRows.find((item) => item.id === scheduleId);
+    if (!schedule) continue;
+    try {
+      await Promise.all([
+        deactivateAccessLocksForStudentDateReason({
+          studentId: normalizedStudentId,
+          date: schedule.date_text,
+          reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
+          unlockedBy: reviewedBy
+        }),
+        deactivateAccessLocksForStudentDateReason({
+          studentId: normalizedStudentId,
+          date: schedule.date_text,
+          reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+          unlockedBy: reviewedBy
+        })
+      ]);
+    } catch (error) {
+      summary.warnings.push({ scheduleId, step: "release_access_lock", message: error.message });
+    }
+  }
+
+  if (action === "leave" && summary.picketLeaveGranted.length > 0) {
+    try {
+      summary.leaveReplacements = await backfillApprovedPicketLeaveReplacements();
+    } catch (error) {
+      summary.warnings.push({ step: "create_leave_replacement", message: error.message });
+    }
+  }
+
+  return summary;
 }
 
 async function listPicketLeaveRequests({ studentId = null, date = null } = {}) {
@@ -2959,6 +3259,7 @@ module.exports = {
   reviewPicketLeaveRequest,
   reviewPicketSubmission,
   setPicketStudentDay,
+  syncStudentLeaveToPicket,
   updatePicketSchedule,
   updatePicketHoliday,
   updatePicketSettings,

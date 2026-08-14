@@ -16,7 +16,8 @@
     "db:migrate-lecturer-profile": "node ./db/runSqlFile.js ./db/migrations/010_add_lecturer_profile_fields.sql",
     "db:migrate-picket-fixed-days": "node ./db/runSqlFile.js ./db/migrations/024_migrate_picket_fixed_student_days.sql",
     "db:migrate-picket-leave-replacement": "node ./db/runSqlFile.js ./db/migrations/025_add_picket_leave_replacement_schedule.sql",
-    "db:migrate-picket-system": "npm run db:migrate-picket-fixed-days && npm run db:migrate-picket-leave-replacement",
+    "db:migrate-student-leave-picket": "node ./db/runSqlFile.js ./db/migrations/026_link_student_leave_to_picket.sql",
+    "db:migrate-picket-system": "npm run db:migrate-picket-fixed-days && npm run db:migrate-picket-leave-replacement && npm run db:migrate-student-leave-picket",
     "test:security": "node ./scripts/securitySmokeTest.js"
   },
   "dependencies": {
