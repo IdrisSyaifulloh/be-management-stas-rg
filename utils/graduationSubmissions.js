@@ -160,6 +160,14 @@ async function ensureGraduationSubmissionsTables() {
         CREATE INDEX IF NOT EXISTS idx_graduation_submission_projects_student
           ON graduation_submission_projects(student_id, project_id);
       `);
+
+      // Migration: Set is_archived = TRUE for existing alumni
+      await query(`
+        UPDATE graduation_submissions gs
+        SET is_archived = TRUE
+        FROM students s
+        WHERE s.id = gs.student_id AND s.status = 'Alumni' AND gs.is_archived = FALSE;
+      `);
     })().catch((error) => {
       ensureGraduationSubmissionsPromise = null;
       throw error;

@@ -21,6 +21,28 @@ let ensureResearchAttachmentLinkPromise = null;
 let ensureResearchMembershipPeriodPromise = null;
 let ensureResearchDocumentFieldsPromise = null;
 
+let ensureJoinRequestsPromise = null;
+async function ensureResearchJoinRequestsTable() {
+  if (!ensureJoinRequestsPromise) {
+    ensureJoinRequestsPromise = query(`
+      CREATE TABLE IF NOT EXISTS research_join_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id TEXT REFERENCES research_projects(id) ON DELETE CASCADE,
+        student_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT DEFAULT 'Menunggu' CHECK (status IN ('Menunggu', 'Disetujui', 'Ditolak')),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE (project_id, student_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_research_join_requests_project ON research_join_requests(project_id);
+      CREATE INDEX IF NOT EXISTS idx_research_join_requests_student ON research_join_requests(student_id);
+    `).catch(err => {
+      console.error("[Research] Failed to ensure join_requests table:", err);
+    });
+  }
+  return ensureJoinRequestsPromise;
+}
+
 async function ensureResearchAttachmentLinkColumn() {
   if (!ensureResearchAttachmentLinkPromise) {
     ensureResearchAttachmentLinkPromise = query(`

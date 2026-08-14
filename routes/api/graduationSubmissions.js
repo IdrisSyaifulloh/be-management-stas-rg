@@ -1193,6 +1193,7 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
           graduation_completed_by = $2,
           graduation_completed_at = COALESCE(graduation_completed_at, NOW()),
           review_note = 'Mahasiswa sudah klik Jadi Alumni STAS-RG.',
+          is_archived = TRUE,
           updated_at = NOW()
       WHERE id = $1
       `,
