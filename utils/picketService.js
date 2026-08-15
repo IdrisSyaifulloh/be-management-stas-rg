@@ -752,12 +752,46 @@ function mapTask(row) {
   };
 }
 
+function isApprovedLeaveStatus(value) {
+  return String(value || "").trim().toLowerCase() === "disetujui";
+}
+
+function normalizeMappedLeaveType(value) {
+  return String(value || "").trim().toLowerCase() || null;
+}
+
 function mapAssignment(row) {
   if (!row) return null;
   const date = row.date_text || row.schedule_date_text || row.schedule_date || row.date;
   const isHoliday = Boolean(row.holiday_id);
+  const activeLeaveLookupAvailable = Object.prototype.hasOwnProperty.call(row, "active_leave_status");
+  const activeLeaveApproved = isApprovedLeaveStatus(row.active_leave_status);
+  const activeLeaveType = normalizeMappedLeaveType(row.active_leave_type);
+  const activeLeaveRequestId = activeLeaveApproved ? row.active_leave_request_id || null : null;
+  const storedAutoWfh =
+    normalizeMappedLeaveType(row.auto_leave_type) === "wfh" && Boolean(row.auto_leave_request_id);
   const autoCompletedByWfh =
-    row.auto_leave_type === "wfh" && Boolean(row.auto_leave_request_id);
+    (activeLeaveApproved && activeLeaveType === "wfh") ||
+    (!activeLeaveLookupAvailable && storedAutoWfh);
+  const approvedPicketLeave = isApprovedLeaveStatus(row.picket_leave_status);
+  const approvedNonWfhStudentLeave = activeLeaveApproved && activeLeaveType !== "wfh";
+  const approvedLeave = activeLeaveApproved || approvedPicketLeave;
+  const effectiveAutoLeaveRequestId = autoCompletedByWfh
+    ? activeLeaveRequestId || row.auto_leave_request_id || null
+    : null;
+  const effectiveAutoLeaveType = autoCompletedByWfh ? "wfh" : null;
+  const leaveStatus = activeLeaveApproved
+    ? row.active_leave_status
+    : approvedPicketLeave
+      ? row.picket_leave_status
+      : null;
+  const effectiveStatus = isHoliday
+    ? "Libur"
+    : autoCompletedByWfh
+      ? "Selesai"
+      : (approvedNonWfhStudentLeave || approvedPicketLeave)
+        ? "Izin"
+        : row.status;
   return {
     id: row.id,
     schedule_id: row.id,
@@ -782,7 +816,7 @@ function mapAssignment(row) {
     taskName: row.task_name || null,
     task_description: row.task_description || null,
     taskDescription: row.task_description || null,
-    status: isHoliday ? "Libur" : row.status,
+    status: effectiveStatus,
     original_status: row.status,
     originalStatus: row.status,
     is_holiday: isHoliday,
@@ -800,10 +834,18 @@ function mapAssignment(row) {
     submitted: Boolean(row.submission_id) || autoCompletedByWfh,
     auto_completed_by_wfh: autoCompletedByWfh,
     autoCompletedByWfh,
-    auto_leave_request_id: row.auto_leave_request_id || null,
-    autoLeaveRequestId: row.auto_leave_request_id || null,
-    auto_leave_type: row.auto_leave_type || null,
-    autoLeaveType: row.auto_leave_type || null,
+    auto_leave_request_id: effectiveAutoLeaveRequestId,
+    autoLeaveRequestId: effectiveAutoLeaveRequestId,
+    auto_leave_type: effectiveAutoLeaveType,
+    autoLeaveType: effectiveAutoLeaveType,
+    leave_request_id: activeLeaveRequestId,
+    leaveRequestId: activeLeaveRequestId,
+    leave_type: activeLeaveType,
+    leaveType: activeLeaveType,
+    leave_status: leaveStatus,
+    leaveStatus,
+    approved_leave: approvedLeave,
+    approvedLeave,
     submission_id: row.submission_id || null,
     submissionId: row.submission_id || null,
     submission_status: row.submission_status || null,
@@ -2056,7 +2098,11 @@ async function fetchAssignmentsByDate(date, executor = query) {
            ps.submitted_at AS submission_submitted_at,
            ps.reviewed_at AS submission_reviewed_at,
            ps.reviewed_by AS submission_reviewed_by,
-           ps.review_note AS submission_review_note
+           ps.review_note AS submission_review_note,
+           active_leave.id AS active_leave_request_id,
+           active_leave.jenis_pengajuan AS active_leave_type,
+           active_leave.status AS active_leave_status,
+           approved_picket_leave.status AS picket_leave_status
     FROM picket_schedules pa
     JOIN picket_days pd ON pd.id = pa.day_id
     JOIN students s ON s.id = pa.student_id
@@ -2064,6 +2110,29 @@ async function fetchAssignmentsByDate(date, executor = query) {
     LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
     LEFT JOIN picket_holidays ph ON ph.holiday_date = pa.schedule_date
     LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
+    LEFT JOIN LATERAL (
+      SELECT lr.id, lr.jenis_pengajuan, lr.status
+      FROM leave_requests lr
+      WHERE lr.student_id = pa.student_id
+        AND pa.schedule_date BETWEEN lr.periode_start AND lr.periode_end
+        AND LOWER(BTRIM(lr.status)) = LOWER('Disetujui')
+      ORDER BY
+        CASE WHEN LOWER(BTRIM(lr.jenis_pengajuan)) = 'wfh' THEN 0 ELSE 1 END,
+        lr.updated_at DESC,
+        lr.created_at DESC,
+        lr.id DESC
+      LIMIT 1
+    ) active_leave ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT plr.status
+      FROM picket_leave_requests plr
+      WHERE (plr.schedule_id = pa.id OR plr.assignment_id = pa.id)
+        AND plr.student_id = pa.student_id
+        AND plr.date = pa.schedule_date
+        AND LOWER(BTRIM(plr.status)) = LOWER('Disetujui')
+      ORDER BY plr.updated_at DESC, plr.created_at DESC, plr.id DESC
+      LIMIT 1
+    ) approved_picket_leave ON TRUE
     WHERE pa.schedule_date = $1::date
     ORDER BY u.name ASC
     `,
@@ -2399,7 +2468,11 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
              ps.submitted_at AS submission_submitted_at,
              ps.reviewed_at AS submission_reviewed_at,
              ps.reviewed_by AS submission_reviewed_by,
-             ps.review_note AS submission_review_note
+             ps.review_note AS submission_review_note,
+             active_leave.id AS active_leave_request_id,
+             active_leave.jenis_pengajuan AS active_leave_type,
+             active_leave.status AS active_leave_status,
+             approved_picket_leave.status AS picket_leave_status
       FROM picket_schedules pa
       JOIN picket_days pd ON pd.id = pa.day_id
       JOIN students s ON s.id = pa.student_id
@@ -2407,6 +2480,29 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
       LEFT JOIN picket_tasks pt ON pt.id = pa.task_id
       LEFT JOIN picket_holidays ph ON ph.holiday_date = pa.schedule_date
       LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
+      LEFT JOIN LATERAL (
+        SELECT lr.id, lr.jenis_pengajuan, lr.status
+        FROM leave_requests lr
+        WHERE lr.student_id = pa.student_id
+          AND pa.schedule_date BETWEEN lr.periode_start AND lr.periode_end
+          AND LOWER(BTRIM(lr.status)) = LOWER('Disetujui')
+        ORDER BY
+          CASE WHEN LOWER(BTRIM(lr.jenis_pengajuan)) = 'wfh' THEN 0 ELSE 1 END,
+          lr.updated_at DESC,
+          lr.created_at DESC,
+          lr.id DESC
+        LIMIT 1
+      ) active_leave ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT plr.status
+        FROM picket_leave_requests plr
+        WHERE (plr.schedule_id = pa.id OR plr.assignment_id = pa.id)
+          AND plr.student_id = pa.student_id
+          AND plr.date = pa.schedule_date
+          AND LOWER(BTRIM(plr.status)) = LOWER('Disetujui')
+        ORDER BY plr.updated_at DESC, plr.created_at DESC, plr.id DESC
+        LIMIT 1
+      ) approved_picket_leave ON TRUE
       WHERE pa.student_id = $1 AND pa.schedule_date = $2::date
       LIMIT 1
       `,
@@ -2475,7 +2571,7 @@ async function hasApprovedPicketLeave({ scheduleId, assignmentId, studentId, dat
     `
     SELECT 1
     FROM picket_leave_requests
-    WHERE status = 'Disetujui'
+    WHERE LOWER(BTRIM(status)) = LOWER('Disetujui')
       AND ($1::text IS NULL OR schedule_id = $1 OR assignment_id = $1)
       AND ($2::text IS NULL OR student_id = $2)
       AND ($3::date IS NULL OR date = $3::date)
@@ -2486,39 +2582,152 @@ async function hasApprovedPicketLeave({ scheduleId, assignmentId, studentId, dat
   return result.rowCount > 0;
 }
 
-async function getPicketCheckoutRequirement(studentIdOrUserId, date = getJakartaDateIso()) {
-  const today = await getPicketTodayForStudent(studentIdOrUserId, date);
-  const assignment = today.assignment;
-  if (today.isHoliday) {
+async function getLatestApprovedStudentLeaveForDate(studentId, date) {
+  const result = await query(
+    `
+    SELECT id, jenis_pengajuan AS leave_type, status AS leave_status
+    FROM leave_requests
+    WHERE student_id = $1
+      AND $2::date BETWEEN periode_start AND periode_end
+      AND LOWER(BTRIM(status)) = LOWER('Disetujui')
+    ORDER BY
+      CASE WHEN LOWER(BTRIM(jenis_pengajuan)) = 'wfh' THEN 0 ELSE 1 END,
+      updated_at DESC,
+      created_at DESC,
+      id DESC
+    LIMIT 1
+    `,
+    [studentId, date]
+  );
+  if (result.rowCount === 0) return null;
+  return {
+    id: result.rows[0].id,
+    type: normalizeMappedLeaveType(result.rows[0].leave_type),
+    status: result.rows[0].leave_status
+  };
+}
+
+function applyApprovedStudentLeaveToAssignment(assignment, studentLeave) {
+  if (!assignment || !studentLeave || !isApprovedLeaveStatus(studentLeave.status)) return assignment;
+  const leaveType = normalizeMappedLeaveType(studentLeave.type || studentLeave.leaveType || studentLeave.leave_type);
+  const leaveRequestId = studentLeave.id || studentLeave.leaveRequestId || studentLeave.leave_request_id || null;
+  const autoCompletedByWfh = leaveType === "wfh";
+
+  return {
+    ...assignment,
+    status: autoCompletedByWfh ? "Selesai" : "Izin",
+    submitted: assignment.submitted === true || autoCompletedByWfh,
+    auto_completed_by_wfh: autoCompletedByWfh,
+    autoCompletedByWfh,
+    auto_leave_request_id: autoCompletedByWfh ? leaveRequestId : null,
+    autoLeaveRequestId: autoCompletedByWfh ? leaveRequestId : null,
+    auto_leave_type: autoCompletedByWfh ? "wfh" : null,
+    autoLeaveType: autoCompletedByWfh ? "wfh" : null,
+    leave_request_id: leaveRequestId,
+    leaveRequestId,
+    leave_type: leaveType,
+    leaveType,
+    leave_status: studentLeave.status,
+    leaveStatus: studentLeave.status,
+    approved_leave: true,
+    approvedLeave: true
+  };
+}
+
+function buildPicketCheckoutRequirement({
+  assignment,
+  holiday = null,
+  approvedPicketLeave = false,
+  approvedStudentLeave = null
+} = {}) {
+  const effectiveAssignment = applyApprovedStudentLeaveToAssignment(assignment, approvedStudentLeave);
+  const isHoliday = Boolean(holiday || effectiveAssignment?.isHoliday || effectiveAssignment?.is_holiday);
+
+  if (isHoliday) {
     return {
       required: false,
-      assignment,
-      holiday: today.holiday,
+      assignment: effectiveAssignment || null,
+      holiday,
       isHoliday: true,
       is_holiday: true,
       isExempt: true,
       is_exempt: true,
       approvedLeave: false,
-      submitted: assignment?.submitted === true
+      submitted: effectiveAssignment?.submitted === true
     };
   }
-  if (!assignment) {
+
+  if (!effectiveAssignment) {
     return { required: false, assignment: null, approvedLeave: false, submitted: false };
   }
 
-  const approvedLeave = await hasApprovedPicketLeave({
-    scheduleId: assignment.id,
-    studentId: assignment.studentId,
-    date: assignment.date
-  });
-  const submitted = assignment.submitted === true;
+  if (effectiveAssignment.isExempt === true || effectiveAssignment.is_exempt === true) {
+    return {
+      required: false,
+      assignment: effectiveAssignment,
+      approvedLeave: false,
+      submitted: effectiveAssignment.submitted === true,
+      isExempt: true,
+      is_exempt: true
+    };
+  }
+
+  const autoCompletedByWfh =
+    effectiveAssignment.autoCompletedByWfh === true ||
+    effectiveAssignment.auto_completed_by_wfh === true ||
+    normalizeMappedLeaveType(effectiveAssignment.autoLeaveType || effectiveAssignment.auto_leave_type) === "wfh";
+
+  // Piket WFH memang tidak mempunyai submissionId/photoUrl. Flag otomatis
+  // harus dievaluasi lebih dulu daripada keberadaan bukti foto.
+  if (autoCompletedByWfh) {
+    return {
+      required: false,
+      assignment: effectiveAssignment,
+      approvedLeave: true,
+      submitted: true,
+      autoCompletedByWfh: true,
+      auto_completed_by_wfh: true
+    };
+  }
+
+  const studentLeaveApproved = isApprovedLeaveStatus(
+    approvedStudentLeave?.status || effectiveAssignment.leaveStatus || effectiveAssignment.leave_status
+  );
+  const approvedLeave = approvedPicketLeave === true || studentLeaveApproved || effectiveAssignment.approvedLeave === true;
+  const submitted =
+    effectiveAssignment.submitted === true ||
+    Boolean(effectiveAssignment.submissionId || effectiveAssignment.submission_id);
 
   return {
-    required: !submitted && !approvedLeave,
-    assignment,
+    required: !approvedLeave && !submitted,
+    assignment: effectiveAssignment,
     approvedLeave,
     submitted
   };
+}
+
+async function getPicketCheckoutRequirement(studentIdOrUserId, date = getJakartaDateIso()) {
+  const today = await getPicketTodayForStudent(studentIdOrUserId, date);
+  const assignment = today.assignment;
+  if (today.isHoliday || !assignment) {
+    return buildPicketCheckoutRequirement({ assignment, holiday: today.holiday });
+  }
+
+  const [approvedPicketLeave, approvedStudentLeave] = await Promise.all([
+    hasApprovedPicketLeave({
+      scheduleId: assignment.id,
+      studentId: assignment.studentId,
+      date: assignment.date
+    }),
+    getLatestApprovedStudentLeaveForDate(assignment.studentId, assignment.date)
+  ]);
+
+  return buildPicketCheckoutRequirement({
+    assignment,
+    holiday: today.holiday,
+    approvedPicketLeave,
+    approvedStudentLeave
+  });
 }
 
 async function createPicketSubmission(payload = {}) {
@@ -3221,8 +3430,10 @@ async function backfillApprovedPicketLeaveReplacements() {
 }
 
 module.exports = {
+  applyApprovedStudentLeaveToAssignment,
   assignPicketDayForStudent,
   backfillApprovedPicketLeaveReplacements,
+  buildPicketCheckoutRequirement,
   buildRandomizedPicketDayAssignments,
   chooseLeastLoadedPicketDay,
   chooseRandomPicketTask,
@@ -3253,6 +3464,7 @@ module.exports = {
   listPicketStudentOptions,
   listPicketTasks,
   materializePicketSchedulesForDate,
+  mapPicketAssignment: mapAssignment,
   randomizePicketStudentDays,
   replacePicketManagers,
   resyncPicketSchedule,

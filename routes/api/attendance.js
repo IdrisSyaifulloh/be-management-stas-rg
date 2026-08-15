@@ -330,7 +330,7 @@ async function hasApprovedLeaveOnDate(studentId, dateIso) {
     SELECT id
     FROM leave_requests
     WHERE student_id = $1
-      AND status = 'Disetujui'
+      AND LOWER(BTRIM(status)) = LOWER('Disetujui')
       AND $2::date BETWEEN periode_start AND periode_end
     LIMIT 1
     `,
@@ -397,8 +397,8 @@ async function hasApprovedWfhToday(studentId, dateIso) {
     SELECT 1
     FROM leave_requests
     WHERE student_id = $1
-      AND jenis_pengajuan = 'wfh'
-      AND status = 'Disetujui'
+      AND LOWER(BTRIM(jenis_pengajuan)) = 'wfh'
+      AND LOWER(BTRIM(status)) = LOWER('Disetujui')
       AND periode_start <= $2::date
       AND periode_end >= $2::date
     LIMIT 1

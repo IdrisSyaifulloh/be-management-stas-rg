@@ -372,6 +372,40 @@ async function deactivateAccessLocksForStudentDateReason({
   return result.rows.map((row) => row.id);
 }
 
+async function deactivatePicketLocksCoveredByApprovedStudentLeave(studentId = null) {
+  await ensureStudentAccessLockTable();
+  const normalizedStudentId = String(studentId || "").trim() || null;
+  const result = await query(
+    `
+    UPDATE student_access_locks sal
+    SET status = 'UNLOCKED',
+        locked = FALSE,
+        active = FALSE,
+        unlocked_at = COALESCE(sal.unlocked_at, NOW()),
+        updated_at = NOW()
+    WHERE ($1::text IS NULL OR sal.student_id = $1)
+      AND sal.reason IN ($2, $3)
+      AND sal.active = TRUE
+      AND sal.locked = TRUE
+      AND sal.status = 'LOCKED'
+      AND EXISTS (
+        SELECT 1
+        FROM leave_requests lr
+        WHERE lr.student_id = sal.student_id
+          AND sal.lock_date BETWEEN lr.periode_start AND lr.periode_end
+          AND LOWER(BTRIM(lr.status)) = LOWER('Disetujui')
+      )
+    RETURNING sal.id
+    `,
+    [
+      normalizedStudentId,
+      ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+      ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+    ]
+  );
+  return result.rows.map((row) => row.id);
+}
+
 async function createOverduePicketSubmissionMissingLocksForStudent(studentId, referenceDate = getJakartaDateIso()) {
   await ensureStudentAccessLockTable();
   const normalizedReferenceDate = normalizeHolidayDate(referenceDate) || getJakartaDateIso();
@@ -417,7 +451,14 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
         SELECT 1
         FROM picket_leave_requests plr
         WHERE plr.schedule_id = psch.id
-          AND plr.status = 'Disetujui'
+          AND LOWER(BTRIM(plr.status)) = LOWER('Disetujui')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM leave_requests lr
+        WHERE lr.student_id = psch.student_id
+          AND psch.schedule_date BETWEEN lr.periode_start AND lr.periode_end
+          AND LOWER(BTRIM(lr.status)) = LOWER('Disetujui')
       )
       AND NOT EXISTS (
         SELECT 1
@@ -524,6 +565,7 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
     return null;
   }
 
+  await deactivatePicketLocksCoveredByApprovedStudentLeave(student.id);
   await createOverduePicketSubmissionMissingLocksForStudent(student.id);
 
   const result = await query(
@@ -562,7 +604,10 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
 
 async function listAccessLocks({ status = null, search = null } = {}) {
   await ensureStudentAccessLockTable();
-  await deactivateAttendanceAbsentLocksForConfiguredHolidays();
+  await Promise.all([
+    deactivateAttendanceAbsentLocksForConfiguredHolidays(),
+    deactivatePicketLocksCoveredByApprovedStudentLeave()
+  ]);
   const activeOnly = String(status || "").toLowerCase() === "active";
   const searchValue = String(search || "").trim();
   const params = [activeOnly, ACCESS_LOCK_REASON_ATTENDANCE_ABSENT, ACCESS_LOCK_REASON_CHECKOUT_MISSING_22];
@@ -720,6 +765,7 @@ module.exports = {
   createWfhCheckinMissingLocks,
   createAttendanceAbsentLocks,
   deactivateAccessLocksForStudentDateReason,
+  deactivatePicketLocksCoveredByApprovedStudentLeave,
   getPicketSubmissionLockDebugSnapshot,
   createOverduePicketSubmissionMissingLocksForStudent,
   createPicketSubmissionInvalidLocks,
