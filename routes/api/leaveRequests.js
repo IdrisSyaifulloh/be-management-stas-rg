@@ -732,8 +732,8 @@ router.patch(
         lr.student_id,
         lr.jenis_pengajuan,
         lr.counts_against_wfh_quota,
-        lr.periode_start,
-        lr.periode_end,
+        TO_CHAR(lr.periode_start, 'YYYY-MM-DD') AS periode_start,
+        TO_CHAR(lr.periode_end, 'YYYY-MM-DD') AS periode_end,
         COALESCE(s.wfh_quota, 0)::int AS wfh_quota,
         s.tipe AS student_tipe
       FROM leave_requests lr
