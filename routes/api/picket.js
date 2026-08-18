@@ -41,6 +41,12 @@ const {
 
 const router = express.Router();
 
+function isSystemHolidayReference(req) {
+  const source = req.body?.source || req.body?.holiday_source || req.query?.source || req.query?.holiday_source;
+  return String(req.params?.id || "").toLowerCase().startsWith("system:") ||
+    String(source || "").toLowerCase() === "system";
+}
+
 function scheduleResponse(item) {
   const schedule = item?.schedule || item;
   const assignment = item?.assignment || item;
@@ -162,6 +168,11 @@ router.patch(
   "/holidays/:id",
   asyncHandler(async (req, res) => {
     if (!(await requirePicketManager(req, res))) return;
+    if (isSystemHolidayReference(req)) {
+      return res.status(403).json({
+        message: "Libur kampus dikelola melalui system-settings dan tidak dapat diubah dari menu piket."
+      });
+    }
     const id = requireSafeId(req.params.id, "id");
     const holiday = await updatePicketHoliday(id, {
       ...(req.body || {}),
@@ -179,6 +190,11 @@ router.delete(
   "/holidays/:id",
   asyncHandler(async (req, res) => {
     if (!(await requirePicketManager(req, res))) return;
+    if (isSystemHolidayReference(req)) {
+      return res.status(403).json({
+        message: "Libur kampus dikelola melalui system-settings dan tidak dapat dihapus dari menu piket."
+      });
+    }
     const id = requireSafeId(req.params.id, "id");
     const holiday = await deletePicketHoliday(id);
     if (!holiday) return res.status(404).json({ message: "Hari libur piket tidak ditemukan." });

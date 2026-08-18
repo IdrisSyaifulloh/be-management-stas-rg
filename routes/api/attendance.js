@@ -35,6 +35,10 @@ const {
   getPicketCheckoutRequirement,
   getPicketTodayForStudent
 } = require("../../utils/picketService");
+const {
+  buildRisetWeeklyMonitorFields,
+  normalizeRisetWeeklyMinHours
+} = require("../../utils/risetWeeklyMonitor");
 
 const router = express.Router();
 
@@ -141,7 +145,9 @@ function getAttendanceRules(settings) {
   const holidayRules = getHolidayRules(settings);
 
   return {
-    risetMinWeeklyHours: Number(settings.attendanceRules?.risetMinWeeklyHours || 4),
+    risetMinWeeklyHours: normalizeRisetWeeklyMinHours(
+      settings.attendanceRules?.risetMinWeeklyHours
+    ),
     risetTargetWeeklyHours: Number(settings.attendanceRules?.risetTargetWeeklyHours || 6),
     magangMinCheckoutHours: Number(settings.attendanceRules?.magangMinCheckoutHours || 8),
     earlyCheckoutWarning: Boolean(settings.attendanceRules?.earlyCheckoutWarning ?? true),
@@ -1269,6 +1275,34 @@ router.get(
       `
     );
 
+    const risetWeeklyHoursResult = await query(
+      `
+      SELECT
+        s.id AS student_id,
+        COALESCE(
+          SUM(
+            GREATEST(
+              EXTRACT(EPOCH FROM (COALESCE(ar.check_out_at, NOW()) - ar.check_in_at)) / 3600.0,
+              0
+            )
+          ),
+          0
+        )::numeric(10,2) AS total_hours
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      LEFT JOIN attendance_records ar
+        ON ar.student_id = s.id
+       AND ar.status IN ('Hadir', 'WFH')
+       AND ar.check_in_at IS NOT NULL
+       AND ar.attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)::date
+       AND ar.attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+      WHERE s.tipe = 'Riset'
+        AND u.is_active = TRUE
+      GROUP BY s.id
+      ORDER BY s.id
+      `
+    );
+
     const allStudentIds = studentsResult.rows.map((row) => row.id);
     const studentsById = new Map(studentsResult.rows.map((row) => [row.id, row]));
     const leaveSet = new Set(leavesResult.rows.map((row) => row.student_id));
@@ -1286,6 +1320,15 @@ router.get(
     const attendanceMap = new Map(attendanceResult.rows.map((row) => [row.student_id, row]));
     const attendanceStatusByStudentId = {};
     const attendanceModeByStudentId = {};
+    const risetWeeklyMonitorFields = buildRisetWeeklyMonitorFields({
+      students: studentsResult.rows,
+      weeklyHoursRows: risetWeeklyHoursResult.rows,
+      attendanceByStudentId: attendanceMap,
+      leaveStudentIds: leaveSet,
+      configuredMinHours: attendanceRules.risetMinWeeklyHours,
+      isHoliday: Boolean(todayHoliday),
+      dailyAttendanceWindowPassed: lockWindowOpen
+    });
 
     const presentIds = [];
     const leaveIds = [];
@@ -1487,7 +1530,8 @@ router.get(
       magangUnderHoursLockIds,
       magangMissingCheckoutLockIds,
       risetWeeklyUnderHoursLockIds,
-      weeklyHadirByStudentId
+      weeklyHadirByStudentId,
+      ...risetWeeklyMonitorFields
     });
   })
 );

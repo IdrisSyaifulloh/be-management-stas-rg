@@ -3,6 +3,10 @@ const { getSettingsAsync } = require("../config/systemSettingsStore");
 const { getJakartaDateIso } = require("./attendanceHistory");
 const { findNonWorkingDayForDate, getHolidayRules, normalizeHolidayDate } = require("./holidays");
 const { resolveStudentRecord } = require("./studentResolver");
+const {
+  getEffectivePicketHolidayByDate,
+  listEffectivePicketHolidays
+} = require("./effectivePicketHolidays");
 
 const ACCESS_LOCK_REASON_ATTENDANCE_ABSENT = "ATTENDANCE_ABSENT";
 const ACCESS_LOCK_REASON_WORK_HOURS_UNDER_8 = "WORK_HOURS_UNDER_8";
@@ -320,6 +324,11 @@ async function createRisetWeeklyHoursUnderTargetLocks({ studentIds, date }) {
 }
 
 async function createPicketSubmissionInvalidLocks({ studentIds, date }) {
+  const holiday = await getEffectivePicketHolidayByDate(date);
+  if (holiday) {
+    await deactivatePicketLocksCoveredByEffectiveHolidays();
+    return [];
+  }
   return createStudentAccessLocks({
     studentIds,
     date,
@@ -328,6 +337,11 @@ async function createPicketSubmissionInvalidLocks({ studentIds, date }) {
 }
 
 async function createPicketSubmissionMissingLocks({ studentIds, date, reactivateUnlocked = false }) {
+  const holiday = await getEffectivePicketHolidayByDate(date);
+  if (holiday) {
+    await deactivatePicketLocksCoveredByEffectiveHolidays();
+    return [];
+  }
   return createStudentAccessLocks({
     studentIds,
     date,
@@ -406,6 +420,38 @@ async function deactivatePicketLocksCoveredByApprovedStudentLeave(studentId = nu
   return result.rows.map((row) => row.id);
 }
 
+async function deactivatePicketLocksCoveredByEffectiveHolidays({ settings = null, studentId = null } = {}) {
+  await ensureStudentAccessLockTable();
+  const holidays = await listEffectivePicketHolidays({ settings });
+  const holidayDates = holidays.map((holiday) => holiday.date);
+  if (holidayDates.length === 0) return [];
+  const normalizedStudentId = String(studentId || "").trim() || null;
+  const result = await query(
+    `
+    UPDATE student_access_locks
+    SET status = 'UNLOCKED',
+        locked = FALSE,
+        active = FALSE,
+        unlocked_at = COALESCE(unlocked_at, NOW()),
+        updated_at = NOW()
+    WHERE ($1::text IS NULL OR student_id = $1)
+      AND lock_date = ANY($2::date[])
+      AND reason IN ($3, $4)
+      AND active = TRUE
+      AND locked = TRUE
+      AND status = 'LOCKED'
+    RETURNING id
+    `,
+    [
+      normalizedStudentId,
+      holidayDates,
+      ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID,
+      ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+    ]
+  );
+  return result.rows.map((row) => row.id);
+}
+
 async function createOverduePicketSubmissionMissingLocksForStudent(studentId, referenceDate = getJakartaDateIso()) {
   await ensureStudentAccessLockTable();
   const normalizedReferenceDate = normalizeHolidayDate(referenceDate) || getJakartaDateIso();
@@ -422,13 +468,8 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
   if (!tables.picket_schedules || !tables.picket_submissions || !tables.picket_leave_requests) {
     return [];
   }
-  const holidayExclusion = tables.picket_holidays
-    ? `AND NOT EXISTS (
-        SELECT 1
-        FROM picket_holidays ph
-        WHERE ph.holiday_date = psch.schedule_date
-      )`
-    : "";
+  const effectiveHolidays = await listEffectivePicketHolidays({ endDate: normalizedReferenceDate });
+  const effectiveHolidayDates = effectiveHolidays.map((holiday) => holiday.date);
 
   const result = await query(
     `
@@ -437,7 +478,7 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
     WHERE psch.student_id = $1
       AND psch.schedule_date < $2::date
       AND psch.status <> 'Selesai'
-      ${holidayExclusion}
+      AND NOT (psch.schedule_date = ANY($4::date[]))
       AND NOT EXISTS (
         SELECT 1
         FROM picket_submissions psub
@@ -472,7 +513,12 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
       )
     ORDER BY schedule_date_text ASC
     `,
-    [studentId, normalizedReferenceDate, ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING]
+    [
+      studentId,
+      normalizedReferenceDate,
+      ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING,
+      effectiveHolidayDates
+    ]
   );
 
   const createdIds = [];
@@ -565,7 +611,10 @@ async function getActiveLockForStudent(studentIdOrUserId, { respectGlobalSetting
     return null;
   }
 
-  await deactivatePicketLocksCoveredByApprovedStudentLeave(student.id);
+  await Promise.all([
+    deactivatePicketLocksCoveredByApprovedStudentLeave(student.id),
+    deactivatePicketLocksCoveredByEffectiveHolidays({ studentId: student.id })
+  ]);
   await createOverduePicketSubmissionMissingLocksForStudent(student.id);
 
   const result = await query(
@@ -606,7 +655,8 @@ async function listAccessLocks({ status = null, search = null } = {}) {
   await ensureStudentAccessLockTable();
   await Promise.all([
     deactivateAttendanceAbsentLocksForConfiguredHolidays(),
-    deactivatePicketLocksCoveredByApprovedStudentLeave()
+    deactivatePicketLocksCoveredByApprovedStudentLeave(),
+    deactivatePicketLocksCoveredByEffectiveHolidays()
   ]);
   const activeOnly = String(status || "").toLowerCase() === "active";
   const searchValue = String(search || "").trim();
@@ -765,6 +815,7 @@ module.exports = {
   createWfhCheckinMissingLocks,
   createAttendanceAbsentLocks,
   deactivateAccessLocksForStudentDateReason,
+  deactivatePicketLocksCoveredByEffectiveHolidays,
   deactivatePicketLocksCoveredByApprovedStudentLeave,
   getPicketSubmissionLockDebugSnapshot,
   createOverduePicketSubmissionMissingLocksForStudent,

@@ -3,7 +3,8 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { extractRole } = require("../../utils/roleGuard");
 const { getSettingsAsync, updateSettings } = require("../../config/systemSettingsStore");
 const {
-  deactivateAttendanceAbsentLocksForConfiguredHolidays
+  deactivateAttendanceAbsentLocksForConfiguredHolidays,
+  deactivatePicketLocksCoveredByEffectiveHolidays
 } = require("../../utils/studentAccessLocks");
 
 const router = express.Router();
@@ -39,13 +40,16 @@ router.patch(
       return res.status(403).json({ message: "Akses ditolak." });
     }
     const settings = await updateSettings(req.body || {});
-    const deactivatedAttendanceAbsentLockIds =
-      await deactivateAttendanceAbsentLocksForConfiguredHolidays(settings);
+    const [deactivatedAttendanceAbsentLockIds, deactivatedPicketLockIds] = await Promise.all([
+      deactivateAttendanceAbsentLocksForConfiguredHolidays(settings),
+      deactivatePicketLocksCoveredByEffectiveHolidays({ settings })
+    ]);
 
     res.json({
       message: "Pengaturan sistem berhasil diperbarui.",
       settings,
-      deactivatedAttendanceAbsentLockIds
+      deactivatedAttendanceAbsentLockIds,
+      deactivatedPicketLockIds
     });
   })
 );

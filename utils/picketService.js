@@ -6,6 +6,11 @@ const { getJakartaDateIso } = require("./attendanceHistory");
 const { resolveStudentId, resolveStudentRecord } = require("./studentResolver");
 const { addIsoDays, findNextPicketReplacementDate } = require("./picketLeaveReplacement");
 const {
+  getEffectivePicketHolidayByDate,
+  listEffectivePicketHolidays,
+  mapSpecificPicketHoliday
+} = require("./effectivePicketHolidays");
+const {
   expandIsoDateRange,
   normalizeStudentLeaveType,
   resolveStudentLeavePicketAction,
@@ -824,12 +829,12 @@ function mapAssignment(row) {
     is_exempt: isHoliday,
     isExempt: isHoliday,
     holiday: isHoliday
-      ? {
+      ? mapSpecificPicketHoliday({
           id: row.holiday_id,
-          date: row.holiday_date_text || date,
+          holiday_date_text: row.holiday_date_text || date,
           name: row.holiday_name,
           notes: row.holiday_notes || null
-        }
+        })
       : null,
     submitted: Boolean(row.submission_id) || autoCompletedByWfh,
     auto_completed_by_wfh: autoCompletedByWfh,
@@ -904,6 +909,35 @@ function mapAssignment(row) {
   };
 }
 
+function applyEffectiveHolidayToAssignment(assignment, holiday) {
+  if (!assignment || !holiday) return assignment;
+  return {
+    ...assignment,
+    status: "Libur",
+    is_holiday: true,
+    isHoliday: true,
+    is_exempt: true,
+    isExempt: true,
+    holiday
+  };
+}
+
+async function applyEffectiveHolidaysToAssignments(assignments, options = {}) {
+  const items = Array.isArray(assignments) ? assignments : [];
+  if (items.length === 0) return items;
+  const dates = items.map((assignment) => assignment.date).filter(Boolean).sort();
+  const holidays = await listEffectivePicketHolidays({
+    startDate: dates[0],
+    endDate: dates[dates.length - 1],
+    executor: options.executor || query,
+    settings: options.settings || null
+  });
+  const holidayByDate = new Map(holidays.map((holiday) => [holiday.date, holiday]));
+  return items.map((assignment) =>
+    applyEffectiveHolidayToAssignment(assignment, holidayByDate.get(assignment.date) || null)
+  );
+}
+
 function mapSubmission(row) {
   const scheduleId = row.schedule_id || row.assignment_id;
   return {
@@ -971,40 +1005,13 @@ function mapLeaveRequest(row) {
 }
 
 function mapPicketHoliday(row) {
-  if (!row) return null;
-  const date = row.holiday_date_text || row.holiday_date;
-  return {
-    id: row.id,
-    date,
-    holiday_date: date,
-    holidayDate: date,
-    name: row.name,
-    notes: row.notes || null,
-    created_by: row.created_by || null,
-    createdBy: row.created_by || null,
-    updated_by: row.updated_by || null,
-    updatedBy: row.updated_by || null,
-    created_at: row.created_at,
-    createdAt: row.created_at,
-    updated_at: row.updated_at,
-    updatedAt: row.updated_at
-  };
+  return mapSpecificPicketHoliday(row);
 }
 
 async function getPicketHolidayByDate(date, executor = query) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  const result = await runQuery(
-    executor,
-    `
-    SELECT *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text
-    FROM picket_holidays
-    WHERE holiday_date = $1::date
-    LIMIT 1
-    `,
-    [targetDate]
-  );
-  return result.rows[0] ? mapPicketHoliday(result.rows[0]) : null;
+  return getEffectivePicketHolidayByDate(targetDate, { executor });
 }
 
 async function ensurePicketDateIsNotHoliday(date, executor = query) {
@@ -1018,27 +1025,10 @@ async function ensurePicketDateIsNotHoliday(date, executor = query) {
 
 async function listPicketHolidays({ startDate = null, endDate = null } = {}) {
   await ensurePicketTables();
-  const params = [];
-  const clauses = [];
-  if (startDate) {
-    params.push(normalizeIsoDate(startDate));
-    clauses.push(`holiday_date >= $${params.length}::date`);
-  }
-  if (endDate) {
-    params.push(normalizeIsoDate(endDate));
-    clauses.push(`holiday_date <= $${params.length}::date`);
-  }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const result = await query(
-    `
-    SELECT *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text
-    FROM picket_holidays
-    ${where}
-    ORDER BY holiday_date ASC
-    `,
-    params
-  );
-  return result.rows.map(mapPicketHoliday);
+  return listEffectivePicketHolidays({
+    startDate: startDate ? normalizeIsoDate(startDate) : null,
+    endDate: endDate ? normalizeIsoDate(endDate) : null
+  });
 }
 
 function normalizePicketHolidayPayload(payload = {}) {
@@ -1060,6 +1050,17 @@ function normalizePicketHolidayPayload(payload = {}) {
     name,
     notes: payload.notes == null ? null : String(payload.notes).trim() || null
   };
+}
+
+function assertEditablePicketHolidayId(id, source = null) {
+  if (
+    String(id || "").toLowerCase().startsWith("system:") ||
+    String(source || "").toLowerCase() === "system"
+  ) {
+    const error = new Error("Libur kampus dikelola melalui system-settings dan tidak dapat diubah dari menu piket.");
+    error.statusCode = 403;
+    throw error;
+  }
 }
 
 async function releasePicketLocksForHoliday(date, updatedBy = null) {
@@ -1111,6 +1112,7 @@ async function createPicketHoliday(payload = {}) {
 
 async function updatePicketHoliday(id, payload = {}) {
   await ensurePicketTables();
+  assertEditablePicketHolidayId(id, payload.source || payload.holiday_source);
   const currentResult = await query(
     `SELECT *, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date_text FROM picket_holidays WHERE id = $1 LIMIT 1`,
     [id]
@@ -1152,6 +1154,7 @@ async function updatePicketHoliday(id, payload = {}) {
 
 async function deletePicketHoliday(id) {
   await ensurePicketTables();
+  assertEditablePicketHolidayId(id);
   const result = await query(
     `
     DELETE FROM picket_holidays
@@ -1602,7 +1605,7 @@ async function listPicketSchedules({ date = null, studentId = null, dayId = null
     `,
     params
   );
-  return result.rows.map(mapAssignment);
+  return applyEffectiveHolidaysToAssignments(result.rows.map(mapAssignment));
 }
 
 async function getPicketScheduleById(id, executor = query) {
@@ -1632,7 +1635,10 @@ async function getPicketScheduleById(id, executor = query) {
     `,
     [id]
   );
-  return result.rows[0] ? mapAssignment(result.rows[0]) : null;
+  if (!result.rows[0]) return null;
+  const assignment = mapAssignment(result.rows[0]);
+  const holiday = await getEffectivePicketHolidayByDate(assignment.date, { executor });
+  return applyEffectiveHolidayToAssignment(assignment, holiday);
 }
 
 async function createPicketSchedule(payload = {}) {
@@ -2138,7 +2144,7 @@ async function fetchAssignmentsByDate(date, executor = query) {
     `,
     [date]
   );
-  return result.rows.map(mapAssignment);
+  return applyEffectiveHolidaysToAssignments(result.rows.map(mapAssignment), { executor });
 }
 
 async function generatePicketSchedule({
@@ -2511,7 +2517,9 @@ async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDate
     getPicketStudentDay(studentId)
   ]);
   return {
-    assignment: result.rows[0] ? mapAssignment(result.rows[0]) : null,
+    assignment: result.rows[0]
+      ? applyEffectiveHolidayToAssignment(mapAssignment(result.rows[0]), holiday)
+      : null,
     fixed_day: fixedDay,
     fixedDay,
     holiday,
@@ -2561,7 +2569,7 @@ async function getPicketHistory(studentIdOrUserId) {
     `,
     [studentId]
   );
-  return result.rows.map(mapAssignment);
+  return applyEffectiveHolidaysToAssignments(result.rows.map(mapAssignment));
 }
 
 async function hasApprovedPicketLeave({ scheduleId, assignmentId, studentId, date }) {
@@ -2836,8 +2844,18 @@ async function reviewPicketSubmission(id, payload = {}) {
   if (result.rowCount === 0) return null;
 
   const submission = mapSubmission(result.rows[0]);
-  await updatePicketScheduleStatusFromSubmission(submission.scheduleId, submission.status);
-  if (status === "Bermasalah") {
+  const holiday = await getPicketHolidayByDate(submission.date);
+  if (holiday) {
+    await releasePicketLocksForHoliday(submission.date, reviewedBy);
+    submission.holiday = holiday;
+    submission.isHoliday = true;
+    submission.is_holiday = true;
+    submission.isExempt = true;
+    submission.is_exempt = true;
+  } else {
+    await updatePicketScheduleStatusFromSubmission(submission.scheduleId, submission.status);
+  }
+  if (status === "Bermasalah" && !holiday) {
     await createPicketSubmissionInvalidLocks({
       studentIds: [submission.studentId],
       date: submission.date
@@ -2878,15 +2896,11 @@ async function findTemporaryPicketReplacementDate({ originalDate, studentId, exe
       "SELECT day_id FROM picket_student_days WHERE student_id = $1 LIMIT 1",
       [studentId]
     ),
-    runQuery(
-      executor,
-      `
-      SELECT TO_CHAR(holiday_date, 'YYYY-MM-DD') AS date_text
-      FROM picket_holidays
-      WHERE holiday_date > $1::date AND holiday_date <= $2::date
-      `,
-      [baseDate, endDate]
-    ),
+    listEffectivePicketHolidays({
+      startDate: addIsoDays(baseDate, 1),
+      endDate,
+      executor
+    }),
     runQuery(
       executor,
       `
@@ -2903,7 +2917,7 @@ async function findTemporaryPicketReplacementDate({ originalDate, studentId, exe
     afterDate: baseDate,
     activeDayIds: dayIds,
     excludedDayIds: studentDay.rowCount > 0 ? [studentDay.rows[0].day_id] : [],
-    holidayDates: new Set(holidays.rows.map((row) => row.date_text)),
+    holidayDates: new Set(holidays.map((holiday) => holiday.date)),
     occupiedDates: new Set(occupied.rows.map((row) => row.date_text)),
     maxDays: 14
   });
@@ -2937,6 +2951,12 @@ async function syncStudentLeaveToPicket({
     throw error;
   }
 
+  const effectiveHolidays = await listEffectivePicketHolidays({
+    startDate: dates[0],
+    endDate: dates[dates.length - 1]
+  });
+  const effectiveHolidayDates = new Set(effectiveHolidays.map((holiday) => holiday.date));
+
   if (action !== "clear") {
     for (const date of dates) {
       await materializePicketSchedulesForDate(date, reviewedBy);
@@ -2952,6 +2972,7 @@ async function syncStudentLeaveToPicket({
     wfhAutoCompleted: [],
     alreadyCompleted: [],
     cleared: [],
+    holidayDatesSkipped: [...effectiveHolidayDates],
     warnings: []
   };
   let scheduleRows = [];
@@ -2983,7 +3004,8 @@ async function syncStudentLeaveToPicket({
     // WFH/izin hanya boleh memengaruhi jadwal yang tanggalnya benar-benar
     // berada di dalam periode izin. Tanpa jadwal pada tanggal itu, tidak ada
     // status piket yang dibuat atau diselesaikan otomatis.
-    scheduleRows = selectPicketSchedulesOnLeaveDates(schedules.rows, dates);
+    scheduleRows = selectPicketSchedulesOnLeaveDates(schedules.rows, dates)
+      .filter((schedule) => action === "clear" || !effectiveHolidayDates.has(schedule.date_text));
     summary.scheduledDates = scheduleRows.map((row) => row.date_text);
 
     if (action === "clear") {
@@ -3431,6 +3453,7 @@ async function backfillApprovedPicketLeaveReplacements() {
 
 module.exports = {
   applyApprovedStudentLeaveToAssignment,
+  applyEffectiveHolidayToAssignment,
   assignPicketDayForStudent,
   backfillApprovedPicketLeaveReplacements,
   buildPicketCheckoutRequirement,

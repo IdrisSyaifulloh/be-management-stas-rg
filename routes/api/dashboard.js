@@ -19,6 +19,7 @@ const {
 const { requireSafeId } = require("../../utils/securityValidation");
 const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
 const { findNonWorkingDayForDate } = require("../../utils/holidays");
+const { listEffectivePicketHolidays } = require("../../utils/effectivePicketHolidays");
 const { ensureStudentDocumentsTable, fetchStudentDocuments } = require("../../utils/studentDocuments");
 const { ensurePicketTables } = require("../../utils/picketService");
 
@@ -168,6 +169,11 @@ router.get(
     await ensurePicketTables();
 
     const { weekStart, weekEnd, queryEnd } = getSundayBasedJakartaWeekBounds();
+    const effectivePicketHolidays = await listEffectivePicketHolidays({
+      startDate: weekStart,
+      endDate: queryEnd
+    });
+    const effectivePicketHolidayDates = effectivePicketHolidays.map((holiday) => holiday.date);
 
     const result = await query(
       `
@@ -186,11 +192,7 @@ router.get(
       JOIN users u ON u.id = s.user_id
       LEFT JOIN picket_tasks pt ON pt.id = psch.task_id
       WHERE psch.schedule_date BETWEEN $1::date AND $2::date
-        AND NOT EXISTS (
-          SELECT 1
-          FROM picket_holidays ph
-          WHERE ph.holiday_date = psch.schedule_date
-        )
+        AND NOT (psch.schedule_date = ANY($3::date[]))
         AND NOT EXISTS (
           SELECT 1
           FROM picket_leave_requests plr
@@ -208,7 +210,7 @@ router.get(
       GROUP BY psch.student_id, u.name, u.initials, u.photo_url, s.nim
       ORDER BY missed_count DESC, MAX(psch.schedule_date) DESC, u.name ASC
       `,
-      [weekStart, queryEnd]
+      [weekStart, queryEnd, effectivePicketHolidayDates]
     );
 
     const items = result.rows.map((row) => ({
