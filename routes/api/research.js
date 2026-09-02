@@ -676,9 +676,7 @@ router.get(
       FROM research_memberships rm
       JOIN users u ON u.id = rm.user_id
       WHERE rm.project_id = $1
-        AND COALESCE(rm.status, 'Aktif') = 'Aktif'
-        AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
-      ORDER BY rm.member_type ASC, u.name ASC
+      ORDER BY CASE WHEN rm.status = 'Aktif' THEN 0 ELSE 1 END ASC, rm.member_type ASC, u.name ASC
       `,
       [req.params.id]
     );
