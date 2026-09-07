@@ -672,9 +672,11 @@ router.get(
       SELECT rm.id, rm.project_id, rm.user_id, u.name, u.initials, u.photo_url, rm.member_type,
              rm.peran,
              CASE WHEN rm.selesai IS NOT NULL AND rm.selesai < CURRENT_DATE THEN 'Nonaktif' ELSE rm.status END AS status,
-             rm.bergabung, rm.selesai, u.role
+             rm.bergabung, rm.selesai, u.role,
+             s.tipe AS mahasiswa_tipe
       FROM research_memberships rm
       JOIN users u ON u.id = rm.user_id
+      LEFT JOIN students s ON s.user_id = u.id
       WHERE rm.project_id = $1
       ORDER BY CASE WHEN rm.status = 'Aktif' THEN 0 ELSE 1 END ASC, rm.member_type ASC, u.name ASC
       `,
