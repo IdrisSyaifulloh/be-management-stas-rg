@@ -76,10 +76,12 @@ ini atau setelah hari ini dan belum memiliki jadwal pengganti akan diproses
 otomatis oleh scheduler. Izin lama yang tanggalnya sudah lewat tetap disimpan
 sebagai histori dan tidak dijadwalkan ulang secara retroaktif.
 
-Migration uniqueness akan berhenti dan rollback apabila menemukan dua jadwal
-yang konflik dan keduanya sudah memiliki submission. Konflik tersebut harus
-ditinjau manual karena migration tidak diizinkan menghapus atau mengubah data
-yang sudah memiliki submission.
+Migration uniqueness mempertahankan jadwal historis dengan submission sebelum
+cutover `2026-09-05`. Jika seluruh histori sudah unik, migration memasang full
+unique constraint. Jika terdapat konflik submission historis, migration memakai
+partial unique index sejak cutover sehingga histori tidak berubah dan jadwal
+baru tetap dijamin unik oleh database. Konflik sejak cutover membuat seluruh
+migration rollback.
 
 Integration test piket membutuhkan database test terpisah yang schema-nya sudah
 terpasang:

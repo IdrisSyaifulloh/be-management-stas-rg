@@ -2,36 +2,9 @@ BEGIN;
 
 LOCK TABLE picket_schedules IN ACCESS EXCLUSIVE MODE;
 
--- Constraint tidak mungkin dipenuhi tanpa mengubah histori apabila dua jadwal
--- yang saling bentrok sama-sama sudah mempunyai submission. Hentikan migration
--- secara atomik supaya submission tidak pernah dihapus atau dipindahkan.
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM picket_schedules psch
-    JOIN picket_submissions psub
-      ON psub.schedule_id = psch.id OR psub.assignment_id = psch.id
-    GROUP BY psch.schedule_date, psch.student_id
-    HAVING COUNT(*) > 1
-  ) THEN
-    RAISE EXCEPTION
-      'Tidak dapat memperbaiki duplikasi jadwal mahasiswa: terdapat lebih dari satu jadwal dengan submission pada tanggal dan mahasiswa yang sama.';
-  END IF;
-
-  IF EXISTS (
-    SELECT 1
-    FROM picket_schedules psch
-    JOIN picket_submissions psub
-      ON psub.schedule_id = psch.id OR psub.assignment_id = psch.id
-    WHERE psch.task_id IS NOT NULL
-    GROUP BY psch.schedule_date, psch.task_id
-    HAVING COUNT(*) > 1
-  ) THEN
-    RAISE EXCEPTION
-      'Tidak dapat memperbaiki duplikasi tugas piket: terdapat lebih dari satu jadwal dengan submission untuk tugas dan tanggal yang sama.';
-  END IF;
-END $$;
+-- Data sebelum tanggal ini adalah histori yang sudah berjalan sebelum aturan
+-- task unik diterapkan. Jadwal historis yang memiliki submission tidak diubah.
+-- Jika histori bersih, migration tetap memasang full unique constraint.
 
 -- Untuk duplikasi mahasiswa, pertahankan jadwal dengan submission. Jika tidak
 -- ada submission, prioritaskan jadwal yang direferensikan oleh izin piket lalu
@@ -107,27 +80,84 @@ WHERE psch.id = ranked.id
   AND ranked.has_submission = FALSE;
 
 DO $$
+DECLARE
+  cutover_date CONSTANT DATE := DATE '2026-09-05';
 BEGIN
+  -- Konflik sejak cutover tidak boleh dikecualikan. Rollback bila masih ada,
+  -- termasuk bila dua jadwal yang konflik sama-sama memiliki submission.
+  IF EXISTS (
+    SELECT 1
+    FROM picket_schedules
+    WHERE schedule_date >= cutover_date
+    GROUP BY schedule_date, student_id
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION
+      'Masih terdapat duplikasi mahasiswa sejak tanggal cutover %.', cutover_date;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM picket_schedules
+    WHERE schedule_date >= cutover_date
+      AND task_id IS NOT NULL
+    GROUP BY schedule_date, task_id
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION
+      'Masih terdapat duplikasi tugas piket sejak tanggal cutover %.', cutover_date;
+  END IF;
+
+  -- Gunakan full constraint jika seluruh histori sudah unik. Bila konflik yang
+  -- tersisa hanya histori submission sebelum cutover, gunakan partial unique
+  -- index sehingga histori tetap utuh tetapi semua jadwal baru dikunci DB.
   IF NOT EXISTS (
     SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'picket_schedules'::regclass
-      AND conname = 'picket_schedules_schedule_date_student_id_key'
+    FROM picket_schedules
+    GROUP BY schedule_date, student_id
+    HAVING COUNT(*) > 1
   ) THEN
-    ALTER TABLE picket_schedules
-      ADD CONSTRAINT picket_schedules_schedule_date_student_id_key
-      UNIQUE (schedule_date, student_id);
+    IF NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint
+      WHERE conrelid = 'picket_schedules'::regclass
+        AND conname = 'picket_schedules_schedule_date_student_id_key'
+    ) THEN
+      ALTER TABLE picket_schedules
+        ADD CONSTRAINT picket_schedules_schedule_date_student_id_key
+        UNIQUE (schedule_date, student_id);
+    END IF;
+  ELSE
+    EXECUTE format(
+      'CREATE UNIQUE INDEX IF NOT EXISTS picket_schedules_date_student_unique '
+      'ON picket_schedules (schedule_date, student_id) WHERE schedule_date >= %L::date',
+      cutover_date
+    );
   END IF;
 
   IF NOT EXISTS (
     SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'picket_schedules'::regclass
-      AND conname = 'picket_schedules_schedule_date_task_id_key'
+    FROM picket_schedules
+    WHERE task_id IS NOT NULL
+    GROUP BY schedule_date, task_id
+    HAVING COUNT(*) > 1
   ) THEN
-    ALTER TABLE picket_schedules
-      ADD CONSTRAINT picket_schedules_schedule_date_task_id_key
-      UNIQUE (schedule_date, task_id);
+    IF NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint
+      WHERE conrelid = 'picket_schedules'::regclass
+        AND conname = 'picket_schedules_schedule_date_task_id_key'
+    ) THEN
+      ALTER TABLE picket_schedules
+        ADD CONSTRAINT picket_schedules_schedule_date_task_id_key
+        UNIQUE (schedule_date, task_id);
+    END IF;
+  ELSE
+    EXECUTE format(
+      'CREATE UNIQUE INDEX IF NOT EXISTS picket_schedules_date_task_unique '
+      'ON picket_schedules (schedule_date, task_id) WHERE schedule_date >= %L::date',
+      cutover_date
+    );
   END IF;
 END $$;
 
