@@ -30,6 +30,7 @@ node ./db/runSqlFile.js ./db/migrations/001_add_withdrawal_tracking.sql
 | `024_migrate_picket_fixed_student_days.sql` | Memigrasikan pola dan histori piket lama menjadi hari tetap per mahasiswa tanpa mengubah histori bertanggal | 2026-08-10 |
 | `025_add_picket_leave_replacement_schedule.sql` | Menambahkan relasi jadwal pengganti sementara untuk izin piket yang disetujui | 2026-08-10 |
 | `026_link_student_leave_to_picket.sql` | Menghubungkan approval izin mahasiswa dengan izin/penyelesaian piket otomatis | 2026-08-12 |
+| `028_enforce_unique_picket_tasks_per_date.sql` | Membersihkan duplikasi jadwal/task lama tanpa menyentuh jadwal yang memiliki submission, lalu menambahkan unique constraint mahasiswa dan task per tanggal | 2026-09-07 |
 
 ## Kolom yang Ditambahkan
 
@@ -74,3 +75,15 @@ aplikasi versi baru aktif, izin berstatus `Disetujui` yang tanggal asalnya hari
 ini atau setelah hari ini dan belum memiliki jadwal pengganti akan diproses
 otomatis oleh scheduler. Izin lama yang tanggalnya sudah lewat tetap disimpan
 sebagai histori dan tidak dijadwalkan ulang secara retroaktif.
+
+Migration uniqueness akan berhenti dan rollback apabila menemukan dua jadwal
+yang konflik dan keduanya sudah memiliki submission. Konflik tersebut harus
+ditinjau manual karena migration tidak diizinkan menghapus atau mengubah data
+yang sudah memiliki submission.
+
+Integration test piket membutuhkan database test terpisah yang schema-nya sudah
+terpasang:
+
+```bash
+PICKET_TEST_DATABASE_URL=postgresql://... npm run test:picket-integration
+```
