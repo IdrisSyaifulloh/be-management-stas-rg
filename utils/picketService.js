@@ -35,6 +35,7 @@ const LEAVE_STATUSES = ["Menunggu", "Disetujui", "Ditolak"];
 const PICKET_TASK_CAPACITY_INSUFFICIENT = "PICKET_TASK_CAPACITY_INSUFFICIENT";
 const PICKET_TASK_ALREADY_ASSIGNED = "PICKET_TASK_ALREADY_ASSIGNED";
 const PICKET_STUDENT_ALREADY_SCHEDULED = "PICKET_STUDENT_ALREADY_SCHEDULED";
+const PICKET_REPLACEMENT_DATE_UNAVAILABLE = "PICKET_REPLACEMENT_DATE_UNAVAILABLE";
 
 let ensureTablesPromise = null;
 
@@ -1490,6 +1491,25 @@ function createPicketTaskCapacityError() {
   error.statusCode = 422;
   error.code = PICKET_TASK_CAPACITY_INSUFFICIENT;
   return error;
+}
+
+function createPicketReplacementDateUnavailableError() {
+  const error = new Error("Tidak ditemukan jadwal pengganti dengan tugas yang tersedia dalam 14 hari ke depan.");
+  error.statusCode = 409;
+  error.code = PICKET_REPLACEMENT_DATE_UNAVAILABLE;
+  return error;
+}
+
+function isPicketScheduleAssignmentUniqueViolation(error) {
+  if (error?.code !== "23505") return false;
+  const constraint = String(error?.constraint || "");
+  const detail = String(error?.detail || "");
+  return constraint === "picket_schedules_schedule_date_student_id_key" ||
+    constraint === "picket_schedules_schedule_date_task_id_key" ||
+    constraint === "picket_schedules_date_student_unique" ||
+    constraint === "picket_schedules_date_task_unique" ||
+    detail.includes("(schedule_date, student_id)") ||
+    detail.includes("(schedule_date, task_id)");
 }
 
 async function lockPicketScheduleDates(executor, dates = []) {
@@ -2958,38 +2978,32 @@ async function reviewPicketSubmission(id, payload = {}) {
   return submission;
 }
 
-async function findTemporaryPicketReplacementDate({ originalDate, studentId, executor = query }) {
+async function findTemporaryPicketReplacementDate({ originalDate, studentId, taskId, executor = query }) {
   const baseDate = originalDate > getJakartaDateIso() ? originalDate : getJakartaDateIso();
   const endDate = addIsoDays(baseDate, 14);
   const { dayIds } = await getFixedPicketDayConfig(executor);
-  if (dayIds.length === 0) {
-    const error = new Error("Belum ada hari piket aktif untuk jadwal pengganti.");
-    error.statusCode = 409;
-    throw error;
-  }
-  const [studentDay, holidays, occupied] = await Promise.all([
-    runQuery(
-      executor,
-      "SELECT day_id FROM picket_student_days WHERE student_id = $1 LIMIT 1",
-      [studentId]
-    ),
-    listEffectivePicketHolidays({
-      startDate: addIsoDays(baseDate, 1),
-      endDate,
-      executor
-    }),
-    runQuery(
-      executor,
-      `
-      SELECT TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text
-      FROM picket_schedules
-      WHERE student_id = $1
-        AND schedule_date > $2::date
-        AND schedule_date <= $3::date
-      `,
-      [studentId, baseDate, endDate]
-    )
-  ]);
+  if (dayIds.length === 0) throw createPicketReplacementDateUnavailableError();
+  const studentDay = await runQuery(
+    executor,
+    "SELECT day_id FROM picket_student_days WHERE student_id = $1 LIMIT 1",
+    [studentId]
+  );
+  const holidays = await listEffectivePicketHolidays({
+    startDate: addIsoDays(baseDate, 1),
+    endDate,
+    executor
+  });
+  const occupied = await runQuery(
+    executor,
+    `
+    SELECT TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text
+    FROM picket_schedules
+    WHERE (student_id = $1 OR task_id = $2)
+      AND schedule_date > $3::date
+      AND schedule_date <= $4::date
+    `,
+    [studentId, taskId || null, baseDate, endDate]
+  );
   const replacementDate = findNextPicketReplacementDate({
     afterDate: baseDate,
     activeDayIds: dayIds,
@@ -2998,12 +3012,68 @@ async function findTemporaryPicketReplacementDate({ originalDate, studentId, exe
     occupiedDates: new Set(occupied.rows.map((row) => row.date_text)),
     maxDays: 14
   });
-  if (!replacementDate) {
-    const error = new Error("Tidak ditemukan hari piket pengganti dalam 14 hari ke depan.");
-    error.statusCode = 409;
-    throw error;
-  }
+  if (!replacementDate) throw createPicketReplacementDateUnavailableError();
   return replacementDate;
+}
+
+async function createPicketReplacementSchedule({ leave, reviewedBy, executor }) {
+  const maximumAttempts = 14;
+
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    const replacementDate = await findTemporaryPicketReplacementDate({
+      originalDate: leave.date_text,
+      studentId: leave.student_id,
+      taskId: leave.task_id,
+      executor
+    });
+
+    await lockPicketScheduleDates(executor, [replacementDate]);
+    const occupied = await runQuery(
+      executor,
+      `
+      SELECT 1
+      FROM picket_schedules
+      WHERE schedule_date = $1::date
+        AND (student_id = $2 OR task_id = $3)
+      LIMIT 1
+      `,
+      [replacementDate, leave.student_id, leave.task_id]
+    );
+    if (occupied.rowCount > 0) continue;
+
+    const replacementScheduleId = buildId("PKT-SCH-RPL");
+    await runQuery(executor, "SAVEPOINT picket_replacement_insert");
+    try {
+      await runQuery(
+        executor,
+        `
+        INSERT INTO picket_schedules (
+          id, schedule_date, day_id, student_id, task_id, status, notes,
+          generated_by, created_by, updated_by
+        )
+        VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $7, $7, $7)
+        `,
+        [
+          replacementScheduleId,
+          replacementDate,
+          getJakartaDayOfWeek(replacementDate),
+          leave.student_id,
+          leave.task_id,
+          `Jadwal pengganti sementara untuk izin piket ${leave.id}.`,
+          reviewedBy
+        ]
+      );
+      await runQuery(executor, "RELEASE SAVEPOINT picket_replacement_insert");
+      return { replacementScheduleId, replacementDate };
+    } catch (error) {
+      await runQuery(executor, "ROLLBACK TO SAVEPOINT picket_replacement_insert");
+      await runQuery(executor, "RELEASE SAVEPOINT picket_replacement_insert");
+      if (isPicketScheduleAssignmentUniqueViolation(error)) continue;
+      throw error;
+    }
+  }
+
+  throw createPicketReplacementDateUnavailableError();
 }
 
 async function syncStudentLeaveToPicket({
@@ -3411,32 +3481,13 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
         throw error;
       }
 
-      const replacementDate = await findTemporaryPicketReplacementDate({
-        originalDate: leave.date_text,
-        studentId: leave.student_id,
+      const replacement = await createPicketReplacementSchedule({
+        leave,
+        reviewedBy,
         executor: client
       });
-      const replacementScheduleId = buildId("PKT-SCH-RPL");
-      await client.query(
-        `
-        INSERT INTO picket_schedules (
-          id, schedule_date, day_id, student_id, task_id, status, notes,
-          generated_by, created_by, updated_by
-        )
-        VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $7, $7, $7)
-        `,
-        [
-          replacementScheduleId,
-          replacementDate,
-          getJakartaDayOfWeek(replacementDate),
-          leave.student_id,
-          leave.task_id,
-          `Jadwal pengganti sementara untuk izin piket ${leave.id}.`,
-          reviewedBy
-        ]
-      );
-      leave.replacement_schedule_id = replacementScheduleId;
-      leave.replacement_date_text = replacementDate;
+      leave.replacement_schedule_id = replacement.replacementScheduleId;
+      leave.replacement_date_text = replacement.replacementDate;
     }
 
     if (status === "Disetujui") {

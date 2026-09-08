@@ -20,6 +20,7 @@ if (!integrationEnabled) {
 
   const prefix = `PICKET-IT-${process.pid}-${Date.now()}`;
   const dates = ["2099-01-04", "2099-01-11", "2099-01-18", "2099-01-25"];
+  const replacementRange = ["2099-02-01", "2099-03-31"];
   const userIds = Array.from({ length: 4 }, (_, index) => `${prefix}-USR-${index + 1}`);
   const studentIds = Array.from({ length: 4 }, (_, index) => `${prefix}-STD-${index + 1}`);
   const taskIds = Array.from({ length: 4 }, (_, index) => `${prefix}-TASK-${index + 1}`);
@@ -34,6 +35,42 @@ if (!integrationEnabled) {
       body: body == null ? undefined : JSON.stringify(body)
     });
     return { status: response.status, body: await response.json() };
+  }
+
+  async function createPendingLeave({ suffix, originalDate, studentId, taskId }) {
+    const scheduleId = `${prefix}-LEAVE-SCH-${suffix}`;
+    const leaveId = `${prefix}-LEAVE-${suffix}`;
+    const dayId = new Date(`${originalDate}T00:00:00Z`).getUTCDay();
+    await pool.query(
+      `
+      INSERT INTO picket_schedules
+        (id, schedule_date, day_id, student_id, task_id, status, created_by, updated_by)
+      VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6)
+      `,
+      [scheduleId, originalDate, dayId, studentId, taskId, userIds[0]]
+    );
+    await pool.query(
+      `
+      INSERT INTO picket_leave_requests
+        (id, schedule_id, assignment_id, student_id, date, reason, status)
+      VALUES ($1, $2, $2, $3, $4::date, 'Integration test leave', 'Menunggu')
+      `,
+      [leaveId, scheduleId, studentId, originalDate]
+    );
+    return { leaveId, scheduleId };
+  }
+
+  async function createBlockingSchedule({ suffix, date, studentId, taskId }) {
+    const scheduleId = `${prefix}-BLOCK-${suffix}`;
+    await pool.query(
+      `
+      INSERT INTO picket_schedules
+        (id, schedule_date, day_id, student_id, task_id, status, created_by, updated_by)
+      VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6)
+      `,
+      [scheduleId, date, new Date(`${date}T00:00:00Z`).getUTCDay(), studentId, taskId, userIds[0]]
+    );
+    return scheduleId;
   }
 
   async function setup() {
@@ -57,6 +94,14 @@ if (!integrationEnabled) {
     await pool.query("UPDATE picket_tasks SET active = FALSE WHERE deleted_at IS NULL");
     await pool.query("DELETE FROM picket_schedules WHERE schedule_date = ANY($1::date[])", [dates]);
     await pool.query("DELETE FROM picket_holidays WHERE holiday_date = ANY($1::date[])", [dates]);
+    await pool.query(
+      "DELETE FROM picket_schedules WHERE schedule_date BETWEEN $1::date AND $2::date",
+      replacementRange
+    );
+    await pool.query(
+      "DELETE FROM picket_holidays WHERE holiday_date BETWEEN $1::date AND $2::date",
+      replacementRange
+    );
 
     for (let index = 0; index < userIds.length; index += 1) {
       await pool.query(
@@ -101,10 +146,12 @@ if (!integrationEnabled) {
 
   async function cleanup() {
     if (server) await new Promise((resolve) => server.close(resolve));
-    await pool.query("DELETE FROM picket_schedules WHERE schedule_date = ANY($1::date[])", [dates]).catch(() => {});
+    await pool.query("DELETE FROM picket_leave_requests WHERE student_id = ANY($1::text[])", [studentIds]).catch(() => {});
+    await pool.query("DELETE FROM picket_submissions WHERE student_id = ANY($1::text[])", [studentIds]).catch(() => {});
+    await pool.query("DELETE FROM picket_schedules WHERE student_id = ANY($1::text[])", [studentIds]).catch(() => {});
     await pool.query("DELETE FROM picket_student_days WHERE student_id = ANY($1::text[])", [studentIds]).catch(() => {});
-    await pool.query("DELETE FROM picket_tasks WHERE id = ANY($1::text[])", [taskIds]).catch(() => {});
     await pool.query("DELETE FROM users WHERE id = ANY($1::text[])", [userIds]).catch(() => {});
+    await pool.query("DELETE FROM picket_tasks WHERE id = ANY($1::text[])", [taskIds]).catch(() => {});
     for (const task of originalTaskStates) {
       await pool.query("UPDATE picket_tasks SET active = $2 WHERE id = $1", [task.id, task.active]).catch(() => {});
     }
@@ -118,7 +165,7 @@ if (!integrationEnabled) {
 
       await t.test("generate assigns unique students and tasks", async () => {
         const response = await api("POST", "/picket/schedules/generate", { date: dates[0] });
-        assert.equal(response.status, 201);
+        assert.equal(response.status, 201, JSON.stringify(response.body));
         firstAssignments = response.body.assignments;
         assert.equal(firstAssignments.length, 3);
         assert.equal(new Set(firstAssignments.map((item) => item.studentId)).size, 3);
@@ -203,6 +250,163 @@ if (!integrationEnabled) {
         assert.equal(new Set(rows.map((row) => row.student_id)).size, 3);
         assert.equal(new Set(rows.map((row) => row.task_id)).size, 3);
         assert.equal(left.body.created.length + right.body.created.length, 3);
+      });
+
+      await t.test("leave approval uses the first available replacement date", async () => {
+        const { leaveId, scheduleId } = await createPendingLeave({
+          suffix: "FIRST",
+          originalDate: "2099-02-01",
+          studentId: studentIds[0],
+          taskId: taskIds[0]
+        });
+        const response = await api("PATCH", `/picket/leave-requests/${leaveId}/status`, {
+          status: "Disetujui"
+        });
+        assert.equal(response.status, 200);
+        assert.equal(response.body.replacementDate, "2099-02-02");
+        const original = await pool.query("SELECT status FROM picket_schedules WHERE id = $1", [scheduleId]);
+        assert.equal(original.rows[0].status, "Izin");
+      });
+
+      await t.test("leave approval skips a date whose task is already assigned", async () => {
+        const { leaveId } = await createPendingLeave({
+          suffix: "TASK",
+          originalDate: "2099-02-08",
+          studentId: studentIds[1],
+          taskId: taskIds[1]
+        });
+        await createBlockingSchedule({
+          suffix: "TASK-FIRST",
+          date: "2099-02-09",
+          studentId: studentIds[3],
+          taskId: taskIds[1]
+        });
+        const response = await api("PATCH", `/picket/leave-requests/${leaveId}/status`, {
+          status: "Disetujui"
+        });
+        assert.equal(response.status, 200);
+        assert.equal(response.body.replacementDate, "2099-02-10");
+      });
+
+      await t.test("leave approval skips a date already occupied by the student", async () => {
+        const { leaveId } = await createPendingLeave({
+          suffix: "STUDENT",
+          originalDate: "2099-02-15",
+          studentId: studentIds[2],
+          taskId: taskIds[2]
+        });
+        await createBlockingSchedule({
+          suffix: "STUDENT-FIRST",
+          date: "2099-02-16",
+          studentId: studentIds[2],
+          taskId: taskIds[3]
+        });
+        const response = await api("PATCH", `/picket/leave-requests/${leaveId}/status`, {
+          status: "Disetujui"
+        });
+        assert.equal(response.status, 200);
+        assert.equal(response.body.replacementDate, "2099-02-17");
+      });
+
+      await t.test("unavailable replacement returns 409 and rolls back the approval", async () => {
+        const { leaveId, scheduleId } = await createPendingLeave({
+          suffix: "FULL",
+          originalDate: "2099-02-22",
+          studentId: studentIds[0],
+          taskId: taskIds[0]
+        });
+        const blockedDates = [
+          "2099-02-23", "2099-02-24", "2099-02-25", "2099-02-26", "2099-02-27",
+          "2099-02-28", "2099-03-02", "2099-03-03", "2099-03-04", "2099-03-05",
+          "2099-03-06", "2099-03-07"
+        ];
+        for (let index = 0; index < blockedDates.length; index += 1) {
+          await createBlockingSchedule({
+            suffix: `FULL-${index}`,
+            date: blockedDates[index],
+            studentId: studentIds[3],
+            taskId: taskIds[0]
+          });
+        }
+
+        const response = await api("PATCH", `/picket/leave-requests/${leaveId}/status`, {
+          status: "Disetujui"
+        });
+        assert.equal(response.status, 409);
+        assert.deepEqual(response.body, {
+          code: "PICKET_REPLACEMENT_DATE_UNAVAILABLE",
+          message: "Tidak ditemukan jadwal pengganti dengan tugas yang tersedia dalam 14 hari ke depan."
+        });
+        const original = await pool.query("SELECT status FROM picket_schedules WHERE id = $1", [scheduleId]);
+        assert.equal(original.rows[0].status, "Ditugaskan");
+        const leave = await pool.query(
+          "SELECT status, replacement_schedule_id, replacement_date FROM picket_leave_requests WHERE id = $1",
+          [leaveId]
+        );
+        assert.deepEqual(leave.rows[0], {
+          status: "Menunggu",
+          replacement_schedule_id: null,
+          replacement_date: null
+        });
+      });
+
+      await t.test("concurrent approvals sharing a task choose unique replacement dates", async () => {
+        const first = await createPendingLeave({
+          suffix: "CONCURRENT-A",
+          originalDate: "2099-03-08",
+          studentId: studentIds[1],
+          taskId: taskIds[1]
+        });
+        const second = await createPendingLeave({
+          suffix: "CONCURRENT-B",
+          originalDate: "2099-03-07",
+          studentId: studentIds[2],
+          taskId: taskIds[1]
+        });
+        const [left, right] = await Promise.all([
+          api("PATCH", `/picket/leave-requests/${first.leaveId}/status`, { status: "Disetujui" }),
+          api("PATCH", `/picket/leave-requests/${second.leaveId}/status`, { status: "Disetujui" })
+        ]);
+        assert.equal(left.status, 200);
+        assert.equal(right.status, 200);
+        assert.notEqual(left.body.replacementScheduleId, right.body.replacementScheduleId);
+        assert.deepEqual(
+          new Set([left.body.replacementDate, right.body.replacementDate]),
+          new Set(["2099-03-09", "2099-03-10"])
+        );
+        const replacements = await pool.query(
+          `
+          SELECT schedule_date, COUNT(*)::int AS total
+          FROM picket_schedules
+          WHERE task_id = $1 AND schedule_date IN ('2099-03-09'::date, '2099-03-10'::date)
+          GROUP BY schedule_date
+          `,
+          [taskIds[1]]
+        );
+        assert.equal(replacements.rowCount, 2);
+        assert.equal(replacements.rows.every((row) => row.total === 1), true);
+      });
+
+      await t.test("rejected leave does not create a replacement schedule", async () => {
+        const { leaveId, scheduleId } = await createPendingLeave({
+          suffix: "REJECTED",
+          originalDate: "2099-03-15",
+          studentId: studentIds[2],
+          taskId: taskIds[2]
+        });
+        const response = await api("PATCH", `/picket/leave-requests/${leaveId}/status`, {
+          status: "Ditolak"
+        });
+        assert.equal(response.status, 200);
+        assert.equal(response.body.status, "Ditolak");
+        assert.equal(response.body.replacementScheduleId, null);
+        const original = await pool.query("SELECT status FROM picket_schedules WHERE id = $1", [scheduleId]);
+        assert.equal(original.rows[0].status, "Ditugaskan");
+        const replacements = await pool.query(
+          "SELECT COUNT(*)::int AS total FROM picket_schedules WHERE notes = $1",
+          [`Jadwal pengganti sementara untuk izin piket ${leaveId}.`]
+        );
+        assert.equal(replacements.rows[0].total, 0);
       });
     } finally {
       await cleanup();
