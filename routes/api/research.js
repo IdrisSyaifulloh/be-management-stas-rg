@@ -611,6 +611,93 @@ router.get(
 );
 
 router.get(
+  "/my-scrum-tasks",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const userId = resolveRequesterUserId(req);
+    if (!userId) {
+      return res.status(401).json({ message: "Pengguna tidak terotentikasi." });
+    }
+
+    const projectId = req.query.projectId ? String(req.query.projectId).trim() : null;
+
+    let queryText = `
+      SELECT t.id, t.project_id, t.title, t.description, t.status, t.deadline, t.priority,
+             t.tag, t.progress, t.created_by, t.created_at, t.updated_at, t.sort_order,
+             t.sprint_id, t.story_points,
+             rp.title AS project_title, rp.short_title AS project_short_title,
+             s.name AS sprint_name, s.status AS sprint_status, s.start_date AS sprint_start_date, s.end_date AS sprint_end_date
+      FROM research_board_tasks t
+      JOIN research_board_task_assignees a ON a.task_id = t.id AND a.user_id = $1
+      JOIN research_projects rp ON rp.id = t.project_id
+      LEFT JOIN research_sprints s ON s.id = t.sprint_id
+    `;
+    const queryParams = [userId];
+
+    if (projectId) {
+      queryText += ` WHERE t.project_id = $2`;
+      queryParams.push(projectId);
+    }
+
+    queryText += ` ORDER BY t.status ASC, t.sort_order ASC, t.updated_at DESC`;
+
+    const taskResult = await query(queryText, queryParams);
+    const taskIds = taskResult.rows.map((row) => row.id);
+
+    let subtaskRows = [];
+    let attachmentRows = [];
+    if (taskIds.length > 0) {
+      const [subtasks, attachments] = await Promise.all([
+        query(
+          `SELECT id, task_id, title, done, sort_order FROM research_board_task_subtasks WHERE task_id = ANY($1::text[]) ORDER BY sort_order ASC, id ASC`,
+          [taskIds]
+        ),
+        query(
+          `SELECT id, task_id, file_url, file_name, file_size, mime_type, created_at FROM research_board_task_attachments WHERE task_id = ANY($1::text[]) ORDER BY created_at DESC`,
+          [taskIds]
+        )
+      ]);
+      subtaskRows = subtasks.rows;
+      attachmentRows = attachments.rows;
+    }
+
+    const subtasksMap = new Map();
+    subtaskRows.forEach((st) => {
+      if (!subtasksMap.has(st.task_id)) subtasksMap.set(st.task_id, []);
+      subtasksMap.get(st.task_id).push(st);
+    });
+
+    const attachmentsMap = new Map();
+    attachmentRows.forEach((at) => {
+      if (!attachmentsMap.has(at.task_id)) attachmentsMap.set(at.task_id, []);
+      attachmentsMap.get(at.task_id).push(at);
+    });
+
+    const tasks = taskResult.rows.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      projectTitle: row.project_short_title || row.project_title,
+      title: row.title,
+      description: row.description || "",
+      status: row.status,
+      deadline: row.deadline,
+      priority: row.priority,
+      tag: row.tag,
+      progress: Number(row.progress) || 0,
+      sprintId: row.sprint_id,
+      sprintName: row.sprint_name || null,
+      sprintStatus: row.sprint_status || null,
+      storyPoints: row.story_points !== null ? Number(row.story_points) : 3,
+      sortOrder: Number(row.sort_order) || 0,
+      subtasks: subtasksMap.get(row.id) || [],
+      attachments: attachmentsMap.get(row.id) || []
+    }));
+
+    res.json(tasks);
+  })
+);
+
+router.get(
   "/",
   asyncHandler(async (req, res) => {
     await ensureMeetingNotesTables();
