@@ -673,7 +673,7 @@ router.get(
              rm.peran,
              CASE WHEN rm.selesai IS NOT NULL AND rm.selesai < CURRENT_DATE THEN 'Nonaktif' ELSE rm.status END AS status,
              rm.bergabung, rm.selesai, u.role,
-             s.tipe AS mahasiswa_tipe
+             s.tipe AS mahasiswa_tipe, s.status AS student_status
       FROM research_memberships rm
       JOIN users u ON u.id = rm.user_id
       LEFT JOIN students s ON s.user_id = u.id
