@@ -408,6 +408,27 @@ if (!integrationEnabled) {
         );
         assert.equal(replacements.rows[0].total, 0);
       });
+
+      await t.test("new leave request is approved automatically with a replacement", async () => {
+        const scheduleId = await createBlockingSchedule({
+          suffix: "AUTO-ORIGINAL",
+          date: "2099-03-22",
+          studentId: studentIds[0],
+          taskId: taskIds[2]
+        });
+        const response = await api("POST", "/picket/leave-requests", {
+          scheduleId,
+          studentId: studentIds[0],
+          date: "2099-03-22",
+          reason: "Izin otomatis integration test"
+        });
+        assert.equal(response.status, 201);
+        assert.equal(response.body.status, "Disetujui");
+        assert.equal(response.body.replacementDate, "2099-03-23");
+        assert.ok(response.body.replacementScheduleId);
+        const original = await pool.query("SELECT status FROM picket_schedules WHERE id = $1", [scheduleId]);
+        assert.equal(original.rows[0].status, "Izin");
+      });
     } finally {
       await cleanup();
     }
