@@ -56,6 +56,27 @@ async function ensureResearchBoardTables() {
       `);
 
       await query(`
+        CREATE TABLE IF NOT EXISTS research_sprints (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          goal TEXT,
+          start_date DATE,
+          end_date DATE,
+          status TEXT NOT NULL DEFAULT 'planning'
+            CHECK (status IN ('planning', 'active', 'completed')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await query(`
+        ALTER TABLE research_board_tasks
+        ADD COLUMN IF NOT EXISTS sprint_id TEXT REFERENCES research_sprints(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS story_points INTEGER DEFAULT NULL
+      `);
+
+      await query(`
         CREATE TABLE IF NOT EXISTS research_board_task_assignees (
           task_id TEXT NOT NULL REFERENCES research_board_tasks(id) ON DELETE CASCADE,
           user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -124,6 +145,16 @@ async function ensureResearchBoardTables() {
       await query(`
         CREATE INDEX IF NOT EXISTS idx_research_board_comments_task
         ON research_board_task_comments(task_id, created_at DESC)
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_research_sprints_project
+        ON research_sprints(project_id, status, created_at ASC)
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_research_board_tasks_sprint
+        ON research_board_tasks(sprint_id)
       `);
     })();
   }
@@ -311,6 +342,10 @@ function buildTaskDto(taskRow, maps, includeComments = false) {
     deadline: taskRow.deadline,
     priority: taskRow.priority,
     tag: taskRow.tag,
+    sprint_id: taskRow.sprint_id ?? null,
+    sprintId: taskRow.sprint_id ?? null,
+    story_points: taskRow.story_points !== null && taskRow.story_points !== undefined ? Number(taskRow.story_points) : null,
+    storyPoints: taskRow.story_points !== null && taskRow.story_points !== undefined ? Number(taskRow.story_points) : null,
     assignee_ids: assignees.map((item) => item.user_id),
     assigneeIds: assignees.map((item) => item.user_id),
     assignees,
@@ -346,6 +381,7 @@ async function fetchTaskCollection(projectId, { includeComments = false } = {}) 
     `
     SELECT t.id, t.project_id, t.title, t.description, t.status, t.deadline, t.priority,
            t.tag, t.progress, t.created_by, t.created_at, t.updated_at, t.sort_order,
+           t.sprint_id, t.story_points,
            u.name AS created_by_name
     FROM research_board_tasks t
     LEFT JOIN users u ON u.id = t.created_by
@@ -551,14 +587,67 @@ async function fetchBoardSnapshot(projectId) {
   };
 }
 
+async function fetchProjectSprints(projectId) {
+  await ensureResearchBoardTables();
+
+  const result = await query(
+    `
+    SELECT s.id, s.project_id, s.name, s.goal, s.start_date, s.end_date, s.status, s.created_at, s.updated_at,
+           COUNT(t.id)::int AS total_tasks,
+           COUNT(CASE WHEN t.status = 'DONE' THEN 1 END)::int AS completed_tasks,
+           COALESCE(SUM(t.story_points), 0)::int AS total_points,
+           COALESCE(SUM(CASE WHEN t.status = 'DONE' THEN t.story_points ELSE 0 END), 0)::int AS completed_points
+    FROM research_sprints s
+    LEFT JOIN research_board_tasks t ON t.sprint_id = s.id
+    WHERE s.project_id = $1
+    GROUP BY s.id
+    ORDER BY 
+      CASE s.status 
+        WHEN 'active' THEN 1 
+        WHEN 'planning' THEN 2 
+        WHEN 'completed' THEN 3 
+        ELSE 4 
+      END,
+      s.created_at DESC
+    `,
+    [projectId]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    projectId: row.project_id,
+    project_id: row.project_id,
+    name: row.name,
+    goal: row.goal || "",
+    startDate: formatDateOnly(row.start_date),
+    start_date: formatDateOnly(row.start_date),
+    endDate: formatDateOnly(row.end_date),
+    end_date: formatDateOnly(row.end_date),
+    status: row.status,
+    totalTasks: Number(row.total_tasks) || 0,
+    total_tasks: Number(row.total_tasks) || 0,
+    completedTasks: Number(row.completed_tasks) || 0,
+    completed_tasks: Number(row.completed_tasks) || 0,
+    totalPoints: Number(row.total_points) || 0,
+    total_points: Number(row.total_points) || 0,
+    completedPoints: Number(row.completed_points) || 0,
+    completed_points: Number(row.completed_points) || 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
 module.exports = {
   BOARD_TASK_STATUSES,
   ensureResearchBoardTables,
   fetchBoardSnapshot,
   fetchTaskDetail,
+  fetchTaskCollection,
+  fetchProjectSprints,
   getNextTaskSortOrder,
   normalizeBoardTaskStatus,
   removeBoardAttachmentFile,
   saveBoardAttachmentFile,
   setTaskAssignees
 };
+

@@ -6,6 +6,7 @@ const { extractRole } = require("../../utils/roleGuard");
 const {
   ensureResearchBoardTables,
   fetchBoardSnapshot,
+  fetchProjectSprints,
   fetchTaskDetail,
   getNextTaskSortOrder,
   normalizeBoardTaskStatus,
@@ -557,6 +558,59 @@ router.get(
 );
 
 router.get(
+  "/my-scrum",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const userId = resolveRequesterUserId(req);
+    if (!userId) {
+      return res.status(401).json({ message: "Pengguna tidak terotentikasi." });
+    }
+
+    // Cari riset mahasiswa yang memiliki active sprint dan/atau task yang di-assign ke mahasiswa ini
+    const result = await query(
+      `
+      SELECT DISTINCT rp.id, rp.title, rp.short_title,
+             s.id AS active_sprint_id, s.name AS active_sprint_name, s.start_date, s.end_date,
+             COUNT(t.id)::int AS my_tasks_count
+      FROM research_projects rp
+      JOIN research_memberships rm ON rm.project_id = rp.id AND rm.user_id = $1 AND COALESCE(rm.status, 'Aktif') = 'Aktif'
+      LEFT JOIN research_sprints s ON s.project_id = rp.id AND s.status = 'active'
+      LEFT JOIN research_board_tasks t ON t.project_id = rp.id AND (t.sprint_id = s.id OR s.id IS NULL)
+      LEFT JOIN research_board_task_assignees a ON a.task_id = t.id AND a.user_id = $1
+      WHERE s.id IS NOT NULL OR a.user_id IS NOT NULL
+      GROUP BY rp.id, rp.title, rp.short_title, s.id, s.name, s.start_date, s.end_date
+      LIMIT 10
+      `,
+      [userId]
+    );
+
+    const hasActiveScrum = result.rowCount > 0;
+    const activeProject = result.rows[0] || null;
+
+    res.json({
+      hasActiveScrum,
+      primaryProjectId: activeProject?.id || null,
+      activeSprint: activeProject?.active_sprint_id ? {
+        id: activeProject.active_sprint_id,
+        name: activeProject.active_sprint_name,
+        startDate: activeProject.start_date,
+        endDate: activeProject.end_date,
+        projectId: activeProject.id,
+        projectTitle: activeProject.short_title || activeProject.title
+      } : null,
+      projects: result.rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        shortTitle: row.short_title,
+        activeSprintId: row.active_sprint_id,
+        activeSprintName: row.active_sprint_name,
+        myTasksCount: Number(row.my_tasks_count) || 0
+      }))
+    });
+  })
+);
+
+router.get(
   "/",
   asyncHandler(async (req, res) => {
     await ensureMeetingNotesTables();
@@ -970,6 +1024,10 @@ router.post(
       deadline,
       priority,
       tag,
+      sprint_id,
+      sprintId,
+      story_points,
+      storyPoints,
       assignee_ids,
       assigneeIds,
       progress,
@@ -986,13 +1044,17 @@ router.post(
       : await getNextTaskSortOrder(req.params.id, nextStatus);
     const taskId = String(id || buildEntityId("TASK")).trim();
     const nextAssigneeIds = await validateAssigneeIds(assignee_ids ?? assigneeIds);
+    const rawSprintId = sprint_id !== undefined ? sprint_id : sprintId;
+    const finalSprintId = rawSprintId ? String(rawSprintId).trim() : null;
+    const rawStoryPoints = story_points !== undefined ? story_points : storyPoints;
+    const finalStoryPoints = Number.isFinite(Number(rawStoryPoints)) ? Math.max(0, parseInt(rawStoryPoints, 10)) : null;
 
     await query(
       `
       INSERT INTO research_board_tasks (
-        id, project_id, title, description, status, deadline, priority, tag, progress, sort_order, created_by
+        id, project_id, title, description, status, deadline, priority, tag, progress, sort_order, created_by, sprint_id, story_points
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       `,
       [
         taskId,
@@ -1005,7 +1067,9 @@ router.post(
         toNullableText(tag),
         normalizeProgress(progress, 0),
         nextSortOrder,
-        access.userId || null
+        access.userId || null,
+        finalSprintId,
+        finalStoryPoints
       ]
     );
 
@@ -1066,6 +1130,10 @@ router.patch(
       deadline,
       priority,
       tag,
+      sprint_id,
+      sprintId,
+      story_points,
+      storyPoints,
       assignee_ids,
       assigneeIds,
       progress,
@@ -1082,6 +1150,16 @@ router.patch(
       ? await validateAssigneeIds(assignee_ids ?? assigneeIds)
       : detail.assignee_ids;
 
+    const rawSprintId = sprint_id !== undefined ? sprint_id : sprintId;
+    const nextSprintId = access.isManager && rawSprintId !== undefined
+      ? (rawSprintId ? String(rawSprintId).trim() : null)
+      : detail.sprint_id;
+
+    const rawStoryPoints = story_points !== undefined ? story_points : storyPoints;
+    const nextStoryPoints = access.isManager && rawStoryPoints !== undefined
+      ? (Number.isFinite(Number(rawStoryPoints)) ? Math.max(0, parseInt(rawStoryPoints, 10)) : null)
+      : detail.story_points;
+
     await query(
       `
       UPDATE research_board_tasks
@@ -1093,6 +1171,8 @@ router.patch(
           tag = $8,
           progress = $9,
           sort_order = $10,
+          sprint_id = $11,
+          story_points = $12,
           updated_at = NOW()
       WHERE project_id = $1 AND id = $2
       `,
@@ -1106,7 +1186,9 @@ router.patch(
         priority !== undefined ? toNullableText(priority) : detail.priority,
         tag !== undefined ? toNullableText(tag) : detail.tag,
         progress !== undefined ? normalizeProgress(progress, detail.progress) : detail.progress,
-        Number.isFinite(nextSortOrder) ? nextSortOrder : detail.sortOrder
+        Number.isFinite(nextSortOrder) ? nextSortOrder : detail.sortOrder,
+        nextSprintId,
+        nextStoryPoints
       ]
     );
 
@@ -1503,6 +1585,157 @@ router.post(
       task: updatedTask
     });
 
+  })
+);
+
+// ── Sprints Endpoints ──
+router.get(
+  "/:id/sprints",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const allowed = await hasProjectAccess({
+      userId: resolveRequesterUserId(req),
+      role: extractRole(req),
+      projectId: req.params.id
+    });
+    if (!allowed) {
+      return res.status(403).json({ message: "Akses ditolak melihat sprint riset." });
+    }
+
+    const sprints = await fetchProjectSprints(req.params.id);
+    res.json(sprints);
+  })
+);
+
+router.post(
+  "/:id/sprints",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({ message: "Akses ditolak membuat sprint." });
+    }
+
+    const { name, goal, startDate, start_date, endDate, end_date, status } = req.body || {};
+    if (!String(name || "").trim()) {
+      return res.status(400).json({ message: "Nama sprint wajib diisi." });
+    }
+
+    const sprintId = String(req.body?.id || buildEntityId("SPRINT")).trim();
+    const sprintStatus = ["planning", "active", "completed"].includes(status) ? status : "planning";
+
+    if (sprintStatus === "active") {
+      await query(
+        `UPDATE research_sprints SET status = 'completed', updated_at = NOW() WHERE project_id = $1 AND status = 'active'`,
+        [req.params.id]
+      );
+    }
+
+    await query(
+      `
+      INSERT INTO research_sprints (id, project_id, name, goal, start_date, end_date, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [
+        sprintId,
+        req.params.id,
+        String(name).trim(),
+        toNullableText(goal),
+        startDate || start_date || null,
+        endDate || end_date || null,
+        sprintStatus
+      ]
+    );
+
+    const sprints = await fetchProjectSprints(req.params.id);
+    const sprint = sprints.find((s) => s.id === sprintId);
+    res.status(201).json({ message: "Sprint berhasil dibuat.", sprint });
+  })
+);
+
+router.patch(
+  "/:id/sprints/:sprintId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({ message: "Akses ditolak mengubah sprint." });
+    }
+
+    const { name, goal, startDate, start_date, endDate, end_date, status } = req.body || {};
+
+    const existing = await query(
+      `SELECT * FROM research_sprints WHERE project_id = $1 AND id = $2`,
+      [req.params.id, req.params.sprintId]
+    );
+    if (existing.rowCount === 0) {
+      return res.status(404).json({ message: "Sprint tidak ditemukan." });
+    }
+
+    const current = existing.rows[0];
+    let nextStatus = current.status;
+    if (status && ["planning", "active", "completed"].includes(status)) {
+      nextStatus = status;
+      if (nextStatus === "active" && current.status !== "active") {
+        await query(
+          `UPDATE research_sprints SET status = 'completed', updated_at = NOW() WHERE project_id = $1 AND status = 'active' AND id != $2`,
+          [req.params.id, req.params.sprintId]
+        );
+      }
+    }
+
+    await query(
+      `
+      UPDATE research_sprints
+      SET name = COALESCE($3, name),
+          goal = $4,
+          start_date = $5,
+          end_date = $6,
+          status = $7,
+          updated_at = NOW()
+      WHERE project_id = $1 AND id = $2
+      `,
+      [
+        req.params.id,
+        req.params.sprintId,
+        name !== undefined ? String(name).trim() || current.name : current.name,
+        goal !== undefined ? toNullableText(goal) : current.goal,
+        startDate !== undefined || start_date !== undefined ? (startDate || start_date || null) : current.start_date,
+        endDate !== undefined || end_date !== undefined ? (endDate || end_date || null) : current.end_date,
+        nextStatus
+      ]
+    );
+
+    const sprints = await fetchProjectSprints(req.params.id);
+    const sprint = sprints.find((s) => s.id === req.params.sprintId);
+    res.json({ message: "Sprint berhasil diperbarui.", sprint });
+  })
+);
+
+router.delete(
+  "/:id/sprints/:sprintId",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({ message: "Akses ditolak menghapus sprint." });
+    }
+
+    await query(
+      `UPDATE research_board_tasks SET sprint_id = NULL, updated_at = NOW() WHERE project_id = $1 AND sprint_id = $2`,
+      [req.params.id, req.params.sprintId]
+    );
+
+    const result = await query(
+      `DELETE FROM research_sprints WHERE project_id = $1 AND id = $2 RETURNING id`,
+      [req.params.id, req.params.sprintId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Sprint tidak ditemukan." });
+    }
+
+    res.json({ message: "Sprint berhasil dihapus." });
   })
 );
 
