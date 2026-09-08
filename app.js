@@ -347,12 +347,16 @@ app.use(function (err, req, res, next) {
       });
     }
 
-    return res.status(status).json({
+    var responseBody = {
       message:
         status >= 500 && err.expose !== true
           ? "Terjadi kesalahan pada server."
           : err.message || "Input tidak valid."
-    });
+    };
+    if (status < 500 && typeof err.code === "string" && err.code.startsWith("PICKET_")) {
+      responseBody.code = err.code;
+    }
+    return res.status(status).json(responseBody);
   }
 
   res.locals.message = err.message;

@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const {
   buildRandomizedPicketDayAssignments,
   chooseLeastLoadedPicketDay,
-  chooseRandomPicketTask
+  shufflePicketTasks
 } = require("../utils/picketService");
 
 test("new student is assigned to one of the least populated fixed days", () => {
@@ -35,9 +35,11 @@ test("fixed weekday assignment is stable data, independent from dated schedules"
   assert.deepEqual(assignments, [{ studentId: "student-a", dayId: 4 }]);
 });
 
-test("task picker randomizes the task for each materialized weekly occurrence", () => {
+test("task shuffle returns one randomized list without replacement", () => {
   const tasks = [{ id: "task-a" }, { id: "task-b" }, { id: "task-c" }];
+  const shuffled = shufflePicketTasks(tasks, () => 0);
 
-  assert.equal(chooseRandomPicketTask(tasks, () => 0).id, "task-a");
-  assert.equal(chooseRandomPicketTask(tasks, () => 0.99).id, "task-c");
+  assert.deepEqual(shuffled.map((task) => task.id), ["task-b", "task-c", "task-a"]);
+  assert.equal(new Set(shuffled.map((task) => task.id)).size, tasks.length);
+  assert.deepEqual(tasks.map((task) => task.id), ["task-a", "task-b", "task-c"]);
 });

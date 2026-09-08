@@ -32,6 +32,9 @@ const ALLOWED_PHOTO_TYPES = {
 };
 const SUBMISSION_STATUSES = ["Terkirim", "Valid", "Bermasalah"];
 const LEAVE_STATUSES = ["Menunggu", "Disetujui", "Ditolak"];
+const PICKET_TASK_CAPACITY_INSUFFICIENT = "PICKET_TASK_CAPACITY_INSUFFICIENT";
+const PICKET_TASK_ALREADY_ASSIGNED = "PICKET_TASK_ALREADY_ASSIGNED";
+const PICKET_STUDENT_ALREADY_SCHEDULED = "PICKET_STUDENT_ALREADY_SCHEDULED";
 
 let ensureTablesPromise = null;
 
@@ -203,7 +206,8 @@ async function ensurePicketTables() {
           updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          UNIQUE(schedule_date, student_id)
+          UNIQUE(schedule_date, student_id),
+          UNIQUE(schedule_date, task_id)
         );
 
         CREATE TABLE IF NOT EXISTS picket_submissions (
@@ -1287,7 +1291,7 @@ async function listPicketTasks({ includeInactive = true } = {}) {
   return result.rows.map(mapTask);
 }
 
-async function createPicketTask(payload = {}) {
+async function createPicketTask(payload = {}, executor = query) {
   await ensurePicketTables();
   const name = String(payload.name || "").trim();
   if (!name) {
@@ -1296,7 +1300,8 @@ async function createPicketTask(payload = {}) {
     throw error;
   }
 
-  const result = await query(
+  const result = await runQuery(
+    executor,
     `
     INSERT INTO picket_tasks (id, name, description, active)
     VALUES ($1, $2, $3, $4)
@@ -1394,8 +1399,9 @@ async function listPicketStudentOptions() {
   }));
 }
 
-async function ensureStudentCanBeScheduled(studentId) {
-  const result = await query(
+async function ensureStudentCanBeScheduled(studentId, executor = query) {
+  const result = await runQuery(
+    executor,
     `
     SELECT s.id
     FROM students s
@@ -1414,9 +1420,10 @@ async function ensureStudentCanBeScheduled(studentId) {
   }
 }
 
-async function ensureTaskCanBeScheduled(taskId) {
+async function ensureTaskCanBeScheduled(taskId, executor = query) {
   if (!taskId) return null;
-  const result = await query(
+  const result = await runQuery(
+    executor,
     `
     SELECT id
     FROM picket_tasks
@@ -1448,7 +1455,7 @@ function getManualTaskDescription(payload = {}) {
   return text || null;
 }
 
-async function createInlinePicketTask(payload = {}) {
+async function createInlinePicketTask(payload = {}, executor = query) {
   const taskName = getManualTaskName(payload);
   if (taskName === null) return null;
   if (!taskName) {
@@ -1461,17 +1468,44 @@ async function createInlinePicketTask(payload = {}) {
     name: taskName,
     description: getManualTaskDescription(payload),
     active: true
-  });
+  }, executor);
 }
 
 function createDuplicatePicketScheduleError(scheduleDate, studentId) {
   const error = new Error(`Jadwal piket untuk mahasiswa ${studentId} pada tanggal ${scheduleDate} sudah ada.`);
   error.statusCode = 409;
+  error.code = PICKET_STUDENT_ALREADY_SCHEDULED;
   return error;
 }
 
-async function ensureNoDuplicatePicketSchedule(scheduleDate, studentId, excludeId = null) {
-  const result = await query(
+function createDuplicatePicketTaskError() {
+  const error = new Error("Tugas piket tersebut sudah diberikan kepada mahasiswa lain pada tanggal yang sama.");
+  error.statusCode = 409;
+  error.code = PICKET_TASK_ALREADY_ASSIGNED;
+  return error;
+}
+
+function createPicketTaskCapacityError() {
+  const error = new Error("Jumlah tugas piket aktif tidak cukup untuk memberikan tugas unik.");
+  error.statusCode = 422;
+  error.code = PICKET_TASK_CAPACITY_INSUFFICIENT;
+  return error;
+}
+
+async function lockPicketScheduleDates(executor, dates = []) {
+  const uniqueDates = [...new Set(dates.filter(Boolean).map((date) => normalizeIsoDate(date)))].sort();
+  for (const date of uniqueDates) {
+    await runQuery(
+      executor,
+      "SELECT pg_advisory_xact_lock(hashtext($1))",
+      [`picket-schedule:${date}`]
+    );
+  }
+}
+
+async function ensureNoDuplicatePicketSchedule(scheduleDate, studentId, excludeId = null, executor = query) {
+  const result = await runQuery(
+    executor,
     `
     SELECT id
     FROM picket_schedules
@@ -1485,6 +1519,23 @@ async function ensureNoDuplicatePicketSchedule(scheduleDate, studentId, excludeI
   if (result.rowCount > 0) {
     throw createDuplicatePicketScheduleError(scheduleDate, studentId);
   }
+}
+
+async function ensureNoDuplicatePicketTask(scheduleDate, taskId, excludeId = null, executor = query) {
+  if (!taskId) return;
+  const result = await runQuery(
+    executor,
+    `
+    SELECT id
+    FROM picket_schedules
+    WHERE schedule_date = $1::date
+      AND task_id = $2
+      AND ($3::text IS NULL OR id <> $3)
+    LIMIT 1
+    `,
+    [scheduleDate, taskId, excludeId]
+  );
+  if (result.rowCount > 0) throw createDuplicatePicketTaskError();
 }
 
 function rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId) {
@@ -1501,6 +1552,14 @@ function rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId) {
   if (isScheduleStudentDuplicate) {
     throw createDuplicatePicketScheduleError(scheduleDate, studentId);
   }
+  const isScheduleTaskDuplicate =
+    error?.code === "23505" &&
+    (
+      constraint === "picket_schedules_schedule_date_task_id_key" ||
+      constraint.includes("schedule_date_task_id") ||
+      detail.includes("(schedule_date, task_id)")
+    );
+  if (isScheduleTaskDuplicate) throw createDuplicatePicketTaskError();
   throw error;
 }
 
@@ -1644,7 +1703,6 @@ async function getPicketScheduleById(id, executor = query) {
 async function createPicketSchedule(payload = {}) {
   await ensurePicketTables();
   const scheduleDate = normalizeIsoDate(payload.scheduleDate || payload.schedule_date || payload.date, getJakartaDateIso());
-  await ensurePicketDateIsNotHoliday(scheduleDate);
   const studentId = await resolveStudentId(payload.studentId || payload.student_id);
   let taskId = String(payload.taskId || payload.task_id || "").trim();
   const status = String(payload.status || "Ditugaskan").trim() || "Ditugaskan";
@@ -1653,26 +1711,30 @@ async function createPicketSchedule(payload = {}) {
     error.statusCode = 400;
     throw error;
   }
-  await ensureStudentCanBeScheduled(studentId);
-  await ensureNoDuplicatePicketSchedule(scheduleDate, studentId);
-
-  let createdTask = null;
-  if (!taskId) {
-    createdTask = await createInlinePicketTask(payload);
-    taskId = createdTask?.id || "";
-  }
-  if (!taskId) {
-    const error = new Error("taskId wajib diisi atau kirim taskName/manualTaskName untuk membuat tugas manual.");
-    error.statusCode = 400;
-    throw error;
-  }
-  await ensureTaskCanBeScheduled(taskId);
-
-  const id = buildId("PKT-SCH");
-  const dayId = getJakartaDayOfWeek(scheduleDate);
-  let result;
+  const client = await pool.connect();
   try {
-    result = await query(
+    await client.query("BEGIN");
+    await lockPicketScheduleDates(client, [scheduleDate]);
+    await ensurePicketDateIsNotHoliday(scheduleDate, client);
+    await ensureStudentCanBeScheduled(studentId, client);
+    await ensureNoDuplicatePicketSchedule(scheduleDate, studentId, null, client);
+
+    let createdTask = null;
+    if (!taskId) {
+      createdTask = await createInlinePicketTask(payload, client);
+      taskId = createdTask?.id || "";
+    }
+    if (!taskId) {
+      const error = new Error("taskId wajib diisi atau kirim taskName/manualTaskName untuk membuat tugas manual.");
+      error.statusCode = 400;
+      throw error;
+    }
+    await ensureTaskCanBeScheduled(taskId, client);
+    await ensureNoDuplicatePicketTask(scheduleDate, taskId, null, client);
+
+    const id = buildId("PKT-SCH");
+    const dayId = getJakartaDayOfWeek(scheduleDate);
+    const result = await client.query(
       `
       INSERT INTO picket_schedules (
         id, schedule_date, day_id, student_id, task_id, status, notes,
@@ -1692,61 +1754,73 @@ async function createPicketSchedule(payload = {}) {
         payload.createdBy || payload.created_by || payload.updatedBy || payload.updated_by || null
       ]
     );
+    const schedule = await getPicketScheduleById(result.rows[0].id, client);
+    await client.query("COMMIT");
+    return createdTask
+      ? { schedule, assignment: schedule, task: createdTask }
+      : schedule;
   } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
     rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId);
+  } finally {
+    client.release();
   }
-  const schedule = await getPicketScheduleById(result.rows[0].id);
-  return createdTask
-    ? { schedule, assignment: schedule, task: createdTask }
-    : schedule;
 }
 
 async function updatePicketSchedule(id, payload = {}) {
   await ensurePicketTables();
-  const current = await getPicketScheduleById(id);
-  if (!current) return null;
+  const initial = await getPicketScheduleById(id);
+  if (!initial) return null;
 
   const scheduleDate = payload.scheduleDate || payload.schedule_date || payload.date
     ? normalizeIsoDate(payload.scheduleDate || payload.schedule_date || payload.date)
-    : current.date;
-  await ensurePicketDateIsNotHoliday(scheduleDate);
+    : initial.date;
   const studentId = payload.studentId || payload.student_id
     ? await resolveStudentId(payload.studentId || payload.student_id)
-    : current.studentId;
+    : initial.studentId;
   const hasTaskPayload = Object.prototype.hasOwnProperty.call(payload, "taskId") ||
     Object.prototype.hasOwnProperty.call(payload, "task_id");
   let taskId = hasTaskPayload
     ? String(payload.taskId ?? payload.task_id ?? "").trim()
-    : current.taskId;
+    : initial.taskId;
   const hasManualTaskPayload = getManualTaskName(payload) !== null;
   if (hasManualTaskPayload && (!hasTaskPayload || !taskId)) {
     taskId = "";
   }
-  const status = payload.status == null ? current.status : String(payload.status).trim();
+  const status = payload.status == null ? initial.status : String(payload.status).trim();
 
   if (!studentId) {
     const error = new Error("Mahasiswa tidak ditemukan.");
     error.statusCode = 400;
     throw error;
   }
-  await ensureStudentCanBeScheduled(studentId);
-  await ensureNoDuplicatePicketSchedule(scheduleDate, studentId, id);
-
-  let createdTask = null;
-  if (hasTaskPayload && !taskId && !hasManualTaskPayload) {
-    const error = new Error("taskId wajib diisi atau kirim taskName/manualTaskName untuk membuat tugas manual.");
-    error.statusCode = 400;
-    throw error;
-  }
-  if (!taskId) {
-    createdTask = await createInlinePicketTask(payload);
-    taskId = createdTask?.id || "";
-  }
-  await ensureTaskCanBeScheduled(taskId);
-
-  let result;
+  const client = await pool.connect();
   try {
-    result = await query(
+    await client.query("BEGIN");
+    await lockPicketScheduleDates(client, [initial.date, scheduleDate]);
+    const current = await getPicketScheduleById(id, client);
+    if (!current) {
+      await client.query("COMMIT");
+      return null;
+    }
+    await ensurePicketDateIsNotHoliday(scheduleDate, client);
+    await ensureStudentCanBeScheduled(studentId, client);
+    await ensureNoDuplicatePicketSchedule(scheduleDate, studentId, id, client);
+
+    let createdTask = null;
+    if (hasTaskPayload && !taskId && !hasManualTaskPayload) {
+      const error = new Error("taskId wajib diisi atau kirim taskName/manualTaskName untuk membuat tugas manual.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!taskId) {
+      createdTask = await createInlinePicketTask(payload, client);
+      taskId = createdTask?.id || "";
+    }
+    await ensureTaskCanBeScheduled(taskId, client);
+    await ensureNoDuplicatePicketTask(scheduleDate, taskId, id, client);
+
+    const result = await client.query(
       `
       UPDATE picket_schedules
       SET schedule_date = $2::date,
@@ -1772,14 +1846,21 @@ async function updatePicketSchedule(id, payload = {}) {
         payload.updatedBy || payload.updated_by || null
       ]
     );
+    if (!result.rows[0]) {
+      await client.query("COMMIT");
+      return null;
+    }
+    const schedule = await getPicketScheduleById(result.rows[0].id, client);
+    await client.query("COMMIT");
+    return createdTask
+      ? { schedule, assignment: schedule, task: createdTask }
+      : schedule;
   } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
     rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId);
+  } finally {
+    client.release();
   }
-  if (!result.rows[0]) return null;
-  const schedule = await getPicketScheduleById(result.rows[0].id);
-  return createdTask
-    ? { schedule, assignment: schedule, task: createdTask }
-    : schedule;
 }
 
 async function deletePicketSchedule(id) {
@@ -1865,6 +1946,13 @@ function shuffle(items, random = Math.random) {
   return copy;
 }
 
+function shufflePicketTasks(activeTasks, random = Math.random) {
+  if (!Array.isArray(activeTasks)) return [];
+  return shuffle(activeTasks, random);
+}
+
+// Dipertahankan untuk kompatibilitas pemanggil lama. Generator jadwal tidak
+// memakai picker per-mahasiswa ini; generator selalu memakai shuffle satu kali.
 function chooseRandomPicketTask(activeTasks, random = Math.random) {
   if (!Array.isArray(activeTasks) || activeTasks.length === 0) return null;
   return activeTasks[Math.floor(random() * activeTasks.length)] || activeTasks[0];
@@ -2153,13 +2241,11 @@ async function generatePicketSchedule({
 } = {}) {
   await ensurePicketTables();
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  await ensurePicketDateIsNotHoliday(targetDate);
   return reconcilePicketAssignmentsForDate({ date: targetDate, generatedBy });
 }
 
 async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, executor = null } = {}) {
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
-  await ensurePicketDateIsNotHoliday(targetDate, executor || query);
   const dayOfWeek = getJakartaDayOfWeek(targetDate);
   let weeklyStudentIds = [];
   const createdIds = [];
@@ -2170,6 +2256,8 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
   try {
     if (ownsTransaction) await client.query("BEGIN");
     await runQuery(client, "SELECT pg_advisory_xact_lock(hashtext($1))", ["picket-student-day-assignment"]);
+    await lockPicketScheduleDates(client, [targetDate]);
+    await ensurePicketDateIsNotHoliday(targetDate, client);
     const fixedStudents = await runQuery(
       client,
       `
@@ -2187,86 +2275,75 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
     );
     weeklyStudentIds = fixedStudents.rows.map((row) => row.student_id);
 
-    const removed = await runQuery(
-      client,
-      `
-      WITH ranked AS (
-        SELECT pa.id,
-               pa.student_id,
-               (ps.id IS NOT NULL) AS has_submission,
-               (plr.id IS NOT NULL OR replacement_plr.id IS NOT NULL) AS has_leave_request,
-               ROW_NUMBER() OVER (
-                 PARTITION BY pa.student_id
-                 ORDER BY (ps.id IS NOT NULL) DESC, pa.generated_at DESC, pa.created_at DESC, pa.id ASC
-               ) AS student_rank
-        FROM picket_schedules pa
-        LEFT JOIN picket_submissions ps ON ps.schedule_id = pa.id
-        LEFT JOIN picket_leave_requests plr ON plr.schedule_id = pa.id
-        LEFT JOIN picket_leave_requests replacement_plr ON replacement_plr.replacement_schedule_id = pa.id
-        WHERE pa.schedule_date = $1::date
-      )
-      DELETE FROM picket_schedules pa
-      USING ranked
-      WHERE pa.id = ranked.id
-        AND ranked.has_submission = FALSE
-        AND ranked.has_leave_request = FALSE
-        AND $3::boolean = TRUE
-        AND (
-          NOT (ranked.student_id = ANY($2::text[]))
-          OR ranked.student_rank > 1
-        )
-      RETURNING pa.id, pa.student_id
-      `,
-      [targetDate, weeklyStudentIds, targetDate > getJakartaDateIso()]
-    );
-
     const existing = await runQuery(
       client,
       `
-      SELECT id, student_id
-      FROM picket_schedules
-      WHERE schedule_date = $1::date
-        AND student_id = ANY($2::text[])
+      SELECT psch.id, psch.student_id, psch.task_id,
+             EXISTS (
+               SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = psch.id
+             ) AS has_submission
+      FROM picket_schedules psch
+      WHERE psch.schedule_date = $1::date
       FOR UPDATE
       `,
-      [targetDate, weeklyStudentIds]
+      [targetDate]
     );
-    const existingByStudentId = new Map(existing.rows.map((row) => [row.student_id, row.id]));
+    const existingByStudentId = new Map(existing.rows.map((row) => [row.student_id, row]));
+    const missingStudentIds = weeklyStudentIds.filter((studentId) => !existingByStudentId.has(studentId));
+    const tasklessExistingSchedules = weeklyStudentIds
+      .map((studentId) => existingByStudentId.get(studentId))
+      .filter((row) => row && !row.task_id && row.has_submission !== true);
+    const requiredTaskCount = missingStudentIds.length + tasklessExistingSchedules.length;
 
-    const activeTasks = weeklyStudentIds.length > 0
+    const availableTasks = requiredTaskCount > 0
       ? (await runQuery(
           client,
           `
-          SELECT *
-          FROM picket_tasks
-          WHERE deleted_at IS NULL
-            AND active = TRUE
-          ORDER BY name ASC
-          `
-        )).rows.map(mapTask)
+          SELECT pt.*
+          FROM picket_tasks pt
+          WHERE pt.deleted_at IS NULL
+            AND pt.active = TRUE
+            AND NOT EXISTS (
+              SELECT 1
+              FROM picket_schedules existing
+              WHERE existing.schedule_date = $1::date
+                AND existing.task_id = pt.id
+          )
+          ORDER BY pt.id ASC
+          `,
+          [targetDate]
+        )).rows
       : [];
-    if (weeklyStudentIds.length > 0 && activeTasks.length === 0) {
-      const error = new Error("Belum ada tugas piket aktif.");
-      error.statusCode = 400;
-      throw error;
+    if (availableTasks.length < requiredTaskCount) throw createPicketTaskCapacityError();
+    const shuffledTasks = shufflePicketTasks(availableTasks);
+
+    for (let index = 0; index < tasklessExistingSchedules.length; index += 1) {
+      const schedule = tasklessExistingSchedules[index];
+      const task = shuffledTasks[index];
+      await runQuery(
+        client,
+        `
+        UPDATE picket_schedules
+        SET task_id = $2,
+            updated_by = $3,
+            updated_at = NOW()
+        WHERE id = $1
+          AND task_id IS NULL
+        `,
+        [schedule.id, task.id, generatedBy]
+      );
+      updatedIds.push(schedule.id);
     }
 
-    for (let index = 0; index < weeklyStudentIds.length; index += 1) {
-      const studentId = weeklyStudentIds[index];
-      const existingId = existingByStudentId.get(studentId);
-
-      if (existingId) {
-        continue;
-      }
-
-      const task = chooseRandomPicketTask(activeTasks);
+    for (let index = 0; index < missingStudentIds.length; index += 1) {
+      const studentId = missingStudentIds[index];
+      const task = shuffledTasks[tasklessExistingSchedules.length + index];
       const id = buildId("PKT-SCH");
       const result = await runQuery(
         client,
         `
         INSERT INTO picket_schedules (id, schedule_date, day_id, student_id, task_id, status, generated_by, created_by, updated_by)
         VALUES ($1, $2::date, $3, $4, $5, 'Ditugaskan', $6, $6, $6)
-        ON CONFLICT (schedule_date, student_id) DO NOTHING
         RETURNING id
         `,
         [id, targetDate, dayOfWeek, studentId, task.id, generatedBy]
@@ -2284,12 +2361,12 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
       assignments,
       created: createdIds,
       updated: updatedIds,
-      removed: removed.rows.map((row) => row.id),
-      removedStudentIds: removed.rows.map((row) => row.student_id)
+      removed: [],
+      removedStudentIds: []
     };
   } catch (error) {
     if (ownsTransaction) await client.query("ROLLBACK");
-    throw error;
+    rethrowDuplicatePicketScheduleError(error, targetDate, "");
   } finally {
     if (ownsTransaction) client.release();
   }
@@ -3460,6 +3537,7 @@ module.exports = {
   buildRandomizedPicketDayAssignments,
   chooseLeastLoadedPicketDay,
   chooseRandomPicketTask,
+  shufflePicketTasks,
   createPicketHoliday,
   createPicketLeaveRequest,
   createPicketSchedule,
