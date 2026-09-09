@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const path = require("node:path");
 
 const integrationEnabled =
   process.env.RUN_PICKET_INTEGRATION_TESTS === "true" &&
@@ -27,6 +29,7 @@ if (!integrationEnabled) {
   let server;
   let baseUrl;
   let originalTaskStates = [];
+  const uploadedFiles = [];
 
   async function api(method, path, body) {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -146,6 +149,7 @@ if (!integrationEnabled) {
 
   async function cleanup() {
     if (server) await new Promise((resolve) => server.close(resolve));
+    for (const filePath of uploadedFiles) await fs.unlink(filePath).catch(() => {});
     await pool.query("DELETE FROM picket_leave_requests WHERE student_id = ANY($1::text[])", [studentIds]).catch(() => {});
     await pool.query("DELETE FROM picket_submissions WHERE student_id = ANY($1::text[])", [studentIds]).catch(() => {});
     await pool.query("DELETE FROM picket_schedules WHERE student_id = ANY($1::text[])", [studentIds]).catch(() => {});
@@ -409,9 +413,9 @@ if (!integrationEnabled) {
         assert.equal(replacements.rows[0].total, 0);
       });
 
-      await t.test("new leave request is approved automatically with a replacement", async () => {
+      await t.test("new leave request remains pending for manual approval", async () => {
         const scheduleId = await createBlockingSchedule({
-          suffix: "AUTO-ORIGINAL",
+          suffix: "PENDING-LEAVE",
           date: "2099-03-22",
           studentId: studentIds[0],
           taskId: taskIds[2]
@@ -420,15 +424,40 @@ if (!integrationEnabled) {
           scheduleId,
           studentId: studentIds[0],
           date: "2099-03-22",
-          reason: "Izin otomatis integration test"
+          reason: "Menunggu persetujuan operator"
         });
         assert.equal(response.status, 201);
-        assert.equal(response.body.status, "Disetujui");
-        assert.equal(response.body.replacementDate, "2099-03-23");
-        assert.ok(response.body.replacementScheduleId);
+        assert.equal(response.body.status, "Menunggu");
+        assert.equal(response.body.replacementScheduleId, null);
         const original = await pool.query("SELECT status FROM picket_schedules WHERE id = $1", [scheduleId]);
-        assert.equal(original.rows[0].status, "Izin");
+        assert.equal(original.rows[0].status, "Ditugaskan");
       });
+
+      await t.test("completed picket submission is validated automatically", async () => {
+        const scheduleId = await createBlockingSchedule({
+          suffix: "AUTO-SUBMISSION",
+          date: "2099-03-23",
+          studentId: studentIds[3],
+          taskId: taskIds[3]
+        });
+        const response = await api("POST", "/picket/submissions", {
+          scheduleId,
+          studentId: studentIds[3],
+          date: "2099-03-23",
+          photoDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          photoFileName: "auto-validation.png"
+        });
+        assert.equal(response.status, 201, JSON.stringify(response.body));
+        assert.equal(response.body.status, "Valid");
+        assert.equal(response.body.submissionStatus, "Valid");
+        assert.equal(response.body.assignment.status, "Selesai");
+        assert.ok(response.body.reviewedAt);
+        assert.equal(response.body.reviewNote, "Divalidasi otomatis oleh sistem.");
+        uploadedFiles.push(
+          path.join(__dirname, "..", "public", response.body.photoUrl.replace(/^\/+/, ""))
+        );
+      });
+
     } finally {
       await cleanup();
     }

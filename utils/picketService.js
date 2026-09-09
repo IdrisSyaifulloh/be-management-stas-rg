@@ -2870,20 +2870,21 @@ async function createPicketSubmission(payload = {}) {
   const result = await query(
     `
     INSERT INTO picket_submissions (
-      id, schedule_id, assignment_id, student_id, date, photo_url, file_url, photo_file_name, source, status
+      id, schedule_id, assignment_id, student_id, date, photo_url, file_url, photo_file_name,
+      source, status, reviewed_at, review_note
     )
-    VALUES ($1, $2, $2, $3, $4::date, $5, $5, $6, $7, 'Terkirim')
+    VALUES ($1, $2, $2, $3, $4::date, $5, $5, $6, $7, 'Valid', NOW(), 'Divalidasi otomatis oleh sistem.')
     ON CONFLICT (schedule_id)
     DO UPDATE SET photo_url = EXCLUDED.photo_url,
                   assignment_id = EXCLUDED.assignment_id,
                   file_url = EXCLUDED.file_url,
                   photo_file_name = EXCLUDED.photo_file_name,
                   source = EXCLUDED.source,
-                  status = 'Terkirim',
+                  status = 'Valid',
                   submitted_at = NOW(),
                   reviewed_by = NULL,
-                  reviewed_at = NULL,
-                  review_note = NULL
+                  reviewed_at = NOW(),
+                  review_note = 'Divalidasi otomatis oleh sistem.'
     RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text
     `,
     [
@@ -2898,11 +2899,18 @@ async function createPicketSubmission(payload = {}) {
   );
   const submission = mapSubmission(result.rows[0]);
   await updatePicketScheduleStatusFromSubmission(effectiveScheduleId, submission.status);
-  await deactivateAccessLocksForStudentDateReason({
-    studentId,
-    date,
-    reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
-  });
+  await Promise.all([
+    deactivateAccessLocksForStudentDateReason({
+      studentId,
+      date,
+      reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_MISSING
+    }),
+    deactivateAccessLocksForStudentDateReason({
+      studentId,
+      date,
+      reason: ACCESS_LOCK_REASON_PICKET_SUBMISSION_INVALID
+    })
+  ]);
 
   const assignment = await getPicketScheduleById(effectiveScheduleId);
   return {
@@ -3074,38 +3082,6 @@ async function createPicketReplacementSchedule({ leave, reviewedBy, executor }) 
   }
 
   throw createPicketReplacementDateUnavailableError();
-}
-
-async function approvePicketLeaveWithinTransaction({ leave, reviewedBy = null, executor }) {
-  await runQuery(
-    executor,
-    "SELECT pg_advisory_xact_lock(hashtext($1))",
-    [`picket-leave-replacement:${leave.student_id}`]
-  );
-
-  if (!leave.replacement_schedule_id) {
-    const submitted = await runQuery(
-      executor,
-      "SELECT 1 FROM picket_submissions WHERE schedule_id = $1 LIMIT 1",
-      [leave.schedule_id]
-    );
-    if (submitted.rowCount > 0) {
-      const error = new Error("Izin tidak dapat disetujui karena jadwal asal sudah memiliki submission.");
-      error.statusCode = 409;
-      throw error;
-    }
-
-    const replacement = await createPicketReplacementSchedule({ leave, reviewedBy, executor });
-    leave.replacement_schedule_id = replacement.replacementScheduleId;
-    leave.replacement_date_text = replacement.replacementDate;
-  }
-
-  await runQuery(
-    executor,
-    "UPDATE picket_schedules SET status = 'Izin', updated_by = $2, updated_at = NOW() WHERE id = $1",
-    [leave.schedule_id, reviewedBy]
-  );
-  return leave;
 }
 
 async function syncStudentLeaveToPicket({
@@ -3423,89 +3399,50 @@ async function createPicketLeaveRequest(payload = {}) {
     throw error;
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const schedule = await client.query(
-      `
-      SELECT id, student_id, task_id, status AS schedule_status,
-             TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text
-      FROM picket_schedules
-      WHERE id = $1
-      FOR UPDATE
-      `,
-      [scheduleId]
-    );
-    if (schedule.rowCount === 0) {
-      const error = new Error("Jadwal piket tidak ditemukan.");
-      error.statusCode = 404;
-      throw error;
-    }
-    if (schedule.rows[0].student_id !== studentId || schedule.rows[0].date_text !== date) {
-      const error = new Error("Jadwal piket tidak sesuai dengan studentId/date.");
-      error.statusCode = 400;
-      throw error;
-    }
-
-    const approvedExisting = await client.query(
-      "SELECT 1 FROM picket_leave_requests WHERE schedule_id = $1 AND student_id = $2 AND status = 'Disetujui' LIMIT 1",
-      [scheduleId, studentId]
-    );
-    if (approvedExisting.rowCount > 0) {
-      const error = new Error("Izin piket yang sudah disetujui tidak dapat diajukan ulang.");
-      error.statusCode = 409;
-      throw error;
-    }
-
-    const created = await client.query(
-      `
-      INSERT INTO picket_leave_requests (id, schedule_id, assignment_id, student_id, date, reason, status)
-      VALUES ($1, $2, $2, $3, $4::date, $5, 'Menunggu')
-      ON CONFLICT (schedule_id, student_id)
-      DO UPDATE SET reason = EXCLUDED.reason,
-                    assignment_id = EXCLUDED.assignment_id,
-                    status = 'Menunggu',
-                    reviewed_by = NULL,
-                    reviewed_at = NULL,
-                    review_note = NULL,
-                    replacement_schedule_id = NULL,
-                    replacement_date = NULL,
-                    updated_at = NOW()
-      RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text
-      `,
-      [buildId("PKT-LV"), scheduleId, studentId, date, reason]
-    );
-    const leave = {
-      ...created.rows[0],
-      task_id: schedule.rows[0].task_id,
-      schedule_status: schedule.rows[0].schedule_status
-    };
-    await approvePicketLeaveWithinTransaction({ leave, executor: client });
-
-    const approved = await client.query(
-      `
-      UPDATE picket_leave_requests
-      SET status = 'Disetujui',
-          reviewed_by = NULL,
-          reviewed_at = NOW(),
-          review_note = 'Disetujui otomatis oleh sistem.',
-          replacement_schedule_id = $2,
-          replacement_date = $3::date,
-          updated_at = NOW()
-      WHERE id = $1
-      RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text,
-                   TO_CHAR(replacement_date, 'YYYY-MM-DD') AS replacement_date_text
-      `,
-      [leave.id, leave.replacement_schedule_id, leave.replacement_date_text]
-    );
-    await client.query("COMMIT");
-    return mapLeaveRequest(approved.rows[0]);
-  } catch (error) {
-    await client.query("ROLLBACK");
+  const schedule = await query(
+    "SELECT id, student_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') AS date_text FROM picket_schedules WHERE id = $1 LIMIT 1",
+    [scheduleId]
+  );
+  if (schedule.rowCount === 0) {
+    const error = new Error("Jadwal piket tidak ditemukan.");
+    error.statusCode = 404;
     throw error;
-  } finally {
-    client.release();
   }
+  if (schedule.rows[0].student_id !== studentId || schedule.rows[0].date_text !== date) {
+    const error = new Error("Jadwal piket tidak sesuai dengan studentId/date.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const approvedExisting = await query(
+    "SELECT 1 FROM picket_leave_requests WHERE schedule_id = $1 AND student_id = $2 AND status = 'Disetujui' LIMIT 1",
+    [scheduleId, studentId]
+  );
+  if (approvedExisting.rowCount > 0) {
+    const error = new Error("Izin piket yang sudah disetujui tidak dapat diajukan ulang.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const result = await query(
+    `
+    INSERT INTO picket_leave_requests (id, schedule_id, assignment_id, student_id, date, reason, status)
+    VALUES ($1, $2, $2, $3, $4::date, $5, 'Menunggu')
+    ON CONFLICT (schedule_id, student_id)
+    DO UPDATE SET reason = EXCLUDED.reason,
+                  assignment_id = EXCLUDED.assignment_id,
+                  status = 'Menunggu',
+                  reviewed_by = NULL,
+                  reviewed_at = NULL,
+                  review_note = NULL,
+                  replacement_schedule_id = NULL,
+                  replacement_date = NULL,
+                  updated_at = NOW()
+    RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') AS date_text
+    `,
+    [buildId("PKT-LV"), scheduleId, studentId, date, reason]
+  );
+  return mapLeaveRequest(result.rows[0]);
 }
 
 async function reviewPicketLeaveRequest(id, payload = {}) {
@@ -3539,8 +3476,33 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
     }
 
     const leave = leaveResult.rows[0];
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`picket-leave-replacement:${leave.student_id}`]);
+
+    if (status === "Disetujui" && !leave.replacement_schedule_id) {
+      const submitted = await client.query(
+        "SELECT 1 FROM picket_submissions WHERE schedule_id = $1 LIMIT 1",
+        [leave.schedule_id]
+      );
+      if (submitted.rowCount > 0) {
+        const error = new Error("Izin tidak dapat disetujui karena jadwal asal sudah memiliki submission.");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const replacement = await createPicketReplacementSchedule({
+        leave,
+        reviewedBy,
+        executor: client
+      });
+      leave.replacement_schedule_id = replacement.replacementScheduleId;
+      leave.replacement_date_text = replacement.replacementDate;
+    }
+
     if (status === "Disetujui") {
-      await approvePicketLeaveWithinTransaction({ leave, reviewedBy, executor: client });
+      await client.query(
+        "UPDATE picket_schedules SET status = 'Izin', updated_by = $2, updated_at = NOW() WHERE id = $1",
+        [leave.schedule_id, reviewedBy]
+      );
     }
 
     if (status !== "Disetujui" && leave.replacement_schedule_id) {
