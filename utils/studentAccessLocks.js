@@ -347,9 +347,19 @@ async function createWorkHoursUnder8Locks({ studentIds, date }) {
 }
 
 async function createCheckoutMissing22Locks({ studentIds, date }) {
-  // Lupa checkout setelah jam 22 cukup dicatat di absensi/monitoring.
-  // Jangan membuat access lock, supaya web mahasiswa tetap bisa dipakai malam hari.
-  return [];
+  const settings = await getSettingsAsync();
+  const normalizedDate = normalizeHolidayDate(date);
+  const holiday = normalizedDate ? findNonWorkingDayForDate(settings, normalizedDate) : null;
+
+  if (holiday) {
+    return [];
+  }
+
+  return createStudentAccessLocks({
+    studentIds,
+    date: normalizedDate || date,
+    reason: ACCESS_LOCK_REASON_CHECKOUT_MISSING_22
+  });
 }
 
 async function createWfhCheckinMissingLocks({ studentIds, date }) {
@@ -812,20 +822,6 @@ async function studentAccessLockMiddleware(req, res, next) {
   if (String(req.authUser?.role || "").toLowerCase() !== "mahasiswa") {
     return next();
   }
-
-  // Setelah jam 22:00 WIB, lock tidak diberlakukan malam itu.
-  // Auto-checkout tetap berjalan dan lock tetap tersimpan di DB,
-  // namun baru aktif mulai keesokan harinya (setelah midnight).
-  const jakartaHour = parseInt(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Jakarta",
-      hour: "2-digit",
-      hour12: false,
-      hourCycle: "h23"
-    }).format(new Date()),
-    10
-  );
-  if (jakartaHour >= 22) return next();
 
   const path = req.path || "";
   const method = req.method || "GET";

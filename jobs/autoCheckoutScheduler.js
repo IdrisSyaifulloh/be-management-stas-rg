@@ -164,12 +164,26 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
         AND ar.check_in_at <= (($1::date + $2::time) AT TIME ZONE 'Asia/Jakarta')
         AND ar.check_out_at IS NULL
       RETURNING ar.id, ar.student_id, ar.attendance_date, ar.status, ar.check_out_at
+    ),
+    affected AS (
+      SELECT id, student_id, attendance_date, status, check_out_at, TRUE AS just_updated
+      FROM updated
+      UNION
+      SELECT ar.id, ar.student_id, ar.attendance_date, ar.status, ar.check_out_at, FALSE AS just_updated
+      FROM attendance_records ar
+      WHERE ar.attendance_date = $1::date
+        AND ar.status IN ('Hadir', 'WFH')
+        AND (
+          ar.auto_checkout = TRUE
+          OR ar.auto_checkout_reason = $3
+        )
     )
-    SELECT updated.id,
-           updated.student_id,
-           TO_CHAR(updated.attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
-           updated.status,
-           updated.check_out_at,
+    SELECT affected.id,
+           affected.student_id,
+           TO_CHAR(affected.attendance_date, 'YYYY-MM-DD') AS attendance_date_text,
+           affected.status,
+           affected.check_out_at,
+           affected.just_updated,
            s.user_id AS recipient_user_id,
            s.tipe AS student_type,
            s.nim,
@@ -177,12 +191,12 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
            EXISTS (
              SELECT 1
              FROM leave_requests lr
-             WHERE lr.student_id = updated.student_id
+             WHERE lr.student_id = affected.student_id
                AND lr.status = 'Disetujui'
-               AND updated.attendance_date BETWEEN lr.periode_start AND lr.periode_end
+               AND affected.attendance_date BETWEEN lr.periode_start AND lr.periode_end
            ) AS has_approved_leave
-    FROM updated
-    JOIN students s ON s.id = updated.student_id
+    FROM affected
+    JOIN students s ON s.id = affected.student_id
     JOIN users u ON u.id = s.user_id
     `,
     [targetDate, checkoutTime, AUTO_REASON]
@@ -224,13 +238,14 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
     date: targetDate
   });
 
+  const newlyUpdatedRows = result.rows.filter((row) => row.just_updated === true);
   const notifications = await notifyAutoCheckout({
-    rows: result.rows,
+    rows: newlyUpdatedRows,
     scheduleSlot: checkoutTime
   });
 
   return {
-    processed: result.rowCount,
+    processed: newlyUpdatedRows.length,
     rows: result.rows,
     accessLocks: {
       reason: "CHECKOUT_MISSING_22",
@@ -271,6 +286,23 @@ async function recoverMissedAutoCheckout({ today, checkoutTime }) {
         AND lr.jenis_pengajuan = 'wfh'
         AND wfh_day::date < $1::date
         AND ar.check_in_at IS NULL
+
+      UNION
+
+      SELECT ar.attendance_date
+      FROM attendance_records ar
+      JOIN students s ON s.id = ar.student_id
+      WHERE ar.attendance_date < $1::date
+        AND ar.status IN ('Hadir', 'WFH')
+        AND (ar.auto_checkout = TRUE OR ar.auto_checkout_reason = 'AUTO_CHECKOUT_22_00')
+        AND (ar.status = 'WFH' OR s.tipe = 'Magang')
+        AND NOT EXISTS (
+          SELECT 1 FROM student_access_locks sal
+          WHERE sal.student_id = ar.student_id
+            AND sal.lock_date = ar.attendance_date
+            AND sal.reason = 'CHECKOUT_MISSING_22'
+            AND sal.active = TRUE
+        )
     ) missed
     ORDER BY attendance_date ASC
     `,
