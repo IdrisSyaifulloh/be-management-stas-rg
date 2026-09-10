@@ -106,6 +106,13 @@ async function ensureGraduationSubmissionsTables() {
           ON graduation_submissions(student_id) 
           WHERE is_archived = FALSE;
 
+        UPDATE graduation_submissions gs
+        SET is_archived = FALSE
+        FROM students s
+        WHERE gs.student_id = s.id
+          AND s.status != 'Alumni'
+          AND gs.is_archived = TRUE;
+
         CREATE TABLE IF NOT EXISTS reactivation_requests (
           id TEXT PRIMARY KEY,
           student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,

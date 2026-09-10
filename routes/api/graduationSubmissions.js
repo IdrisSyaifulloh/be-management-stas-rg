@@ -158,8 +158,7 @@ async function getActiveGraduationProjects(userId) {
     JOIN research_projects rp ON rp.id = rm.project_id
     WHERE rm.user_id = $1
       AND rm.member_type = 'Mahasiswa'
-      AND COALESCE(rm.status, 'Aktif') = 'Aktif'
-      AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
+      AND COALESCE(rm.status, 'Aktif') != 'Ditolak'
     ORDER BY rp.title ASC, rp.id ASC
     LIMIT 100
     `,
@@ -174,7 +173,8 @@ async function getSavedSubmission(studentId) {
     `
     SELECT *
     FROM graduation_submissions
-    WHERE student_id = $1 AND is_archived = FALSE
+    WHERE student_id = $1
+    ORDER BY is_archived ASC, submitted_at DESC NULLS LAST, created_at DESC
     LIMIT 1
     `,
     [studentId]
@@ -624,6 +624,17 @@ router.get(
       return res.status(404).json({ message: "Data mahasiswa tidak ditemukan." });
     }
 
+    if (student.status !== "Alumni") {
+      await query(
+        `
+        UPDATE graduation_submissions
+        SET is_archived = FALSE
+        WHERE student_id = $1 AND is_archived = TRUE
+        `,
+        [student.id]
+      );
+    }
+
     const [activeProjects, saved] = await Promise.all([
       getActiveGraduationProjects(req.authUser.id),
       getSavedSubmission(student.id)
@@ -659,12 +670,6 @@ router.get(
       UPDATE graduation_submissions
       SET is_archived = FALSE
       WHERE is_archived IS NULL
-    `);
-    
-    await query(`
-      UPDATE graduation_submissions
-      SET is_archived = TRUE
-      WHERE status = 'Valid' AND is_archived = FALSE
     `);
 
     const student = await getStudentByUserId(req.authUser.id);
@@ -1140,6 +1145,7 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
       FROM graduation_submissions gs
       JOIN students s ON s.id = gs.student_id
       WHERE gs.user_id = $1
+      ORDER BY gs.is_archived ASC, gs.created_at DESC
       LIMIT 1
       FOR UPDATE OF gs, s
       `,

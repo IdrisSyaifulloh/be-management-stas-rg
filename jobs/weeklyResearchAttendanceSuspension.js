@@ -48,6 +48,14 @@ async function fetchResearchStudentsBelowTarget(targetHours, weekStart, weekEnd)
       AND s.tipe = 'Riset'
       AND u.is_active = TRUE
       AND COALESCE(week_hours.total_hours, 0) < $1::int
+      AND NOT EXISTS (
+        SELECT 1
+        FROM leave_requests lr
+        WHERE lr.student_id = s.id
+          AND lr.status = 'Disetujui'
+          AND lr.periode_start <= $3::date
+          AND lr.periode_end >= $2::date
+      )
     ORDER BY COALESCE(week_hours.total_hours, 0) ASC, u.name ASC
     `,
     [targetHours, weekStart, weekEnd]
@@ -67,6 +75,19 @@ async function runWeeklyResearchAttendanceSuspensionCycle(now = new Date()) {
   const prevWeek = getPreviousJakartaWeekBounds(now);
   const weekStart = prevWeek.startDate;
   const weekEnd = prevWeek.endDate;
+
+  if (settings?.accessLocks?.enabled === false) {
+    return {
+      ran: false,
+      reason: "access_locks_disabled",
+      weekStart,
+      weekEnd,
+      targetHours,
+      matched: 0,
+      locked: 0,
+      students: []
+    };
+  }
 
   if (targetHours <= 0) {
     return {

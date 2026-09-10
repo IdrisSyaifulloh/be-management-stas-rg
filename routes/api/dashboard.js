@@ -325,6 +325,7 @@ router.get(
             FROM students s
             JOIN users u ON u.id = s.user_id
             WHERE s.status = 'Aktif'
+              AND s.tipe != 'Riset'
               AND NOT EXISTS (
                 SELECT 1
                 FROM attendance_records ar
@@ -428,7 +429,8 @@ router.get(
       lowHours: lowHoursRows.rows.map((row) => mapWarningItem(row, "low_hours"))
     };
 
-    if (attendanceSectionActive && attendanceAbsentWarnings.length > 0) {
+    const accessLocksEnabled = settings?.accessLocks?.enabled !== false;
+    if (accessLocksEnabled && attendanceSectionActive && attendanceAbsentWarnings.length > 0) {
       await createAttendanceAbsentLocks({
         studentIds: attendanceAbsentWarnings.map((item) => item.studentId),
         date: today

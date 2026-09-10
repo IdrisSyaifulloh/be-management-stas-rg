@@ -78,6 +78,47 @@ async function ensureStudentAccessLockTable() {
         CREATE INDEX IF NOT EXISTS idx_student_access_locks_active
         ON student_access_locks(student_id, active, lock_date DESC)
       `);
+
+      // Auto-unlock invalid daily attendance locks erroneously created for Riset students
+      await query(`
+        UPDATE student_access_locks sal
+        SET status = 'UNLOCKED',
+            locked = FALSE,
+            active = FALSE,
+            unlocked_at = COALESCE(sal.unlocked_at, NOW()),
+            updated_at = NOW()
+        FROM students s
+        WHERE sal.student_id = s.id
+          AND s.tipe = 'Riset'
+          AND sal.reason IN ('ATTENDANCE_ABSENT', 'CHECKOUT_MISSING_22')
+          AND sal.active = TRUE
+      `);
+
+      // Auto-unlock invalid picket locks on days where the student was on approved WFH or approved leave
+      await query(`
+        UPDATE student_access_locks sal
+        SET status = 'UNLOCKED',
+            locked = FALSE,
+            active = FALSE,
+            unlocked_at = COALESCE(sal.unlocked_at, NOW()),
+            updated_at = NOW()
+        WHERE sal.reason IN ('PICKET_SUBMISSION_MISSING', 'PICKET_SUBMISSION_INVALID')
+          AND sal.active = TRUE
+          AND (
+            EXISTS (
+              SELECT 1 FROM attendance_records ar
+              WHERE ar.student_id = sal.student_id
+                AND ar.attendance_date = sal.lock_date
+                AND ar.status = 'WFH'
+            )
+            OR EXISTS (
+              SELECT 1 FROM leave_requests lr
+              WHERE lr.student_id = sal.student_id
+                AND sal.lock_date BETWEEN lr.periode_start AND lr.periode_end
+                AND LOWER(BTRIM(lr.status)) = 'disetujui'
+            )
+          )
+      `);
     })();
   }
   await ensureTablePromise;
@@ -170,6 +211,10 @@ function mapAccessLockRow(row) {
 
 async function createStudentAccessLocks({ studentIds, date, reason, reactivateUnlocked = false }) {
   await ensureStudentAccessLockTable();
+  const settings = await getSettingsAsync();
+  if (!areStudentAccessLocksEnabled(settings)) {
+    return [];
+  }
   const uniqueStudentIds = [...new Set((studentIds || []).filter(Boolean))];
   const created = [];
 
@@ -402,12 +447,21 @@ async function deactivatePicketLocksCoveredByApprovedStudentLeave(studentId = nu
       AND sal.active = TRUE
       AND sal.locked = TRUE
       AND sal.status = 'LOCKED'
-      AND EXISTS (
-        SELECT 1
-        FROM leave_requests lr
-        WHERE lr.student_id = sal.student_id
-          AND sal.lock_date BETWEEN lr.periode_start AND lr.periode_end
-          AND LOWER(BTRIM(lr.status)) = LOWER('Disetujui')
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM leave_requests lr
+          WHERE lr.student_id = sal.student_id
+            AND sal.lock_date BETWEEN lr.periode_start AND lr.periode_end
+            AND LOWER(BTRIM(lr.status)) = LOWER('Disetujui')
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM attendance_records ar
+          WHERE ar.student_id = sal.student_id
+            AND ar.attendance_date = sal.lock_date
+            AND ar.status = 'WFH'
+        )
       )
     RETURNING sal.id
     `,
@@ -500,6 +554,13 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
         WHERE lr.student_id = psch.student_id
           AND psch.schedule_date BETWEEN lr.periode_start AND lr.periode_end
           AND LOWER(BTRIM(lr.status)) = LOWER('Disetujui')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM attendance_records ar
+        WHERE ar.student_id = psch.student_id
+          AND ar.attendance_date = psch.schedule_date
+          AND ar.status = 'WFH'
       )
       AND NOT EXISTS (
         SELECT 1
@@ -677,17 +738,23 @@ async function listAccessLocks({ status = null, search = null } = {}) {
     : "";
   const result = await query(
     `
-    SELECT sal.id, sal.student_id, TO_CHAR(sal.lock_date, 'YYYY-MM-DD') AS lock_date_text,
-           sal.reason, sal.status, sal.locked, sal.active, sal.locked_at,
-           sal.unlocked_at, sal.unlocked_by,
-           u.name AS student_name, u.initials AS student_initials, u.photo_url AS student_photo_url, s.nim, s.tipe
-    FROM student_access_locks sal
-    JOIN students s ON s.id = sal.student_id
-    JOIN users u ON u.id = s.user_id
-    WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND s.status = 'Aktif'))
-      AND NOT (sal.reason IN ($2, $3) AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
-      ${searchClause}
-    ORDER BY sal.lock_date DESC, sal.locked_at DESC
+    WITH ranked_locks AS (
+      SELECT DISTINCT ON (sal.student_id)
+             sal.id, sal.student_id, TO_CHAR(sal.lock_date, 'YYYY-MM-DD') AS lock_date_text,
+             sal.reason, sal.status, sal.locked, sal.active, sal.locked_at,
+             sal.unlocked_at, sal.unlocked_by,
+             u.name AS student_name, u.initials AS student_initials, u.photo_url AS student_photo_url, s.nim, s.tipe
+      FROM student_access_locks sal
+      JOIN students s ON s.id = sal.student_id
+      JOIN users u ON u.id = s.user_id
+      WHERE ($1::boolean = FALSE OR (sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED' AND s.status = 'Aktif'))
+        AND NOT (sal.reason IN ($2, $3) AND s.tipe = 'Riset' AND sal.active = TRUE AND sal.locked = TRUE AND sal.status = 'LOCKED')
+        ${searchClause}
+      ORDER BY sal.student_id, sal.lock_date DESC, sal.locked_at DESC
+    )
+    SELECT *
+    FROM ranked_locks
+    ORDER BY lock_date_text DESC, locked_at DESC
     LIMIT 500
     `,
     params
