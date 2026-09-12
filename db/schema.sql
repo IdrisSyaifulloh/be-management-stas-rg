@@ -87,27 +87,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_graduation_submissions_active
   ON graduation_submissions(student_id) 
   WHERE is_archived = FALSE;
 
-CREATE TABLE IF NOT EXISTS graduation_submission_projects (
-  id TEXT PRIMARY KEY,
-  submission_id TEXT NOT NULL REFERENCES graduation_submissions(id) ON DELETE CASCADE,
-  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
-  project_title TEXT,
-  position_label TEXT,
-  report_url TEXT NOT NULL,
-  product_photo_folder_url TEXT NOT NULL,
-  manual_book_url TEXT NOT NULL,
-  demo_video_url TEXT NOT NULL,
-  github_url TEXT,
-  repository_url TEXT,
-  deployed_url TEXT,
-  dataset_model_url TEXT,
-  design_documentation_url TEXT,
-  field_reviews JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (submission_id, project_id)
-);
 CREATE TABLE IF NOT EXISTS lecturers (
   id TEXT PRIMARY KEY,
   user_id TEXT UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -156,6 +135,53 @@ CREATE TABLE IF NOT EXISTS research_projects (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS graduation_submission_projects (
+  id TEXT PRIMARY KEY,
+  submission_id TEXT NOT NULL REFERENCES graduation_submissions(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  project_title TEXT,
+  position_label TEXT,
+  report_url TEXT NOT NULL,
+  product_photo_folder_url TEXT NOT NULL,
+  manual_book_url TEXT NOT NULL,
+  demo_video_url TEXT NOT NULL,
+  github_url TEXT,
+  repository_url TEXT,
+  deployed_url TEXT,
+  dataset_model_url TEXT,
+  design_documentation_url TEXT,
+  field_reviews JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (submission_id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_divisions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS research_sprints (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  goal TEXT,
+  start_date DATE,
+  end_date DATE,
+  status TEXT NOT NULL DEFAULT 'planning'
+    CHECK (status IN ('planning', 'active', 'review', 'closed')),
+  review_started_at TIMESTAMPTZ,
+  closed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS research_milestones (
   id BIGSERIAL PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
@@ -185,8 +211,11 @@ CREATE TABLE IF NOT EXISTS board_access (
   UNIQUE (project_id, user_id)
 );
 
+CREATE SEQUENCE IF NOT EXISTS research_board_task_key_seq;
+
 CREATE TABLE IF NOT EXISTS research_board_tasks (
   id TEXT PRIMARY KEY,
+  task_key TEXT NOT NULL UNIQUE DEFAULT ('TASK-' || nextval('research_board_task_key_seq')::text),
   project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   description TEXT,
@@ -198,8 +227,89 @@ CREATE TABLE IF NOT EXISTS research_board_tasks (
   progress INTEGER NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL,
+  sprint_id TEXT REFERENCES research_sprints(id) ON DELETE SET NULL,
+  story_points INTEGER DEFAULT NULL,
+  cancelled_at TIMESTAMPTZ,
+  cancelled_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS research_sprint_task_assignments (
+  id TEXT PRIMARY KEY,
+  sprint_id TEXT NOT NULL REFERENCES research_sprints(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES research_board_tasks(id) ON DELETE CASCADE,
+  division_id_at_assignment TEXT,
+  division_name_at_assignment TEXT,
+  story_points_at_assignment INTEGER,
+  status_at_assignment TEXT,
+  status_at_close TEXT,
+  progress_at_close INTEGER,
+  outcome TEXT NOT NULL DEFAULT 'pending'
+    CHECK (outcome IN ('pending', 'done', 'carry_over', 'backlog', 'cancelled')),
+  target_sprint_id TEXT REFERENCES research_sprints(id) ON DELETE SET NULL,
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  closed_at TIMESTAMPTZ,
+  UNIQUE(sprint_id, task_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_sprint_summaries (
+  id TEXT PRIMARY KEY,
+  sprint_id TEXT NOT NULL UNIQUE REFERENCES research_sprints(id) ON DELETE CASCADE,
+  summary TEXT NOT NULL DEFAULT '',
+  achievements TEXT,
+  challenges TEXT,
+  lessons_learned TEXT,
+  next_sprint_plan TEXT,
+  is_finalized BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  finalized_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finalized_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS research_sprint_review_meetings (
+  id TEXT PRIMARY KEY,
+  sprint_id TEXT NOT NULL UNIQUE REFERENCES research_sprints(id) ON DELETE CASCADE,
+  meeting_date DATE,
+  start_time TIME,
+  location TEXT,
+  meeting_link TEXT,
+  chair_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  agenda TEXT,
+  notes TEXT,
+  decisions TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS research_sprint_review_attendees (
+  meeting_id TEXT NOT NULL REFERENCES research_sprint_review_meetings(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name_snapshot TEXT NOT NULL,
+  role_snapshot TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (meeting_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_sprint_member_evaluations (
+  id TEXT PRIMARY KEY,
+  sprint_id TEXT NOT NULL REFERENCES research_sprints(id) ON DELETE CASCADE,
+  evaluated_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  task_completion INTEGER NOT NULL CHECK (task_completion BETWEEN 1 AND 10),
+  quality INTEGER NOT NULL CHECK (quality BETWEEN 1 AND 10),
+  timeliness INTEGER NOT NULL CHECK (timeliness BETWEEN 1 AND 10),
+  collaboration INTEGER NOT NULL CHECK (collaboration BETWEEN 1 AND 10),
+  initiative INTEGER NOT NULL CHECK (initiative BETWEEN 1 AND 10),
+  overall_score NUMERIC(4,2) NOT NULL CHECK (overall_score >= 1 AND overall_score <= 10),
+  notes TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (sprint_id, evaluated_user_id)
 );
 
 CREATE TABLE IF NOT EXISTS research_board_task_assignees (
@@ -238,6 +348,31 @@ CREATE TABLE IF NOT EXISTS research_board_task_comments (
   text TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS research_repositories (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL, provider TEXT NOT NULL DEFAULT 'github' CHECK (provider = 'github'),
+  github_owner TEXT NOT NULL, github_repo TEXT NOT NULL, github_repository_id TEXT, github_installation_id TEXT,
+  default_branch TEXT NOT NULL DEFAULT 'main', is_private BOOLEAN NOT NULL DEFAULT FALSE, is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(project_id, provider, github_owner, github_repo)
+);
+CREATE TABLE IF NOT EXISTS research_task_repository_links (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES research_board_tasks(id) ON DELETE CASCADE,
+  repository_id TEXT NOT NULL REFERENCES research_repositories(id) ON DELETE CASCADE, branch_name TEXT, pull_request_number INTEGER,
+  link_source TEXT NOT NULL DEFAULT 'manual' CHECK (link_source IN ('manual','auto_branch','auto_commit','auto_pr')),
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(task_id, repository_id)
+);
+CREATE TABLE IF NOT EXISTS research_github_webhook_deliveries (
+  delivery_id TEXT PRIMARY KEY, event_name TEXT, repository_id TEXT REFERENCES research_repositories(id) ON DELETE SET NULL,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), processed_at TIMESTAMPTZ, status TEXT NOT NULL DEFAULT 'received' CHECK (status IN ('received','processed','ignored','failed')), error_message TEXT
+);
+CREATE TABLE IF NOT EXISTS research_github_activities (
+  id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES research_repositories(id) ON DELETE CASCADE, task_id TEXT REFERENCES research_board_tasks(id) ON DELETE SET NULL,
+  delivery_id TEXT NOT NULL REFERENCES research_github_webhook_deliveries(delivery_id) ON DELETE CASCADE, activity_type TEXT NOT NULL, github_event_id TEXT,
+  github_actor_login TEXT, branch_name TEXT, commit_sha TEXT, commit_message TEXT, pull_request_number INTEGER, pull_request_title TEXT,
+  pull_request_state TEXT, pull_request_merged BOOLEAN, html_url TEXT, occurred_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), suggested_task_status TEXT
 );
 
 CREATE TABLE IF NOT EXISTS leave_requests (
@@ -688,6 +823,22 @@ CREATE INDEX IF NOT EXISTS idx_research_board_tasks_project_updated ON research_
 CREATE INDEX IF NOT EXISTS idx_research_board_subtasks_task ON research_board_task_subtasks(task_id, sort_order ASC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_research_board_attachments_task ON research_board_task_attachments(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_board_comments_task ON research_board_task_comments(task_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_research_divisions_project_name_ci ON research_divisions(project_id, LOWER(name));
+CREATE INDEX IF NOT EXISTS idx_research_divisions_project_active_sort ON research_divisions(project_id, is_active, sort_order, name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_research_sprints_one_active_per_project ON research_sprints(project_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_research_sprints_project ON research_sprints(project_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_research_board_tasks_project_division_status_sort ON research_board_tasks(project_id, division_id, status, sort_order);
+CREATE INDEX IF NOT EXISTS idx_research_board_tasks_sprint ON research_board_tasks(sprint_id);
+CREATE INDEX IF NOT EXISTS idx_research_sprint_task_assignments_task ON research_sprint_task_assignments(task_id, assigned_at DESC);
+CREATE INDEX IF NOT EXISTS idx_research_sprint_task_assignments_sprint_outcome ON research_sprint_task_assignments(sprint_id, outcome, assigned_at);
+CREATE INDEX IF NOT EXISTS idx_research_sprint_summaries_sprint ON research_sprint_summaries(sprint_id);
+CREATE INDEX IF NOT EXISTS idx_research_sprint_review_meetings_sprint ON research_sprint_review_meetings(sprint_id);
+CREATE INDEX IF NOT EXISTS idx_research_sprint_evaluations_sprint ON research_sprint_member_evaluations(sprint_id);
+CREATE INDEX IF NOT EXISTS idx_research_sprint_evaluations_user ON research_sprint_member_evaluations(evaluated_user_id);
+CREATE INDEX IF NOT EXISTS idx_research_repositories_project ON research_repositories(project_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_research_task_repository_links_task ON research_task_repository_links(task_id);
+CREATE INDEX IF NOT EXISTS idx_research_github_activities_repo_time ON research_github_activities(repository_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_research_github_activities_task_time ON research_github_activities(task_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_student_documents_student ON student_documents(student_id, document_type);
 CREATE INDEX IF NOT EXISTS idx_graduation_submissions_student ON graduation_submissions(student_id, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_graduation_submission_projects_student ON graduation_submission_projects(student_id, project_id);

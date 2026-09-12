@@ -89,3 +89,15 @@ terpasang:
 ```bash
 PICKET_TEST_DATABASE_URL=postgresql://... npm run test:picket-integration
 ```
+
+## Scrum V2
+
+Prosedur resmi fresh install, upgrade existing database, staging guard, fixture
+UAT, validasi, dan rollback tersedia di `docs/SCRUM_V2_STAGING_UAT.md`.
+
+Urutan upgrade resminya adalah `029_scrum_v2_core.sql`,
+`030_sprint_review_summary.sql`, lalu `031_github_integration_scrum_v2.sql`:
+
+```bash
+DATABASE_URL=postgresql://... npm run db:migrate:scrum-v2:staging
+```

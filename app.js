@@ -12,6 +12,7 @@ var validateEnv = require("./config/validateEnv");
 var indexRouter = require("./routes/index");
 var usersRouter = require("./routes/users");
 var apiRouter = require("./routes/api");
+var githubIntegrationRouter = require("./routes/api/githubIntegration");
 var { query } = require("./db/pool");
 var { studentAccessLockMiddleware } = require("./utils/studentAccessLocks");
 var { hasControlChars } = require("./utils/securityValidation");
@@ -109,7 +110,14 @@ var loginRateLimiter = rateLimit({
   }
 });
 
-app.use(express.json({ limit: "15mb" }));
+app.use(express.json({
+  limit: "15mb",
+  verify: function (req, res, buffer) {
+    if (req.path === "/api/v1/integrations/github/webhook") {
+      req.rawBody = Buffer.from(buffer);
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: false, limit: "15mb" }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, "public")));
@@ -326,6 +334,7 @@ app.use("/api/auth/login", loginRateLimiter);
 app.use("/api/v1/auth/login", loginRateLimiter);
 app.use("/api", apiRouter);
 app.use("/api/v1", apiRouter);
+app.use("/api/v1/integrations", githubIntegrationRouter);
 
 // ======================================================
 // ERROR HANDLING
@@ -353,7 +362,11 @@ app.use(function (err, req, res, next) {
           ? "Terjadi kesalahan pada server."
           : err.message || "Input tidak valid."
     };
-    if (status < 500 && typeof err.code === "string" && err.code.startsWith("PICKET_")) {
+    if (
+      status < 500 &&
+      typeof err.code === "string" &&
+      (err.code.startsWith("PICKET_") || err.code.startsWith("SCRUM_"))
+    ) {
       responseBody.code = err.code;
     }
     return res.status(status).json(responseBody);
