@@ -19,8 +19,16 @@
     "db:migrate-student-leave-picket": "node ./db/runSqlFile.js ./db/migrations/026_link_student_leave_to_picket.sql",
     "db:migrate-picket-unique-tasks": "node ./db/runSqlFile.js ./db/migrations/028_enforce_unique_picket_tasks_per_date.sql",
     "db:migrate-picket-system": "npm run db:migrate-picket-fixed-days && npm run db:migrate-picket-leave-replacement && npm run db:migrate-student-leave-picket && npm run db:migrate-picket-unique-tasks",
+    "db:migrate:scrum-v2": "node ./scripts/runScrumV2Migrations.js",
+    "db:migrate:scrum-v2:staging": "node ./scripts/runScrumV2Migrations.js --staging",
+    "db:fixture:scrum-v2-uat": "node ./scripts/scrumV2UatFixture.js",
+    "db:fixture:scrum-v2-uat:cleanup": "node ./scripts/scrumV2UatFixture.js --cleanup",
     "test": "node --test",
     "test:picket-integration": "RUN_PICKET_INTEGRATION_TESTS=true node --test ./test/picketScheduleUniqueness.integration.test.js",
+    "test:scrum-v2-integration": "RUN_SCRUM_V2_INTEGRATION_TESTS=true node --test ./test/scrumV2Core.integration.test.js",
+    "test:scrum-v2-summary-integration": "RUN_SCRUM_V2_SUMMARY_INTEGRATION_TESTS=true node --test ./test/scrumV2Summary.integration.test.js",
+    "test:scrum-v2-github-integration": "RUN_SCRUM_V2_GITHUB_INTEGRATION_TESTS=true node --test ./test/scrumV2Github.integration.test.js",
+    "test:scrum-v2-migrations": "RUN_SCRUM_V2_MIGRATION_TESTS=true node --test ./test/scrumV2Migrations.integration.test.js",
     "test:security": "node ./scripts/securitySmokeTest.js"
   },
   "dependencies": {
