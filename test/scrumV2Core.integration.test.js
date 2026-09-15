@@ -440,6 +440,45 @@ if (!integrationEnabled) {
         assert.equal(patch.status, 409);
         assert.equal(patch.body.code, "SCRUM_SPRINT_CLOSED");
       });
+
+      await t.test("Sprint date validation: validates start_date and end_date", async () => {
+        // Valid 1-week Sprint: start 2026-09-15, end 2026-09-21
+        const validOneWeek = await api("POST", `/research/${projectIds.primary}/sprints`, {
+          name: "Sprint Valid 1 Week",
+          startDate: "2026-09-15",
+          endDate: "2026-09-21"
+        });
+        assert.equal(validOneWeek.status, 201);
+        assert.equal(validOneWeek.body.sprint.startDate, "2026-09-15");
+        assert.equal(validOneWeek.body.sprint.endDate, "2026-09-21");
+
+        // Valid Custom Sprint: start 2026-09-15, end 2026-10-15
+        const validCustom = await api("POST", `/research/${projectIds.primary}/sprints`, {
+          name: "Sprint Valid Custom",
+          startDate: "2026-09-15",
+          endDate: "2026-10-15"
+        });
+        assert.equal(validCustom.status, 201);
+        assert.equal(validCustom.body.sprint.startDate, "2026-09-15");
+        assert.equal(validCustom.body.sprint.endDate, "2026-10-15");
+
+        // Invalid: start 2026-09-20, end 2026-09-15 (end precedes start)
+        const invalidDate = await api("POST", `/research/${projectIds.primary}/sprints`, {
+          name: "Sprint Invalid Date",
+          startDate: "2026-09-20",
+          endDate: "2026-09-15"
+        });
+        assert.equal(invalidDate.status, 400);
+        assert.match(invalidDate.body.message, /mendahului/i);
+
+        // Invalid update: PATCH with end_date < start_date
+        const invalidPatch = await api("PATCH", `/research/${projectIds.primary}/sprints/${validOneWeek.body.sprint.id}`, {
+          startDate: "2026-09-25",
+          endDate: "2026-09-20"
+        });
+        assert.equal(invalidPatch.status, 400);
+        assert.match(invalidPatch.body.message, /mendahului/i);
+      });
     } finally {
       await cleanup();
     }

@@ -184,7 +184,12 @@ function normalizeOptionalDate(value, label) {
 function formatDateOnly(value) {
   if (!value) return null;
   if (typeof value === "string") return value.slice(0, 10);
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
   return String(value).slice(0, 10);
 }
 
@@ -2416,6 +2421,28 @@ router.get(
   })
 );
 
+function validateSprintDateRange(rawStart, rawEnd) {
+  const startStr = rawStart ? formatDateOnly(rawStart) : null;
+  const endStr = rawEnd ? formatDateOnly(rawEnd) : null;
+
+  if (startStr && !/^\d{4}-\d{2}-\d{2}$/.test(startStr)) {
+    throw createHttpError("Format start_date tidak valid (harus YYYY-MM-DD).", 400);
+  }
+  if (endStr && !/^\d{4}-\d{2}-\d{2}$/.test(endStr)) {
+    throw createHttpError("Format end_date tidak valid (harus YYYY-MM-DD).", 400);
+  }
+  if (startStr && isNaN(Date.parse(startStr))) {
+    throw createHttpError("Nilai start_date tidak valid.", 400);
+  }
+  if (endStr && isNaN(Date.parse(endStr))) {
+    throw createHttpError("Nilai end_date tidak valid.", 400);
+  }
+  if (startStr && endStr && endStr < startStr) {
+    throw createHttpError("end_date tidak boleh mendahului start_date.", 400);
+  }
+  return { startDate: startStr, endDate: endStr };
+}
+
 router.post(
   "/:id/sprints",
   asyncHandler(async (req, res) => {
@@ -2429,6 +2456,11 @@ router.post(
     if (!String(name || "").trim()) {
       return res.status(400).json({ message: "Nama sprint wajib diisi." });
     }
+
+    const { startDate: resolvedStart, endDate: resolvedEnd } = validateSprintDateRange(
+      startDate || start_date || null,
+      endDate || end_date || null
+    );
 
     const sprintId = String(req.body?.id || buildEntityId("SPRINT")).trim();
     const sprintStatus = status == null || status === "" ? "planning" : String(status).trim().toLowerCase();
@@ -2451,8 +2483,8 @@ router.post(
           req.params.id,
           String(name).trim(),
           toNullableText(goal),
-          startDate || start_date || null,
-          endDate || end_date || null,
+          resolvedStart,
+          resolvedEnd,
           sprintStatus
         ]
       );
@@ -2528,6 +2560,14 @@ router.patch(
         await assertSprintCanActivate(client, req.params.id, req.params.sprintId);
       }
 
+      const nextStart = startDate !== undefined || start_date !== undefined
+        ? (startDate || start_date || null)
+        : current.start_date;
+      const nextEnd = endDate !== undefined || end_date !== undefined
+        ? (endDate || end_date || null)
+        : current.end_date;
+      const { startDate: resolvedStart, endDate: resolvedEnd } = validateSprintDateRange(nextStart, nextEnd);
+
       await client.query(
         `
         UPDATE research_sprints
@@ -2548,8 +2588,8 @@ router.patch(
           req.params.sprintId,
           name !== undefined ? String(name).trim() || current.name : current.name,
           goal !== undefined ? toNullableText(goal) : current.goal,
-          startDate !== undefined || start_date !== undefined ? (startDate || start_date || null) : current.start_date,
-          endDate !== undefined || end_date !== undefined ? (endDate || end_date || null) : current.end_date,
+          resolvedStart,
+          resolvedEnd,
           nextStatus
         ]
       );
