@@ -319,7 +319,7 @@ ON CONFLICT (id) DO UPDATE SET
   estimasi = EXCLUDED.estimasi,
   nomor_surat = EXCLUDED.nomor_surat,
   file_url = EXCLUDED.file_url,
-  updated_at = NOW();a
+  updated_at = NOW();
 
 -- ======================================================
 -- CERTIFICATE REQUESTS
