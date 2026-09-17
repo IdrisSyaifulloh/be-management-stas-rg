@@ -448,13 +448,13 @@ router.post(
     const isRisetStudent = String(studentType || "").trim().toLowerCase() === "riset";
     const wfhQuota = Number(studentRow.wfh_quota || 0);
 
-    if (isRisetStudent && jenisPengajuan === "cuti") {
+    if (isRisetStudent && (jenisPengajuan === "cuti" || jenisPengajuan === "wfh")) {
       return res.status(400).json({
-        message: "Mahasiswa Riset tidak dapat mengajukan cuti. Silakan pilih izin atau sakit."
+        message: "Mahasiswa Riset hanya dapat mengajukan izin atau sakit."
       });
     }
 
-    if (jenisPengajuan === "wfh" && !isRisetStudent) {
+    if (jenisPengajuan === "wfh") {
       if (requestedDays !== 1) {
         return res.status(400).json({
           message: "Pengajuan WFH hanya berlaku 1 hari."
@@ -477,7 +477,7 @@ router.post(
     }
 
     const countsAgainstQuota = jenisPengajuan === "cuti" && countsAgainstLeaveQuota !== false;
-    const countsAgainstWfh = jenisPengajuan === "wfh" && !isRisetStudent;
+    const countsAgainstWfh = jenisPengajuan === "wfh";
 
     const settings = await getSettingsAsync();
     const maxSemesterDays = Number(settings?.cuti?.maxSemesterDays || 0);
