@@ -83,8 +83,43 @@ if (!enabled) {
     });
   }
   test("GitHub integration against disposable DB", async (t) => {
+    let originalFetch;
+    let oldEnv;
     try {
+      const kp = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+      oldEnv = { id: process.env.GITHUB_APP_ID, key: process.env.GITHUB_APP_PRIVATE_KEY, secret: process.env.GITHUB_WEBHOOK_SECRET };
+      process.env.GITHUB_APP_ID = "123";
+      process.env.GITHUB_APP_PRIVATE_KEY = kp.privateKey.export({ type: "pkcs1", format: "pem" });
       process.env.GITHUB_WEBHOOK_SECRET = "gh-test-secret";
+      const originalFetch = global.fetch;
+      global.fetch = async (url, opts = {}) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/repos/acme/demo/installation") || urlStr.includes("/repos/acme/other/installation")) {
+          return { ok: true, status: 200, json: async () => ({ id: 161475442 }) };
+        }
+        if (urlStr.includes("/access_tokens")) {
+          return { ok: true, status: 200, json: async () => ({ token: "mock-token" }) };
+        }
+        if (urlStr.includes("/repos/acme/demo")) {
+          return {
+            ok: true, status: 200,
+            json: async () => ({
+              id: 42, name: "demo", full_name: "acme/demo", default_branch: "main",
+              private: false, html_url: "https://github.com/acme/demo", owner: { login: "acme" }
+            })
+          };
+        }
+        if (urlStr.includes("/repos/acme/other")) {
+          return {
+            ok: true, status: 200,
+            json: async () => ({
+              id: 43, name: "other", full_name: "acme/other", default_branch: "main",
+              private: false, html_url: "https://github.com/acme/other", owner: { login: "acme" }
+            })
+          };
+        }
+        return originalFetch(url, opts);
+      };
       await prepareFreshScrumV2Database(pool, process.env.TEST_DATABASE_URL);
       await ensureResearchBoardTables();
       await pool.query("DELETE FROM research_projects WHERE id = ANY($1::text[])", [[ids.project, ids.other]]);
@@ -173,6 +208,17 @@ if (!enabled) {
         const before=(await pool.query("SELECT evaluated_user_id,task_completion,quality,timeliness,collaboration,initiative,overall_score,notes FROM research_sprint_member_evaluations WHERE sprint_id=$1",[`${p}-S1`])).rows; await webhook(`${p}-eval-push`,{repository:{id:42,full_name:"acme/demo",owner:{login:"acme"},name:"demo"},ref:"refs/heads/main",commits:[{id:"eval",message:key}]}); const after=(await pool.query("SELECT evaluated_user_id,task_completion,quality,timeliness,collaboration,initiative,overall_score,notes FROM research_sprint_member_evaluations WHERE sprint_id=$1",[`${p}-S1`])).rows; assert.deepEqual(after,before);
       });
       await t.test("delivery deduplication is concurrency-safe and activity API is authorized", async () => { const payload={repository:{id:42,full_name:"acme/demo",owner:{login:"acme"},name:"demo"},ref:"refs/heads/main",commits:[{id:"dup",message:"TASK-1"}]}; const out=await Promise.all([webhook(`${p}-parallel`,payload),webhook(`${p}-parallel`,payload)]); assert.deepEqual(out.map(x=>x.status).sort(),[200,200]); assert.equal((await pool.query("SELECT COUNT(*) FROM research_github_activities WHERE delivery_id=$1",[`${p}-parallel`])).rows[0].count,"1"); const activity=await api("GET",`/research/${ids.project}/github-activity`); assert.equal(activity.status,200); const denied=await api("GET",`/research/${ids.other}/github-activity`,undefined,headers("mahasiswa",ids.student)); assert.equal(denied.status,403); });
-    } finally { if(server) await new Promise(resolve=>server.close(resolve)); await pool.query("DELETE FROM research_projects WHERE id=ANY($1::text[])",[[ids.project,ids.other]]).catch(()=>{}); await pool.query("DELETE FROM users WHERE id=ANY($1::text[])",[[ids.manager,ids.lecturer,ids.student]]).catch(()=>{}); await pool.end(); }
+    } finally {
+      if (typeof originalFetch === "function") global.fetch = originalFetch;
+      if (oldEnv) {
+        if (oldEnv.id === undefined) delete process.env.GITHUB_APP_ID; else process.env.GITHUB_APP_ID = oldEnv.id;
+        if (oldEnv.key === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY; else process.env.GITHUB_APP_PRIVATE_KEY = oldEnv.key;
+        if (oldEnv.secret === undefined) delete process.env.GITHUB_WEBHOOK_SECRET; else process.env.GITHUB_WEBHOOK_SECRET = oldEnv.secret;
+      }
+      if(server) await new Promise(resolve=>server.close(resolve));
+      await pool.query("DELETE FROM research_projects WHERE id=ANY($1::text[])",[[ids.project,ids.other]]).catch(()=>{});
+      await pool.query("DELETE FROM users WHERE id=ANY($1::text[])",[[ids.manager,ids.lecturer,ids.student]]).catch(()=>{});
+      await pool.end();
+    }
   });
 }

@@ -5,7 +5,9 @@ const { assertStagingEquivalentTarget } = require("./scrumV2DatabaseSafety");
 const MIGRATION_FILES = [
   "029_scrum_v2_core.sql",
   "030_sprint_review_summary.sql",
-  "031_github_integration_scrum_v2.sql"
+  "031_github_integration_scrum_v2.sql",
+  "032_repository_soft_removal.sql",
+  "033_github_multi_repository_deliveries.sql"
 ];
 
 async function runScrumV2Migrations(executor, { log = console.log } = {}) {

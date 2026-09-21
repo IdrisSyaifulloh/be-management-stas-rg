@@ -1976,10 +1976,23 @@ router.patch(
 );
 
 // ── GitHub development evidence integration ──
-const { isGitHubConfigured, createInstallationAccessToken } = require("../../utils/githubApp");
+const { isGitHubConfigured, createInstallationAccessToken, validateGitHubRepository } = require("../../utils/githubApp");
 
 function repositoryDto(row) {
-  return { ...row, projectId: row.project_id, divisionId: row.division_id, githubOwner: row.github_owner, githubRepo: row.github_repo, githubRepositoryId: row.github_repository_id, githubInstallationId: row.github_installation_id, defaultBranch: row.default_branch, isPrivate: row.is_private, isActive: row.is_active };
+  return {
+    ...row,
+    projectId: row.project_id,
+    divisionId: row.division_id,
+    githubOwner: row.github_owner,
+    githubRepo: row.github_repo,
+    githubRepositoryId: row.github_repository_id,
+    githubInstallationId: row.github_installation_id,
+    defaultBranch: row.default_branch,
+    isPrivate: row.is_private,
+    isActive: row.is_active,
+    removedAt: row.removed_at || null,
+    removedBy: row.removed_by || null
+  };
 }
 async function requireRepositoryProject(req, manager = false) {
   const access = await getBoardAccessContext({ req, projectId: req.params.id });
@@ -1995,31 +2008,217 @@ function normalizeGitHubPart(value, label) {
 router.get("/:id/repositories", asyncHandler(async (req, res) => {
   await ensureResearchBoardTables();
   if (!await requireRepositoryProject(req)) return res.status(403).json({ message: "Akses ditolak." });
-  const result = await query("SELECT * FROM research_repositories WHERE project_id = $1 ORDER BY github_owner, github_repo", [req.params.id]);
+  const result = await query("SELECT * FROM research_repositories WHERE project_id = $1 AND removed_at IS NULL ORDER BY github_owner, github_repo", [req.params.id]);
   res.json({ configured: isGitHubConfigured(), repositories: result.rows.map(repositoryDto) });
 }));
+
+router.post("/:id/repositories/validate", asyncHandler(async (req, res) => {
+  await ensureResearchBoardTables();
+  const access = await requireRepositoryProject(req, true);
+  if (!access) return res.status(403).json({ message: "Akses ditolak." });
+  const owner = normalizeGitHubPart(req.body?.owner, "owner");
+  const repo = normalizeGitHubPart(req.body?.repo, "repo");
+  const validated = await validateGitHubRepository({
+    owner,
+    repo,
+    githubInstallationId: req.body?.githubInstallationId
+  });
+  const existing = await query(
+    "SELECT * FROM research_repositories WHERE project_id = $1 AND provider = 'github' AND LOWER(github_owner) = LOWER($2) AND LOWER(github_repo) = LOWER($3) LIMIT 1",
+    [req.params.id, validated.owner, validated.repo]
+  );
+  let alreadyRegistered = false;
+  let canRestore = false;
+  if (existing.rowCount > 0) {
+    if (existing.rows[0].removed_at == null) {
+      alreadyRegistered = true;
+    } else {
+      canRestore = true;
+    }
+  }
+  res.json({
+    valid: true,
+    alreadyRegistered,
+    canRestore,
+    repository: {
+      owner: validated.owner,
+      repo: validated.repo,
+      fullName: validated.fullName,
+      githubRepositoryId: validated.githubRepositoryId,
+      githubInstallationId: validated.githubInstallationId,
+      defaultBranch: validated.defaultBranch,
+      isPrivate: validated.isPrivate,
+      htmlUrl: validated.htmlUrl
+    }
+  });
+}));
+
 router.post("/:id/repositories", asyncHandler(async (req, res) => {
   await ensureResearchBoardTables();
-  const access = await requireRepositoryProject(req, true); if (!access) return res.status(403).json({ message: "Akses ditolak." });
-  const owner = normalizeGitHubPart(req.body?.owner, "owner"); const repo = normalizeGitHubPart(req.body?.repo, "repo");
+  const access = await requireRepositoryProject(req, true);
+  if (!access) return res.status(403).json({ message: "Akses ditolak." });
+  const owner = normalizeGitHubPart(req.body?.owner, "owner");
+  const repo = normalizeGitHubPart(req.body?.repo, "repo");
   const divisionId = req.body?.divisionId ?? req.body?.division_id ?? null;
   if (divisionId) await validateProjectDivision({ projectId: req.params.id, divisionId: String(divisionId), allowInactive: true });
+
+  const validated = await validateGitHubRepository({
+    owner,
+    repo,
+    githubInstallationId: req.body?.githubInstallationId
+  });
+
+  const existing = await query(
+    "SELECT * FROM research_repositories WHERE project_id = $1 AND provider = 'github' AND LOWER(github_owner) = LOWER($2) AND LOWER(github_repo) = LOWER($3) LIMIT 1",
+    [req.params.id, validated.owner, validated.repo]
+  );
+
+  if (existing.rowCount > 0) {
+    const existingRow = existing.rows[0];
+    if (existingRow.removed_at == null) {
+      throw createHttpError("Repository sudah terdaftar pada project ini.", 409, "SCRUM_REPOSITORY_EXISTS");
+    }
+    const restored = await query(
+      `UPDATE research_repositories
+       SET division_id = $3,
+           github_owner = $4,
+           github_repo = $5,
+           github_repository_id = $6,
+           github_installation_id = $7,
+           default_branch = $8,
+           is_private = $9,
+           is_active = TRUE,
+           removed_at = NULL,
+           removed_by = NULL,
+           updated_at = NOW()
+       WHERE project_id = $1 AND id = $2
+       RETURNING *`,
+      [
+        req.params.id,
+        existingRow.id,
+        divisionId || null,
+        validated.owner,
+        validated.repo,
+        validated.githubRepositoryId,
+        validated.githubInstallationId,
+        validated.defaultBranch,
+        validated.isPrivate
+      ]
+    );
+    return res.status(200).json({
+      configured: isGitHubConfigured(),
+      restored: true,
+      repository: repositoryDto(restored.rows[0])
+    });
+  }
+
   const id = String(req.body?.id || buildEntityId("REPO"));
   try {
-    const result = await query(`INSERT INTO research_repositories (id, project_id, division_id, github_owner, github_repo, github_repository_id, github_installation_id, default_branch, is_private, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`, [id, req.params.id, divisionId, owner, repo, req.body?.githubRepositoryId || null, req.body?.githubInstallationId || null, req.body?.defaultBranch || "main", Boolean(req.body?.isPrivate), access.userId]);
+    const result = await query(
+      `INSERT INTO research_repositories (
+         id, project_id, division_id, provider, github_owner, github_repo,
+         github_repository_id, github_installation_id, default_branch, is_private,
+         is_active, created_by, created_at, updated_at
+       ) VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,TRUE,$10,NOW(),NOW())
+       RETURNING *`,
+      [
+        id,
+        req.params.id,
+        divisionId || null,
+        validated.owner,
+        validated.repo,
+        validated.githubRepositoryId,
+        validated.githubInstallationId,
+        validated.defaultBranch,
+        validated.isPrivate,
+        access.userId
+      ]
+    );
     res.status(201).json({ configured: isGitHubConfigured(), repository: repositoryDto(result.rows[0]) });
-  } catch (error) { if (error.code === "23505") throw createHttpError("Repository sudah terdaftar pada project ini.", 409, "SCRUM_REPOSITORY_EXISTS"); throw error; }
+  } catch (error) {
+    if (error.code === "23505") throw createHttpError("Repository sudah terdaftar pada project ini.", 409, "SCRUM_REPOSITORY_EXISTS");
+    throw error;
+  }
 }));
+
+router.delete("/:id/repositories/:repositoryId", asyncHandler(async (req, res) => {
+  await ensureResearchBoardTables();
+  const access = await requireRepositoryProject(req, true);
+  if (!access) return res.status(403).json({ message: "Akses ditolak." });
+  const result = await query(
+    `UPDATE research_repositories
+     SET is_active = FALSE,
+         removed_at = NOW(),
+         removed_by = $3,
+         updated_at = NOW()
+     WHERE project_id = $1 AND id = $2 AND removed_at IS NULL
+     RETURNING *`,
+    [req.params.id, req.params.repositoryId, access.userId]
+  );
+  if (result.rowCount === 0) {
+    throw createHttpError("Repository tidak ditemukan.", 404, "SCRUM_REPOSITORY_NOT_FOUND");
+  }
+  res.json({
+    message: "Repository berhasil dihapus dari riset. Riwayat aktivitas GitHub tetap dipertahankan.",
+    repository: repositoryDto(result.rows[0])
+  });
+}));
+
 router.patch("/:id/repositories/:repositoryId", asyncHandler(async (req, res) => {
   await ensureResearchBoardTables();
-  const access = await requireRepositoryProject(req, true); if (!access) return res.status(403).json({ message: "Akses ditolak." });
-  const current = await query("SELECT * FROM research_repositories WHERE project_id=$1 AND id=$2", [req.params.id, req.params.repositoryId]); if (!current.rowCount) return res.status(404).json({ message: "Repository tidak ditemukan." });
-  const b = req.body || {}; const divisionId = b.divisionId ?? b.division_id ?? current.rows[0].division_id; if (divisionId) await validateProjectDivision({ projectId:req.params.id, divisionId:String(divisionId), allowInactive:true });
-  const result = await query(`UPDATE research_repositories SET division_id=$3, github_installation_id=$4, default_branch=$5, is_private=$6, is_active=$7, updated_at=NOW() WHERE project_id=$1 AND id=$2 RETURNING *`, [req.params.id, req.params.repositoryId, divisionId || null, b.githubInstallationId ?? current.rows[0].github_installation_id, b.defaultBranch || current.rows[0].default_branch, b.isPrivate === undefined ? current.rows[0].is_private : Boolean(b.isPrivate), b.isActive === undefined ? current.rows[0].is_active : Boolean(b.isActive)]);
+  const access = await requireRepositoryProject(req, true);
+  if (!access) return res.status(403).json({ message: "Akses ditolak." });
+  const current = await query(
+    "SELECT * FROM research_repositories WHERE project_id = $1 AND id = $2 AND removed_at IS NULL",
+    [req.params.id, req.params.repositoryId]
+  );
+  if (!current.rowCount) return res.status(404).json({ message: "Repository tidak ditemukan." });
+  const b = req.body || {};
+  const divisionId = b.divisionId ?? b.division_id ?? current.rows[0].division_id;
+  if (divisionId) await validateProjectDivision({ projectId: req.params.id, divisionId: String(divisionId), allowInactive: true });
+  const result = await query(
+    `UPDATE research_repositories
+     SET division_id = $3,
+         github_installation_id = $4,
+         default_branch = $5,
+         is_private = $6,
+         is_active = $7,
+         updated_at = NOW()
+     WHERE project_id = $1 AND id = $2 AND removed_at IS NULL
+     RETURNING *`,
+    [
+      req.params.id,
+      req.params.repositoryId,
+      divisionId || null,
+      b.githubInstallationId ?? current.rows[0].github_installation_id,
+      b.defaultBranch || current.rows[0].default_branch,
+      b.isPrivate === undefined ? current.rows[0].is_private : Boolean(b.isPrivate),
+      b.isActive === undefined ? current.rows[0].is_active : Boolean(b.isActive)
+    ]
+  );
+  if (!result.rowCount) return res.status(404).json({ message: "Repository tidak ditemukan." });
   res.json({ repository: repositoryDto(result.rows[0]) });
 }));
+
 router.get("/:id/board/tasks/:taskId/repositories", asyncHandler(async (req,res)=>{ if(!await requireRepositoryProject(req)) return res.status(403).json({message:"Akses ditolak."}); const r=await query("SELECT l.*, r.github_owner, r.github_repo FROM research_task_repository_links l JOIN research_repositories r ON r.id=l.repository_id WHERE l.task_id=$1 AND r.project_id=$2 ORDER BY l.created_at DESC",[req.params.taskId,req.params.id]); res.json(r.rows); }));
-router.post("/:id/board/tasks/:taskId/repositories", asyncHandler(async(req,res)=>{ const access=await requireRepositoryProject(req,true); if(!access)return res.status(403).json({message:"Akses ditolak."}); const task=await ensureTaskExists(req.params.id,req.params.taskId); if(!task)return res.status(404).json({message:"Task tidak ditemukan."}); const repo=await query("SELECT id FROM research_repositories WHERE id=$1 AND project_id=$2 AND is_active=true",[req.body?.repositoryId,req.params.id]); if(!repo.rowCount)return res.status(400).json({message:"Repository harus berasal dari project yang sama."}); const id=buildEntityId("TRL"); try { const r=await query("INSERT INTO research_task_repository_links (id,task_id,repository_id,branch_name,link_source,created_by) VALUES ($1,$2,$3,$4,'manual',$5) RETURNING *",[id,req.params.taskId,req.body.repositoryId,req.body.branchName||null,access.userId]); res.status(201).json(r.rows[0]); } catch(e){if(e.code==='23505')throw createHttpError("Task sudah terhubung ke repository tersebut.",409,"SCRUM_TASK_REPOSITORY_EXISTS");throw e;} }));
+
+router.post("/:id/board/tasks/:taskId/repositories", asyncHandler(async(req,res)=>{
+  const access=await requireRepositoryProject(req,true);
+  if(!access)return res.status(403).json({message:"Akses ditolak."});
+  const task=await ensureTaskExists(req.params.id,req.params.taskId);
+  if(!task)return res.status(404).json({message:"Task tidak ditemukan."});
+  const repo=await query("SELECT id FROM research_repositories WHERE id=$1 AND project_id=$2 AND is_active=true AND removed_at IS NULL",[req.body?.repositoryId,req.params.id]);
+  if(!repo.rowCount)return res.status(400).json({message:"Repository harus berasal dari project yang sama."});
+  const id=buildEntityId("TRL");
+  try {
+    const r=await query("INSERT INTO research_task_repository_links (id,task_id,repository_id,branch_name,link_source,created_by) VALUES ($1,$2,$3,$4,'manual',$5) RETURNING *",[id,req.params.taskId,req.body.repositoryId,req.body.branchName||null,access.userId]);
+    res.status(201).json(r.rows[0]);
+  } catch(e){
+    if(e.code==='23505')throw createHttpError("Task sudah terhubung ke repository tersebut.",409,"SCRUM_TASK_REPOSITORY_EXISTS");
+    throw e;
+  }
+}));
+
 router.delete("/:id/board/tasks/:taskId/repositories/:repositoryId", asyncHandler(async(req,res)=>{ const access=await requireRepositoryProject(req,true); if(!access)return res.status(403).json({message:"Akses ditolak."}); await query("DELETE FROM research_task_repository_links l USING research_repositories r WHERE l.repository_id=r.id AND l.task_id=$1 AND l.repository_id=$2 AND r.project_id=$3",[req.params.taskId,req.params.repositoryId,req.params.id]); res.status(204).end(); }));
 
 router.get("/:id/board/tasks/:taskId/github-activity", asyncHandler(async(req,res)=>{ if(!await requireRepositoryProject(req))return res.status(403).json({message:"Akses ditolak."}); const limit=Math.min(Math.max(Number(req.query.limit)||50,1),200); const r=await query("SELECT a.* FROM research_github_activities a JOIN research_board_tasks t ON t.id=a.task_id WHERE t.project_id=$1 AND t.id=$2 ORDER BY a.occurred_at DESC NULLS LAST,a.created_at DESC LIMIT $3",[req.params.id,req.params.taskId,limit]); res.json(r.rows); }));

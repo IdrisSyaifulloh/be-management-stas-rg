@@ -1,0 +1,11 @@
+BEGIN;
+
+ALTER TABLE research_repositories
+ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ;
+
+ALTER TABLE research_repositories
+ADD COLUMN IF NOT EXISTS removed_by TEXT
+REFERENCES users(id)
+ON DELETE SET NULL;
+
+COMMIT;

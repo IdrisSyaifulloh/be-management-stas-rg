@@ -169,10 +169,34 @@ async function ensureResearchBoardTables() {
           github_actor_login TEXT, branch_name TEXT, commit_sha TEXT, commit_message TEXT, pull_request_number INTEGER, pull_request_title TEXT,
           pull_request_state TEXT, pull_request_merged BOOLEAN, html_url TEXT, occurred_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), suggested_task_status TEXT
         );
+        CREATE TABLE IF NOT EXISTS research_github_delivery_repositories (
+          delivery_id TEXT NOT NULL REFERENCES research_github_webhook_deliveries(delivery_id) ON DELETE CASCADE,
+          repository_id TEXT NOT NULL REFERENCES research_repositories(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (delivery_id, repository_id)
+        );
         CREATE INDEX IF NOT EXISTS idx_research_repositories_project ON research_repositories(project_id, is_active);
         CREATE INDEX IF NOT EXISTS idx_research_task_repository_links_task ON research_task_repository_links(task_id);
         CREATE INDEX IF NOT EXISTS idx_research_github_activities_repo_time ON research_github_activities(repository_id, occurred_at DESC);
         CREATE INDEX IF NOT EXISTS idx_research_github_activities_task_time ON research_github_activities(task_id, occurred_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_research_github_delivery_repos_repo ON research_github_delivery_repositories(repository_id);
+
+        ALTER TABLE research_repositories
+          ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS removed_by TEXT;
+
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'research_repositories'::regclass
+              AND conname = 'research_repositories_removed_by_fkey'
+          ) THEN
+            ALTER TABLE research_repositories
+              ADD CONSTRAINT research_repositories_removed_by_fkey
+              FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL;
+          END IF;
+        END $$;
       `);
 
       await query(`

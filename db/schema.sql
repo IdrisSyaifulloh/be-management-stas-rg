@@ -355,6 +355,7 @@ CREATE TABLE IF NOT EXISTS research_repositories (
   division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL, provider TEXT NOT NULL DEFAULT 'github' CHECK (provider = 'github'),
   github_owner TEXT NOT NULL, github_repo TEXT NOT NULL, github_repository_id TEXT, github_installation_id TEXT,
   default_branch TEXT NOT NULL DEFAULT 'main', is_private BOOLEAN NOT NULL DEFAULT FALSE, is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  removed_at TIMESTAMPTZ, removed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(project_id, provider, github_owner, github_repo)
 );
@@ -367,6 +368,12 @@ CREATE TABLE IF NOT EXISTS research_task_repository_links (
 CREATE TABLE IF NOT EXISTS research_github_webhook_deliveries (
   delivery_id TEXT PRIMARY KEY, event_name TEXT, repository_id TEXT REFERENCES research_repositories(id) ON DELETE SET NULL,
   received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), processed_at TIMESTAMPTZ, status TEXT NOT NULL DEFAULT 'received' CHECK (status IN ('received','processed','ignored','failed')), error_message TEXT
+);
+CREATE TABLE IF NOT EXISTS research_github_delivery_repositories (
+  delivery_id TEXT NOT NULL REFERENCES research_github_webhook_deliveries(delivery_id) ON DELETE CASCADE,
+  repository_id TEXT NOT NULL REFERENCES research_repositories(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (delivery_id, repository_id)
 );
 CREATE TABLE IF NOT EXISTS research_github_activities (
   id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES research_repositories(id) ON DELETE CASCADE, task_id TEXT REFERENCES research_board_tasks(id) ON DELETE SET NULL,
@@ -839,6 +846,7 @@ CREATE INDEX IF NOT EXISTS idx_research_repositories_project ON research_reposit
 CREATE INDEX IF NOT EXISTS idx_research_task_repository_links_task ON research_task_repository_links(task_id);
 CREATE INDEX IF NOT EXISTS idx_research_github_activities_repo_time ON research_github_activities(repository_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_github_activities_task_time ON research_github_activities(task_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_research_github_delivery_repos_repo ON research_github_delivery_repositories(repository_id);
 CREATE INDEX IF NOT EXISTS idx_student_documents_student ON student_documents(student_id, document_type);
 CREATE INDEX IF NOT EXISTS idx_graduation_submissions_student ON graduation_submissions(student_id, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_graduation_submission_projects_student ON graduation_submission_projects(student_id, project_id);

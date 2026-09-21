@@ -50,7 +50,7 @@ if (!enabled) {
     });
   });
 
-  test("fresh schema plus 029 through 031 passes all integrity checks", async () => {
+  test("fresh schema plus 029 through 033 passes all integrity checks", async () => {
     await prepareFreshScrumV2Database(pool, process.env.TEST_DATABASE_URL);
     assert.deepEqual(await integrityCounts(), {
       duplicate_task_keys: 0,

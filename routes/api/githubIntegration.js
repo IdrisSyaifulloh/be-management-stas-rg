@@ -75,12 +75,16 @@ function createRouter({ pool = database.pool, ensureTables = ensureResearchBoard
       const githubRepository = payload.repository || {};
       const owner = githubRepository.owner?.login || githubRepository.full_name?.split("/")[0] || "";
       const name = githubRepository.name || githubRepository.full_name?.split("/")[1] || "";
-      const repositoryResult = await client.query(
-        "SELECT * FROM research_repositories WHERE (github_repository_id = $1 AND $1 IS NOT NULL) OR (github_owner = $2 AND github_repo = $3) LIMIT 1",
+      const repositoriesResult = await client.query(
+        `SELECT * FROM research_repositories
+         WHERE removed_at IS NULL
+           AND is_active = TRUE
+           AND ((github_repository_id = $1 AND $1 IS NOT NULL) OR (LOWER(github_owner) = LOWER($2) AND LOWER(github_repo) = LOWER($3)))
+         ORDER BY id ASC`,
         [githubRepository.id ? String(githubRepository.id) : null, owner, name]
       );
 
-      if (repositoryResult.rowCount === 0) {
+      if (repositoriesResult.rowCount === 0) {
         const ignored = await client.query(
           "INSERT INTO research_github_webhook_deliveries(delivery_id,event_name,status,processed_at) VALUES($1,$2,'ignored',NOW()) ON CONFLICT DO NOTHING RETURNING delivery_id",
           [delivery, event]
@@ -91,51 +95,75 @@ function createRouter({ pool = database.pool, ensureTables = ensureResearchBoard
           : { ignored: true, reason: "unknown_repository" });
       }
 
-      const repository = repositoryResult.rows[0];
+      const repositories = repositoriesResult.rows;
+      const primaryRepo = repositories[0];
       const claimed = await client.query(
         "INSERT INTO research_github_webhook_deliveries(delivery_id,event_name,repository_id,status) VALUES($1,$2,$3,'received') ON CONFLICT DO NOTHING RETURNING delivery_id",
-        [delivery, event, repository.id]
+        [delivery, event, primaryRepo.id]
       );
       if (claimed.rowCount === 0) {
         await client.query("COMMIT");
         return res.json({ ignored: true, duplicate: true });
       }
 
-      if (afterClaim) await afterClaim({ client, delivery, event, repository });
-
-      const activities = deriveActivities(event, payload);
-      for (const activity of activities) {
-        const taskKey = extractTaskKeys(activity.keyText)[0];
-        const taskResult = taskKey
-          ? await client.query(
-              "SELECT id FROM research_board_tasks WHERE project_id = $1 AND task_key = $2",
-              [repository.project_id, taskKey]
-            )
-          : { rowCount: 0 };
+      for (const repo of repositories) {
         await client.query(
-          `INSERT INTO research_github_activities
-             (id,repository_id,task_id,delivery_id,activity_type,github_actor_login,branch_name,commit_sha,commit_message,
-              pull_request_number,pull_request_title,pull_request_state,pull_request_merged,html_url,occurred_at,suggested_task_status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-          [
-            `GHA-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
-            repository.id,
-            taskResult.rowCount ? taskResult.rows[0].id : null,
-            delivery,
-            activity.type,
-            activity.actor || null,
-            activity.branch || null,
-            activity.sha || null,
-            activity.message || null,
-            activity.number || null,
-            activity.title || null,
-            activity.state || null,
-            activity.merged ?? null,
-            activity.url || null,
-            activity.occurred || null,
-            suggestedTaskStatus(activity.type)
-          ]
+          "INSERT INTO research_github_delivery_repositories(delivery_id,repository_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+          [delivery, repo.id]
         );
+      }
+
+      if (afterClaim) await afterClaim({ client, delivery, event, repository: primaryRepo, repositories });
+
+      const rawActivities = deriveActivities(event, payload);
+      const seenKeys = new Set();
+      const activities = [];
+      for (const act of rawActivities) {
+        const key = act.type === "push"
+          ? `push:${act.sha || act.message}`
+          : `${act.type}:${act.number}:${act.occurred}`;
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          activities.push(act);
+        }
+      }
+
+      let insertedActivitiesCount = 0;
+      for (const repository of repositories) {
+        for (const activity of activities) {
+          const taskKey = extractTaskKeys(activity.keyText)[0];
+          const taskResult = taskKey
+            ? await client.query(
+                "SELECT id FROM research_board_tasks WHERE project_id = $1 AND task_key = $2",
+                [repository.project_id, taskKey]
+              )
+            : { rowCount: 0 };
+          await client.query(
+            `INSERT INTO research_github_activities
+               (id,repository_id,task_id,delivery_id,activity_type,github_actor_login,branch_name,commit_sha,commit_message,
+                pull_request_number,pull_request_title,pull_request_state,pull_request_merged,html_url,occurred_at,suggested_task_status)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+            [
+              `GHA-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+              repository.id,
+              taskResult.rowCount ? taskResult.rows[0].id : null,
+              delivery,
+              activity.type,
+              activity.actor || null,
+              activity.branch || null,
+              activity.sha || null,
+              activity.message || null,
+              activity.number || null,
+              activity.title || null,
+              activity.state || null,
+              activity.merged ?? null,
+              activity.url || null,
+              activity.occurred || null,
+              suggestedTaskStatus(activity.type)
+            ]
+          );
+          insertedActivitiesCount++;
+        }
       }
 
       await client.query(
@@ -143,7 +171,7 @@ function createRouter({ pool = database.pool, ensureTables = ensureResearchBoard
         [delivery]
       );
       await client.query("COMMIT");
-      return res.json({ processed: true, activities: activities.length });
+      return res.json({ processed: true, activities: insertedActivitiesCount, matchedRepositories: repositories.length });
     } catch (error) {
       if (client) await client.query("ROLLBACK").catch(() => {});
       return next(error);

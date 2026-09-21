@@ -22,9 +22,26 @@ function createGitHubAppJwt() {
 async function githubApiRequest(path, options = {}) {
   const token = options.token || createGitHubAppJwt();
   if (!token) throw Object.assign(new Error("GitHub belum dikonfigurasi."), { statusCode: 503, code: "SCRUM_GITHUB_NOT_CONFIGURED" });
-  const response = await fetch(`https://api.github.com${path}`, { ...options, token: undefined, headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, ...(options.headers || {}) } });
+  let response;
+  try {
+    response = await fetch(`https://api.github.com${path}`, {
+      ...options,
+      token: undefined,
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "STAS-RG-Scrum-App",
+        Authorization: `Bearer ${token}`,
+        ...(options.headers || {})
+      }
+    });
+  } catch (netErr) {
+    throw Object.assign(new Error("GitHub API tidak dapat memvalidasi repository saat ini. Silakan coba kembali."), {
+      statusCode: 502,
+      code: "SCRUM_GITHUB_API_UNAVAILABLE"
+    });
+  }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw Object.assign(new Error(body.message || "GitHub API error."), { statusCode: response.status });
+  if (!response.ok) throw Object.assign(new Error(body.message || "GitHub API error."), { statusCode: response.status, body });
   return body;
 }
 async function createInstallationAccessToken(installationId) {
@@ -33,4 +50,99 @@ async function createInstallationAccessToken(installationId) {
   if (!jwt) throw Object.assign(new Error("GitHub belum dikonfigurasi."), { statusCode: 503, code: "SCRUM_GITHUB_NOT_CONFIGURED" });
   return githubApiRequest(`/app/installations/${installationId}/access_tokens`, { method: "POST", token: jwt });
 }
-module.exports = { isGitHubConfigured, createGitHubAppJwt, createInstallationAccessToken, githubApiRequest };
+
+async function validateGitHubRepository({ owner, repo, githubInstallationId } = {}) {
+  if (!isGitHubConfigured()) {
+    throw Object.assign(new Error("GitHub belum dikonfigurasi."), { statusCode: 503, code: "SCRUM_GITHUB_NOT_CONFIGURED" });
+  }
+
+  let installation;
+  try {
+    installation = await githubApiRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`);
+  } catch (error) {
+    if (error.code === "SCRUM_GITHUB_NOT_CONFIGURED") throw error;
+    if (error.statusCode === 404 || error.statusCode === 403 || error.statusCode === 401) {
+      throw Object.assign(
+        new Error("Repository tidak ditemukan atau GitHub App STAS-RG Scrum belum memiliki akses ke repository tersebut."),
+        { statusCode: 404, code: "SCRUM_GITHUB_REPOSITORY_NOT_ACCESSIBLE" }
+      );
+    }
+    throw Object.assign(
+      new Error("GitHub API tidak dapat memvalidasi repository saat ini. Silakan coba kembali."),
+      { statusCode: 502, code: "SCRUM_GITHUB_API_UNAVAILABLE" }
+    );
+  }
+
+  if (!installation || !installation.id) {
+    throw Object.assign(
+      new Error("Repository tidak ditemukan atau GitHub App STAS-RG Scrum belum memiliki akses ke repository tersebut."),
+      { statusCode: 404, code: "SCRUM_GITHUB_REPOSITORY_NOT_ACCESSIBLE" }
+    );
+  }
+
+  const expectedInstallationId = String(installation.id);
+  if (githubInstallationId !== undefined && githubInstallationId !== null && String(githubInstallationId).trim() !== "") {
+    if (String(githubInstallationId).trim() !== expectedInstallationId) {
+      throw Object.assign(
+        new Error("Installation ID tidak sesuai dengan GitHub App installation repository ini."),
+        { statusCode: 409, code: "SCRUM_GITHUB_INSTALLATION_MISMATCH" }
+      );
+    }
+  }
+
+  let tokenData;
+  try {
+    tokenData = await createInstallationAccessToken(expectedInstallationId);
+  } catch (error) {
+    if (error.code === "SCRUM_GITHUB_NOT_CONFIGURED") throw error;
+    throw Object.assign(
+      new Error("GitHub API tidak dapat memvalidasi repository saat ini. Silakan coba kembali."),
+      { statusCode: 502, code: "SCRUM_GITHUB_API_UNAVAILABLE" }
+    );
+  }
+
+  if (!tokenData?.token) {
+    throw Object.assign(
+      new Error("GitHub API tidak dapat memvalidasi repository saat ini. Silakan coba kembali."),
+      { statusCode: 502, code: "SCRUM_GITHUB_API_UNAVAILABLE" }
+    );
+  }
+
+  let repoData;
+  try {
+    repoData = await githubApiRequest(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
+      token: tokenData.token
+    });
+  } catch (error) {
+    if (error.statusCode === 404 || error.statusCode === 403 || error.statusCode === 401) {
+      throw Object.assign(
+        new Error("Repository tidak ditemukan atau GitHub App STAS-RG Scrum belum memiliki akses ke repository tersebut."),
+        { statusCode: 404, code: "SCRUM_GITHUB_REPOSITORY_NOT_ACCESSIBLE" }
+      );
+    }
+    throw Object.assign(
+      new Error("GitHub API tidak dapat memvalidasi repository saat ini. Silakan coba kembali."),
+      { statusCode: 502, code: "SCRUM_GITHUB_API_UNAVAILABLE" }
+    );
+  }
+
+  if (!repoData || !repoData.id) {
+    throw Object.assign(
+      new Error("Repository tidak ditemukan atau GitHub App STAS-RG Scrum belum memiliki akses ke repository tersebut."),
+      { statusCode: 404, code: "SCRUM_GITHUB_REPOSITORY_NOT_ACCESSIBLE" }
+    );
+  }
+
+  return {
+    owner: repoData.owner?.login || owner,
+    repo: repoData.name || repo,
+    fullName: repoData.full_name || `${owner}/${repo}`,
+    githubRepositoryId: String(repoData.id),
+    githubInstallationId: expectedInstallationId,
+    defaultBranch: repoData.default_branch || "main",
+    isPrivate: Boolean(repoData.private),
+    htmlUrl: repoData.html_url || `https://github.com/${owner}/${repo}`
+  };
+}
+
+module.exports = { isGitHubConfigured, createGitHubAppJwt, createInstallationAccessToken, githubApiRequest, validateGitHubRepository };
