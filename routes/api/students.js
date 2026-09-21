@@ -108,9 +108,17 @@ function hasOwn(object, key) {
 }
 
 function normalizeOptionalDateField(value, fieldLabel) {
-  if (value == null || value === "") return null;
+  if (value == null) return null;
 
   const normalized = String(value).trim();
+  if (
+    normalized === "" ||
+    normalized === "-" ||
+    normalized.toLowerCase() === "null" ||
+    normalized.toLowerCase() === "undefined"
+  ) {
+    return null;
+  }
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
     const error = new Error(`${fieldLabel} wajib format YYYY-MM-DD.`);
@@ -141,7 +149,14 @@ function normalizeNonNegativeInteger(value, fieldName) {
 
 function normalizeOptionalEmail(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized) return null;
+  if (
+    !normalized ||
+    normalized === "-" ||
+    normalized === "null" ||
+    normalized === "undefined"
+  ) {
+    return null;
+  }
 
   if (normalized.length > 160 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
     const error = new Error("Email mahasiswa wajib berupa alamat email valid.");
@@ -280,9 +295,7 @@ async function resolveResearchMemberships(input, fallbackBergabung) {
   }
 
   if (missing.length > 0) {
-    const error = new Error(`Riset tidak ditemukan: ${missing.join(", ")}`);
-    error.statusCode = 400;
-    throw error;
+    console.warn(`[resolveResearchMemberships] Beberapa riset tidak ditemukan di sistem: ${missing.join(", ")}`);
   }
 
   return resolved;
