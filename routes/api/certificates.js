@@ -172,7 +172,8 @@ router.get(
         cr.file_url,
         cr.created_at,
         cr.updated_at,
-        (cr.id IS NULL) AS is_virtual
+        (cr.id IS NULL) AS is_virtual,
+        COALESCE(gs_cert.certificate_eligible, TRUE) AS certificate_eligible
       FROM research_memberships rm_mahasiswa
       JOIN research_projects rp ON rp.id = rm_mahasiswa.project_id
       JOIN students s ON s.user_id = rm_mahasiswa.user_id
@@ -181,6 +182,13 @@ router.get(
       LEFT JOIN users ru ON ru.id = cr.requested_by
       LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id
       LEFT JOIN research_memberships rm_dosen ON rm_dosen.project_id = rp.id
+      LEFT JOIN LATERAL (
+        SELECT certificate_eligible
+        FROM graduation_submissions gs
+        WHERE gs.student_id = s.id
+        ORDER BY gs.is_archived ASC, gs.created_at DESC
+        LIMIT 1
+      ) gs_cert ON TRUE
       ${whereClause}
       ORDER BY rp.id ASC, su.name ASC
       LIMIT 500
@@ -213,6 +221,24 @@ router.post(
     const resolvedStudentId = await resolveStudentId(String(studentId));
     if (!resolvedStudentId) {
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
+    }
+
+    // Cek apakah mahasiswa lulus tanpa berkas (certificate_eligible = false)
+    const gradCheck = await query(
+      `
+      SELECT certificate_eligible
+      FROM graduation_submissions
+      WHERE student_id = $1
+      ORDER BY is_archived ASC, created_at DESC
+      LIMIT 1
+      `,
+      [resolvedStudentId]
+    );
+
+    if (gradCheck.rowCount > 0 && gradCheck.rows[0].certificate_eligible === false) {
+      return res.status(403).json({
+        message: "Sertifikat tidak dapat diajukan karena mahasiswa diluluskan dengan dispensasi tanpa melengkapi berkas kelulusan. Silakan lengkapi berkas kelulusan terlebih dahulu."
+      });
     }
 
     if (role === "mahasiswa") {
@@ -263,6 +289,30 @@ router.patch(
 
     if (!status || !["Belum Diminta", "Diproses", "Terbit"].includes(status)) {
       return res.status(400).json({ message: "status harus Belum Diminta/Diproses/Terbit." });
+    }
+
+    if (status === "Terbit") {
+      const targetReq = await query(
+        `SELECT student_id FROM certificate_requests WHERE id = $1 LIMIT 1`,
+        [req.params.id]
+      );
+      if (targetReq.rowCount > 0) {
+        const gradCheck = await query(
+          `
+          SELECT certificate_eligible
+          FROM graduation_submissions
+          WHERE student_id = $1
+          ORDER BY is_archived ASC, created_at DESC
+          LIMIT 1
+          `,
+          [targetReq.rows[0].student_id]
+        );
+        if (gradCheck.rowCount > 0 && gradCheck.rows[0].certificate_eligible === false) {
+          return res.status(400).json({
+            message: "Sertifikat tidak dapat diterbitkan karena mahasiswa diluluskan dengan dispensasi tanpa melengkapi berkas kelulusan."
+          });
+        }
+      }
     }
 
     let uploadedFileUrl = null;

@@ -8,6 +8,9 @@ const {
   getRequiredSpecialFieldsForRole,
   assertHttpUrl,
   normalizeFieldReviews,
+  areAllRequiredDocumentsFulfilled,
+  areAllRequiredDocumentsFilled,
+  graduateStudentDirectly,
   mapSubmissionRow,
   mapSubmissionProjectRow
 } = require("../../utils/graduationSubmissions");
@@ -803,6 +806,7 @@ router.patch("/:id/projects/:projectRowId/fields/:fieldKey/review", asyncHandler
           reviewed_by = $3,
           reviewed_at = NOW(),
           review_note = $4,
+          certificate_eligible = CASE WHEN $2 = 'Valid' THEN TRUE ELSE certificate_eligible END,
           graduation_allowed_by = CASE WHEN $2 = 'Valid' THEN graduation_allowed_by ELSE NULL END,
           graduation_allowed_at = CASE WHEN $2 = 'Valid' THEN graduation_allowed_at ELSE NULL END,
           graduation_completed_by = CASE WHEN $2 = 'Valid' THEN graduation_completed_by ELSE NULL END,
@@ -967,6 +971,84 @@ router.post("/:id/allow-graduation", asyncHandler(async (req, res) => {
   const detail = await getSubmissionDetailById(submissionId);
   res.json({
     message: "Akses lulus berhasil diberikan. Mahasiswa sekarang bisa klik Jadi Alumni STAS-RG.",
+    ...detail
+  });
+}));
+
+router.post("/:id/graduate-by-admin", asyncHandler(async (req, res) => {
+  if (!requireOperator(req, res)) return;
+
+  await ensureGraduationSubmissionsTables();
+
+  const submissionId = String(req.params.id || "").trim();
+  const submissionRes = await query(
+    `
+    SELECT gs.*, s.status AS student_status
+    FROM graduation_submissions gs
+    JOIN students s ON s.id = gs.student_id
+    WHERE gs.id = $1
+    LIMIT 1
+    `,
+    [submissionId]
+  );
+
+  if (submissionRes.rowCount === 0) {
+    return res.status(404).json({ message: "Submit berkas kelulusan tidak ditemukan." });
+  }
+
+  const submission = submissionRes.rows[0];
+  if (submission.student_status === "Alumni") {
+    return res.status(400).json({ message: "Mahasiswa ini sudah berstatus Alumni STAS-RG." });
+  }
+
+  const projectsRes = await query(
+    `SELECT * FROM graduation_submission_projects WHERE submission_id = $1`,
+    [submissionId]
+  );
+  const isFulfilled = areAllRequiredDocumentsFulfilled(projectsRes.rows);
+
+  const note = req.body?.note || (isFulfilled
+    ? "Diluluskan langsung oleh Admin/Operator (Berkas lengkap)."
+    : "Diluluskan langsung oleh Admin/Operator tanpa berkas lengkap (Sertifikat ditangguhkan).");
+
+  await graduateStudentDirectly({
+    studentId: submission.student_id,
+    operatorUserId: req.authUser.id,
+    note,
+    certificateEligible: isFulfilled
+  });
+
+  const detail = await getSubmissionDetailById(submissionId);
+  res.json({
+    message: isFulfilled
+      ? "Mahasiswa berhasil diluluskan menjadi Alumni STAS-RG oleh Admin (Berkas lengkap, sertifikat berhak terbit)."
+      : "Mahasiswa berhasil diluluskan menjadi Alumni STAS-RG oleh Admin (Dispensasi: berkas belum lengkap, sertifikat ditangguhkan).",
+    ...detail
+  });
+}));
+
+router.post("/direct-graduate", asyncHandler(async (req, res) => {
+  if (!requireOperator(req, res)) return;
+
+  await ensureGraduationSubmissionsTables();
+
+  const studentId = String(req.body?.studentId || "").trim();
+  if (!studentId) {
+    return res.status(400).json({ message: "studentId wajib diisi." });
+  }
+
+  const note = req.body?.note || "Diluluskan langsung oleh Admin/Operator tanpa berkas kelulusan (Sertifikat ditangguhkan).";
+
+  const result = await graduateStudentDirectly({
+    studentId,
+    operatorUserId: req.authUser.id,
+    note,
+    certificateEligible: false
+  });
+
+  const detail = await getSubmissionDetailById(result.submissionId);
+  res.json({
+    message: "Mahasiswa berhasil diluluskan menjadi Alumni STAS-RG oleh Admin (Dispensasi: berkas belum lengkap, sertifikat ditangguhkan).",
     ...detail
   });
 }));
@@ -1192,6 +1274,11 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
     // mahasiswa diizinkan menjadi Alumni meskipun belum semua link ACC.
     // Guard graduation_allowed_at di atas sudah cukup sebagai penjaga utama.
 
+    const isEligible = areAllRequiredDocumentsFulfilled(projectsResult.rows);
+    const selfFinalizeNote = isEligible
+      ? "Mahasiswa sudah konfirmasi Jadi Alumni STAS-RG (Berkas lengkap)."
+      : "Mahasiswa konfirmasi Jadi Alumni STAS-RG via dispensasi izin Admin (Sertifikat ditangguhkan).";
+
     await client.query(
       `
       UPDATE students
@@ -1220,12 +1307,13 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
       SET status = 'Valid',
           graduation_completed_by = $2,
           graduation_completed_at = COALESCE(graduation_completed_at, NOW()),
-          review_note = 'Mahasiswa sudah klik Jadi Alumni STAS-RG.',
+          review_note = $3,
+          certificate_eligible = $4,
           is_archived = TRUE,
           updated_at = NOW()
       WHERE id = $1
       `,
-      [submission.id, req.authUser.id]
+      [submission.id, req.authUser.id, selfFinalizeNote, isEligible]
     );
 
     await client.query(
@@ -1240,7 +1328,8 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
           student_id: submission.student_id,
           submission_id: submission.id,
           previous_status: submission.student_status,
-          new_status: "Alumni"
+          new_status: "Alumni",
+          certificate_eligible: isEligible
         })
       ]
     );
@@ -1257,7 +1346,9 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
   const refreshedSaved = await getSavedSubmission(refreshedStudent.id);
 
   res.json({
-    message: "Status Anda berhasil menjadi Alumni STAS-RG.",
+    message: isEligible
+      ? "Status Anda berhasil menjadi Alumni STAS-RG."
+      : "Status Anda berhasil menjadi Alumni STAS-RG (Dispensasi: Sertifikat belum diterbitkan sampai berkas dilengkapi).",
     ...buildProjectResponse({
       student: refreshedStudent,
       submission: refreshedSaved.submission,

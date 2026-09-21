@@ -983,7 +983,98 @@ router.put(
         });
       }
 
+      const isGraduating = previousStatus !== "Alumni" && status === "Alumni";
+
+      if (isGraduating) {
+        // 1. Update research memberships
+        await query(
+          `
+          UPDATE research_memberships
+          SET peran = 'Alumni',
+              selesai = COALESCE(selesai, CURRENT_DATE)
+          WHERE user_id = $1
+            AND member_type = 'Mahasiswa'
+            AND COALESCE(status, 'Aktif') = 'Aktif'
+          `,
+          [userId]
+        );
+
+        // 2. Update existing graduation submission or insert new one
+        const subCheck = await query(
+          `SELECT id FROM graduation_submissions WHERE student_id = $1 LIMIT 1`,
+          [studentId]
+        );
+
+        if (subCheck.rowCount > 0) {
+          await query(
+            `
+            UPDATE graduation_submissions
+            SET status = 'Valid',
+                graduation_allowed_by = COALESCE(graduation_allowed_by, $2),
+                graduation_allowed_at = COALESCE(graduation_allowed_at, NOW()),
+                graduation_completed_by = $2,
+                graduation_completed_at = NOW(),
+                review_note = 'Diluluskan langsung oleh Admin melalui Database Mahasiswa (Sertifikat ditangguhkan).',
+                certificate_eligible = FALSE,
+                is_archived = TRUE,
+                updated_at = NOW()
+            WHERE student_id = $1
+            `,
+            [studentId, req.authUser?.id || null]
+          );
+        } else {
+          await query(
+            `
+            INSERT INTO graduation_submissions (
+              id, student_id, user_id, status, submitted_at,
+              graduation_allowed_by, graduation_allowed_at,
+              graduation_completed_by, graduation_completed_at,
+              review_note, certificate_eligible, is_archived, created_at, updated_at
+            )
+            VALUES (
+              $1, $2, $3, 'Valid', NOW(),
+              $4, NOW(),
+              $4, NOW(),
+              'Diluluskan langsung oleh Admin melalui Database Mahasiswa (Sertifikat ditangguhkan).',
+              FALSE, TRUE, NOW(), NOW()
+            )
+            `,
+            [`GRD-${crypto.randomUUID()}`, studentId, userId, req.authUser?.id || null]
+          );
+        }
+
+        // 3. Audit log
+        await query(
+          `
+          INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+          VALUES ($1, $2, 'Operator', 'Update', 'graduation_by_admin', $3)
+          `,
+          [
+            `aud_grad_${Date.now()}`,
+            req.authUser?.id || null,
+            JSON.stringify({
+              student_id: studentId,
+              previous_status: previousStatus,
+              new_status: "Alumni",
+              source: "database_mahasiswa",
+              certificate_eligible: false
+            })
+          ]
+        );
+      }
+
       await query("COMMIT");
+
+      if (isGraduating) {
+        createNotification({
+          recipientUserId: userId,
+          senderUserId: req.authUser?.id || null,
+          type: "kelulusan",
+          title: "Kelulusan STAS-RG Disetujui",
+          body: "Selamat! Admin telah meluluskan Anda dan status Anda kini resmi menjadi Alumni STAS-RG. Catatan: Sertifikat kelulusan belum diterbitkan karena berkas kelulusan belum lengkap.",
+          eventId: `graduation_by_admin:${studentId}:${Date.now()}`
+        }).catch(() => null);
+      }
 
       return res.json({
         message: "Data mahasiswa berhasil diperbarui.",

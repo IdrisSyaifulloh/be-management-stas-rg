@@ -1,4 +1,6 @@
-const { query } = require("../db/pool");
+const crypto = require("crypto");
+const { pool, query } = require("../db/pool");
+const { createNotification } = require("./notificationService");
 
 const COMMON_GRADUATION_FIELDS = Object.freeze([
   "reportUrl",
@@ -7,6 +9,25 @@ const COMMON_GRADUATION_FIELDS = Object.freeze([
   "demoVideoUrl",
   "githubUrl"
 ]);
+
+const REQUIRED_COMMON_REVIEW_FIELD_KEYS = Object.freeze([
+  "reportUrl",
+  "productPhotoFolderUrl",
+  "manualBookUrl",
+  "demoVideoUrl"
+]);
+
+const FIELD_TO_DB_COLUMN = Object.freeze({
+  reportUrl: "report_url",
+  productPhotoFolderUrl: "product_photo_folder_url",
+  manualBookUrl: "manual_book_url",
+  demoVideoUrl: "demo_video_url",
+  githubUrl: "github_url",
+  repositoryUrl: "repository_url",
+  deployedUrl: "deployed_url",
+  datasetModelUrl: "dataset_model_url",
+  designDocumentationUrl: "design_documentation_url"
+});
 
 const SPECIAL_FIELD_DEFINITIONS = Object.freeze({
   repositoryUrl: {
@@ -57,7 +78,8 @@ async function ensureGraduationSubmissionsTables() {
           graduation_completed_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          is_archived BOOLEAN NOT NULL DEFAULT FALSE
+          is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          certificate_eligible BOOLEAN NOT NULL DEFAULT TRUE
         );
 
         CREATE TABLE IF NOT EXISTS graduation_submission_projects (
@@ -98,7 +120,8 @@ async function ensureGraduationSubmissionsTables() {
           ADD COLUMN IF NOT EXISTS graduation_completed_at TIMESTAMPTZ,
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
+          ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS certificate_eligible BOOLEAN NOT NULL DEFAULT TRUE;
 
         ALTER TABLE graduation_submissions DROP CONSTRAINT IF EXISTS graduation_submissions_student_id_key;
 
@@ -265,6 +288,8 @@ function mapSubmissionRow(row) {
     graduation_completed_by: row.graduation_completed_by,
     graduationCompletedAt: row.graduation_completed_at,
     graduation_completed_at: row.graduation_completed_at,
+    certificateEligible: row.certificate_eligible !== false,
+    certificate_eligible: row.certificate_eligible !== false,
     createdAt: row.created_at,
     created_at: row.created_at,
     updatedAt: row.updated_at,
@@ -275,6 +300,253 @@ function mapSubmissionRow(row) {
 function normalizeFieldReviews(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value;
+}
+
+function areAllRequiredDocumentsFulfilled(projectRows) {
+  if (!projectRows || !Array.isArray(projectRows) || projectRows.length === 0) return false;
+
+  for (const project of projectRows) {
+    const fieldReviews = normalizeFieldReviews(project.field_reviews || project.fieldReviews);
+    const positionLabel = project.position_label || project.positionLabel || "Anggota";
+    const specialFields = getRequiredSpecialFieldsForRole(positionLabel);
+    const requiredKeys = new Set(REQUIRED_COMMON_REVIEW_FIELD_KEYS);
+
+    for (const field of specialFields) {
+      if (field?.key && field.required !== false) {
+        requiredKeys.add(field.key);
+      }
+    }
+
+    for (const key of requiredKeys) {
+      const dbCol = FIELD_TO_DB_COLUMN[key] || key;
+      const val = String(project[key] ?? project[dbCol] ?? "").trim();
+      if (!val) return false;
+      const reviewStatus = fieldReviews[key]?.status;
+      if (reviewStatus !== "accepted") return false;
+    }
+  }
+
+  return true;
+}
+
+function areAllRequiredDocumentsFilled(projectRows) {
+  if (!projectRows || !Array.isArray(projectRows) || projectRows.length === 0) return false;
+
+  for (const project of projectRows) {
+    const positionLabel = project.position_label || project.positionLabel || "Anggota";
+    const specialFields = getRequiredSpecialFieldsForRole(positionLabel);
+    const requiredKeys = new Set(REQUIRED_COMMON_REVIEW_FIELD_KEYS);
+
+    for (const field of specialFields) {
+      if (field?.key && field.required !== false) {
+        requiredKeys.add(field.key);
+      }
+    }
+
+    for (const key of requiredKeys) {
+      const dbCol = FIELD_TO_DB_COLUMN[key] || key;
+      const val = String(project[key] ?? project[dbCol] ?? "").trim();
+      if (!val) return false;
+    }
+  }
+
+  return true;
+}
+
+async function graduateStudentDirectly({
+  studentId,
+  operatorUserId,
+  note = null,
+  certificateEligible = null,
+  client = null
+}) {
+  const shouldManageTransaction = !client;
+  const dbClient = client || await pool.connect();
+
+  try {
+    if (shouldManageTransaction) {
+      await dbClient.query("BEGIN");
+    }
+
+    const studentRes = await dbClient.query(
+      `
+      SELECT s.*, u.name AS student_name, u.id AS user_id
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.id = $1
+      FOR UPDATE OF s
+      `,
+      [studentId]
+    );
+
+    if (studentRes.rowCount === 0) {
+      const err = new Error("Data mahasiswa tidak ditemukan.");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const student = studentRes.rows[0];
+    const previousStatus = student.status;
+
+    if (previousStatus === "Alumni") {
+      const err = new Error("Mahasiswa ini sudah berstatus Alumni STAS-RG.");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // 1. Update students table
+    await dbClient.query(
+      `
+      UPDATE students
+      SET status = 'Alumni',
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [studentId]
+    );
+
+    // 2. Update research memberships
+    await dbClient.query(
+      `
+      UPDATE research_memberships
+      SET peran = 'Alumni',
+          selesai = COALESCE(selesai, CURRENT_DATE)
+      WHERE user_id = $1
+        AND member_type = 'Mahasiswa'
+        AND COALESCE(status, 'Aktif') = 'Aktif'
+      `,
+      [student.user_id]
+    );
+
+    // 3. Check existing graduation submission
+    const existingSubmissionRes = await dbClient.query(
+      `
+      SELECT id, status, graduation_allowed_at, certificate_eligible
+      FROM graduation_submissions
+      WHERE student_id = $1
+      ORDER BY is_archived ASC, created_at DESC
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [studentId]
+    );
+
+    let isEligible = certificateEligible;
+    let submissionId = null;
+
+    if (existingSubmissionRes.rowCount > 0) {
+      submissionId = existingSubmissionRes.rows[0].id;
+      if (isEligible === null) {
+        const projectsRes = await dbClient.query(
+          `SELECT * FROM graduation_submission_projects WHERE submission_id = $1`,
+          [submissionId]
+        );
+        isEligible = areAllRequiredDocumentsFulfilled(projectsRes.rows);
+      }
+    } else {
+      submissionId = `GRD-${crypto.randomUUID()}`;
+      if (isEligible === null) {
+        isEligible = false;
+      }
+    }
+
+    const graduationNote = note || (isEligible
+      ? "Diluluskan langsung oleh Admin/Operator (Berkas lengkap)."
+      : "Diluluskan langsung oleh Admin/Operator tanpa berkas lengkap (Sertifikat ditangguhkan).");
+
+    if (existingSubmissionRes.rowCount > 0) {
+      await dbClient.query(
+        `
+        UPDATE graduation_submissions
+        SET status = 'Valid',
+            reviewed_by = COALESCE(reviewed_by, $2),
+            reviewed_at = COALESCE(reviewed_at, NOW()),
+            graduation_allowed_by = COALESCE(graduation_allowed_by, $2),
+            graduation_allowed_at = COALESCE(graduation_allowed_at, NOW()),
+            graduation_completed_by = $2,
+            graduation_completed_at = NOW(),
+            review_note = $3,
+            is_archived = TRUE,
+            certificate_eligible = $4,
+            updated_at = NOW()
+        WHERE id = $1
+        `,
+        [submissionId, operatorUserId, graduationNote, isEligible]
+      );
+    } else {
+      await dbClient.query(
+        `
+        INSERT INTO graduation_submissions (
+          id, student_id, user_id, status, submitted_at,
+          reviewed_by, reviewed_at, graduation_allowed_by, graduation_allowed_at,
+          graduation_completed_by, graduation_completed_at, is_archived,
+          certificate_eligible, review_note, created_at, updated_at
+        )
+        VALUES (
+          $1, $2, $3, 'Valid', NOW(),
+          $4, NOW(), $4, NOW(),
+          $4, NOW(), TRUE,
+          $5, $6, NOW(), NOW()
+        )
+        `,
+        [submissionId, studentId, student.user_id, operatorUserId, isEligible, graduationNote]
+      );
+    }
+
+    // 4. Audit log
+    await dbClient.query(
+      `
+      INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
+      VALUES ($1, $2, 'Operator', 'Update', 'graduation_by_admin', $3)
+      `,
+      [
+        `AUD-${crypto.randomUUID()}`,
+        operatorUserId,
+        JSON.stringify({
+          student_id: studentId,
+          submission_id: submissionId,
+          previous_status: previousStatus,
+          new_status: "Alumni",
+          certificate_eligible: isEligible,
+          note: graduationNote
+        })
+      ]
+    );
+
+    if (shouldManageTransaction) {
+      await dbClient.query("COMMIT");
+    }
+
+    const notificationBody = isEligible
+      ? "Selamat! Admin telah meluluskan Anda dan status Anda kini resmi menjadi Alumni STAS-RG. Berkas Anda telah lengkap untuk penerbitan sertifikat."
+      : "Selamat! Admin telah meluluskan Anda dan status Anda kini resmi menjadi Alumni STAS-RG. Catatan: Sertifikat kelulusan belum diterbitkan karena berkas kelulusan belum lengkap.";
+
+    await createNotification({
+      recipientUserId: student.user_id,
+      senderUserId: operatorUserId,
+      type: "kelulusan",
+      title: "Kelulusan STAS-RG Disetujui",
+      body: notificationBody,
+      eventId: `graduation_by_admin:${submissionId}:${Date.now()}`
+    }).catch(() => null);
+
+    return {
+      studentId,
+      submissionId,
+      studentName: student.student_name,
+      userId: student.user_id,
+      certificateEligible: isEligible
+    };
+  } catch (error) {
+    if (shouldManageTransaction) {
+      await dbClient.query("ROLLBACK");
+    }
+    throw error;
+  } finally {
+    if (shouldManageTransaction) {
+      dbClient.release();
+    }
+  }
 }
 
 function mapSubmissionProjectRow(row) {
@@ -320,11 +592,16 @@ function mapSubmissionProjectRow(row) {
 
 module.exports = {
   COMMON_GRADUATION_FIELDS,
+  REQUIRED_COMMON_REVIEW_FIELD_KEYS,
+  FIELD_TO_DB_COLUMN,
   SPECIAL_FIELD_DEFINITIONS,
   ensureGraduationSubmissionsTables,
   getRequiredSpecialFieldsForRole,
   assertHttpUrl,
   normalizeFieldReviews,
+  areAllRequiredDocumentsFulfilled,
+  areAllRequiredDocumentsFilled,
+  graduateStudentDirectly,
   mapSubmissionRow,
   mapSubmissionProjectRow
 };
