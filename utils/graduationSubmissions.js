@@ -360,6 +360,9 @@ async function graduateStudentDirectly({
   certificateEligible = null,
   client = null
 }) {
+  if (!client) {
+    await ensureGraduationSubmissionsTables();
+  }
   const shouldManageTransaction = !client;
   const dbClient = client || await pool.connect();
 

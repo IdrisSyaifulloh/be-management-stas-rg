@@ -20,6 +20,12 @@ app.set('port', port);
  */
 
 var server = http.createServer(app);
+var { ensureDatabaseAutoMigrated } = require('../db/autoMigrate');
+
+/**
+ * Auto-generate and migrate database on startup.
+ */
+ensureDatabaseAutoMigrated();
 
 /**
  * Listen on provided port, on all network interfaces.

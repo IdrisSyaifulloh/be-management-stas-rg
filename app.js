@@ -18,6 +18,7 @@ var { studentAccessLockMiddleware } = require("./utils/studentAccessLocks");
 var { hasControlChars } = require("./utils/securityValidation");
 var { revokeJwtSession, verifyJwtSession, extendJwtSessionIfNeeded, JWT_SESSION_TTL_MS } = require("./utils/jwtSessionStore");
 var { getAuthCookieOptions } = require("./utils/authCookieOptions");
+var { ensureDatabaseAutoMigrated } = require("./db/autoMigrate");
 
 var envValidationResult = validateEnv();
 var INACTIVE_ACCOUNT_MESSAGE = "Akun Anda tidak aktif. Silakan hubungi administrator.";
@@ -323,6 +324,16 @@ weeklyResearchAttendanceSuspensionJob.startMonitoring();
 
 var picketScheduleJob = require("./jobs/picketScheduleScheduler");
 picketScheduleJob.startMonitoring();
+
+// ======================================================
+// DATABASE AUTO-GENERATION / MIGRATION ENSURE
+// ======================================================
+app.use(async function (req, res, next) {
+  if (req.path.startsWith("/api")) {
+    await ensureDatabaseAutoMigrated();
+  }
+  next();
+});
 
 // ======================================================
 // ROUTES

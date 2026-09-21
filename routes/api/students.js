@@ -24,6 +24,9 @@ const {
   removeStudentDocumentFile,
   saveStudentDocumentFile
 } = require("../../utils/studentDocuments");
+const {
+  ensureGraduationSubmissionsTables
+} = require("../../utils/graduationSubmissions");
 
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
@@ -824,6 +827,7 @@ router.put(
     } = req.body;
 
     await ensureStudentColumns();
+    await ensureGraduationSubmissionsTables();
 
     let normalizedEmail;
     const hasEmail = hasOwn(req.body || {}, "email");
@@ -857,10 +861,12 @@ router.put(
       }
     }
 
-    await query("BEGIN");
+    const client = await pool.connect();
 
     try {
-      const studentRecord = await query(
+      await client.query("BEGIN");
+
+      const studentRecord = await client.query(
         `
         SELECT 
           s.id AS student_id,
@@ -870,12 +876,13 @@ router.put(
         FROM students s
         WHERE s.id = $1 OR s.user_id = $1
         LIMIT 1
+        FOR UPDATE OF s
         `,
         [id]
       );
 
       if (studentRecord.rowCount === 0) {
-        await query("ROLLBACK");
+        await client.query("ROLLBACK");
         return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
       }
 
@@ -893,10 +900,10 @@ router.put(
       }
 
       if (hasEmail) {
-        await ensureEmailAvailable(normalizedEmail, userId);
+        await ensureEmailAvailable(normalizedEmail, userId, client);
       }
 
-      await query(
+      await client.query(
         `
         UPDATE users
         SET 
@@ -913,7 +920,7 @@ router.put(
 
       const isWithdrawing = previousStatus !== "Mengundurkan Diri" && status === "Mengundurkan Diri";
 
-      await query(
+      await client.query(
         `
         UPDATE students
         SET 
@@ -955,7 +962,7 @@ router.put(
         const roleMap = { mahasiswa: "Mahasiswa", dosen: "Dosen", operator: "Operator" };
         const auditRole = roleMap[authUser?.role] || "Operator";
 
-        await query(
+        await client.query(
           `
           INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
           VALUES ($1, $2, $3, 'Update', 'student_withdrawal', $4)
@@ -979,7 +986,8 @@ router.put(
       if (hasResearchSelections) {
         await syncStudentResearchMemberships({
           userId,
-          researchMemberships: resolvedResearchMemberships
+          researchMemberships: resolvedResearchMemberships,
+          executor: client
         });
       }
 
@@ -987,26 +995,25 @@ router.put(
 
       if (isGraduating) {
         // 1. Update research memberships
-        await query(
+        await client.query(
           `
           UPDATE research_memberships
           SET peran = 'Alumni',
               selesai = COALESCE(selesai, CURRENT_DATE)
           WHERE user_id = $1
             AND member_type = 'Mahasiswa'
-            AND COALESCE(status, 'Aktif') = 'Aktif'
           `,
           [userId]
         );
 
         // 2. Update existing graduation submission or insert new one
-        const subCheck = await query(
-          `SELECT id FROM graduation_submissions WHERE student_id = $1 LIMIT 1`,
+        const subCheck = await client.query(
+          `SELECT id FROM graduation_submissions WHERE student_id = $1 LIMIT 1 FOR UPDATE`,
           [studentId]
         );
 
         if (subCheck.rowCount > 0) {
-          await query(
+          await client.query(
             `
             UPDATE graduation_submissions
             SET status = 'Valid',
@@ -1023,7 +1030,7 @@ router.put(
             [studentId, req.authUser?.id || null]
           );
         } else {
-          await query(
+          await client.query(
             `
             INSERT INTO graduation_submissions (
               id, student_id, user_id, status, submitted_at,
@@ -1044,7 +1051,7 @@ router.put(
         }
 
         // 3. Audit log
-        await query(
+        await client.query(
           `
           INSERT INTO audit_logs (id, user_id, user_role, action, target, detail)
           VALUES ($1, $2, 'Operator', 'Update', 'graduation_by_admin', $3)
@@ -1063,7 +1070,7 @@ router.put(
         );
       }
 
-      await query("COMMIT");
+      await client.query("COMMIT");
 
       if (isGraduating) {
         createNotification({
@@ -1085,7 +1092,7 @@ router.put(
         })
       });
     } catch (error) {
-      await query("ROLLBACK");
+      await client.query("ROLLBACK");
       if (error?.statusCode) {
         return res.status(error.statusCode).json({ message: error.message });
       }
@@ -1093,6 +1100,8 @@ router.put(
         return res.status(409).json({ message: "Email sudah digunakan oleh akun lain." });
       }
       throw error;
+    } finally {
+      client.release();
     }
   })
 );

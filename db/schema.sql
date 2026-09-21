@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS graduation_submissions (
   graduation_completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  is_archived BOOLEAN NOT NULL DEFAULT FALSE
+  is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+  certificate_eligible BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_graduation_submissions_active 

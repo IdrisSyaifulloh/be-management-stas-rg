@@ -6,7 +6,7 @@
     "start": "node ./bin/www",
     "dev": "nodemon ./bin/www",
     "check:config": "node ./scripts/checkConfig.js",
-    "db:migrate": "node ./db/runSqlFile.js ./db/schema.sql",
+    "db:migrate": "node ./db/autoMigrate.js",
     "db:seed": "node ./db/runSqlFile.js ./db/seed.sql",
     "db:clear": "node ./db/runSqlFile.js ./db/clear.sql",
     "db:create-operator": "node ./db/runSqlFile.js ./db/create_operator.sql",
