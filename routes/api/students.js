@@ -14,6 +14,7 @@ const crypto = require("crypto");
 const { createNotification } = require("../../utils/notificationService");
 const {
   assignPicketDayForStudent,
+  cleanupAlumniPicketData,
   ensurePicketTables
 } = require("../../utils/picketService");
 const {
@@ -1005,6 +1006,10 @@ router.put(
       }
 
       const isGraduating = previousStatus !== "Alumni" && status === "Alumni";
+
+      if (status === "Alumni" || status === "Lulus") {
+        await cleanupAlumniPicketData(studentId, client);
+      }
 
       if (isGraduating) {
         // 1. Update research memberships

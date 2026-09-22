@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const asyncHandler = require("../../utils/asyncHandler");
 const { createNotification } = require("../../utils/notificationService");
 const { pool, query } = require("../../db/pool");
+const { cleanupAlumniPicketData } = require("../../utils/picketService");
 const {
   ensureGraduationSubmissionsTables,
   getRequiredSpecialFieldsForRole,
@@ -1288,6 +1289,8 @@ router.post("/me/finalize-alumni", asyncHandler(async (req, res) => {
       `,
       [submission.student_id]
     );
+
+    await cleanupAlumniPicketData(submission.student_id, client);
 
     await client.query(
       `

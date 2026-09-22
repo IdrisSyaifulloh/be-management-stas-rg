@@ -765,14 +765,17 @@ router.post(
       }
     }
 
-    const picketRequirement = await getPicketCheckoutRequirement(resolvedStudentId, todayIso);
-    if (picketRequirement.required) {
-      return res.status(409).json({
-        message: "Upload foto piket hari ini terlebih dahulu sebelum check-out.",
-        picketRequired: true,
-        date: todayIso,
-        assignment: picketRequirement.assignment
-      });
+    const isAlumni = student.status === "Alumni" || student.status === "Lulus";
+    if (!isAlumni) {
+      const picketRequirement = await getPicketCheckoutRequirement(resolvedStudentId, todayIso);
+      if (picketRequirement.required) {
+        return res.status(409).json({
+          message: "Upload foto piket hari ini terlebih dahulu sebelum check-out.",
+          picketRequired: true,
+          date: todayIso,
+          assignment: picketRequirement.assignment
+        });
+      }
     }
 
     const settings = await getSettingsAsync();

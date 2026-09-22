@@ -1,4 +1,5 @@
 const { query } = require("../db/pool");
+const { cleanupAlumniPicketData } = require("../utils/picketService");
 
 const ONE_DAY = 24 * 60 * 60 * 1000;
 
@@ -56,6 +57,7 @@ async function promoteExpiredToAlumni() {
         `UPDATE students SET status = 'Alumni', updated_at = NOW() WHERE id = $1`,
         [student.id]
       );
+      await cleanupAlumniPicketData(student.id, query);
 
       const auditId = `aud_alumni_${Date.now()}_${student.id}`;
       await query(

@@ -373,6 +373,9 @@ app.use(function (err, req, res, next) {
           ? "Terjadi kesalahan pada server."
           : err.message || "Input tidak valid."
     };
+    if (typeof err.success === "boolean") {
+      responseBody.success = err.success;
+    }
     if (
       status < 500 &&
       typeof err.code === "string" &&

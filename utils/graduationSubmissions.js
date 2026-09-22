@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { pool, query } = require("../db/pool");
 const { createNotification } = require("./notificationService");
+const { cleanupAlumniPicketData } = require("./picketService");
 
 const COMMON_GRADUATION_FIELDS = Object.freeze([
   "reportUrl",
@@ -407,6 +408,8 @@ async function graduateStudentDirectly({
       `,
       [studentId]
     );
+
+    await cleanupAlumniPicketData(studentId, dbClient);
 
     // 2. Update research memberships
     await dbClient.query(

@@ -1369,7 +1369,7 @@ async function listPicketStudentOptions() {
   await ensurePicketTables();
   const result = await query(
     `
-    SELECT s.id, s.nim, s.tipe, u.name, u.initials,
+    SELECT s.id, s.nim, s.tipe, s.status, u.name, u.initials,
            psd.day_id, TO_CHAR(psd.effective_from, 'YYYY-MM-DD') AS effective_from_text,
            pd.name AS day_name
     FROM students s
@@ -1377,6 +1377,7 @@ async function listPicketStudentOptions() {
     LEFT JOIN picket_student_days psd ON psd.student_id = s.id
     LEFT JOIN picket_days pd ON pd.id = psd.day_id
     WHERE s.status = 'Aktif'
+      AND s.status NOT IN ('Alumni', 'Lulus')
       AND u.is_active = TRUE
     ORDER BY u.name ASC
     `
@@ -1391,6 +1392,9 @@ async function listPicketStudentOptions() {
     nim: row.nim || null,
     initials: row.initials || String(row.name || "M").slice(0, 2).toUpperCase(),
     tipe: row.tipe || null,
+    status: row.status,
+    is_alumni: row.status === "Alumni" || row.status === "Lulus",
+    isAlumni: row.status === "Alumni" || row.status === "Lulus",
     day_id: row.day_id == null ? null : Number(row.day_id),
     dayId: row.day_id == null ? null : Number(row.day_id),
     day_name: row.day_name || null,
@@ -1404,17 +1408,27 @@ async function ensureStudentCanBeScheduled(studentId, executor = query) {
   const result = await runQuery(
     executor,
     `
-    SELECT s.id
+    SELECT s.id, s.status, u.is_active
     FROM students s
-    JOIN users u ON u.id = s.user_id
+    LEFT JOIN users u ON u.id = s.user_id
     WHERE s.id = $1
-      AND s.status = 'Aktif'
-      AND u.is_active = TRUE
     LIMIT 1
     `,
     [studentId]
   );
   if (result.rowCount === 0) {
+    const error = new Error("Mahasiswa tidak valid atau tidak aktif.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const student = result.rows[0];
+  if (student.status === "Alumni" || student.status === "Lulus") {
+    const error = new Error("Mahasiswa berstatus Alumni tidak dapat dijadwalkan piket.");
+    error.statusCode = 422;
+    error.success = false;
+    throw error;
+  }
+  if (student.status !== "Aktif" || student.is_active !== true) {
     const error = new Error("Mahasiswa tidak valid atau tidak aktif.");
     error.statusCode = 400;
     throw error;
@@ -1895,6 +1909,9 @@ async function isPicketManagerUser(userId) {
   await ensurePicketTables();
   const student = await resolveStudentRecord(userId);
   if (!student) return false;
+  if (student.status === "Alumni" || student.status === "Lulus" || student.status !== "Aktif") {
+    return false;
+  }
 
   const result = await query(
     "SELECT 1 FROM picket_managers WHERE student_id = $1 LIMIT 1",
@@ -1934,13 +1951,33 @@ async function replacePicketManagers(studentIds = [], createdBy = null) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    if (uniqueStudentIds.length > 0) {
+      const studentCheck = await client.query(
+        "SELECT id, status FROM students WHERE id = ANY($1)",
+        [uniqueStudentIds]
+      );
+      const alumni = studentCheck.rows.find((s) => s.status === "Alumni" || s.status === "Lulus");
+      if (alumni) {
+        const error = new Error("Mahasiswa berstatus Alumni tidak dapat dijadikan PIC piket.");
+        error.statusCode = 422;
+        error.success = false;
+        throw error;
+      }
+      const nonActive = studentCheck.rows.find((s) => s.status !== "Aktif");
+      if (nonActive) {
+        const error = new Error("PIC piket hanya boleh mahasiswa aktif.");
+        error.statusCode = 422;
+        error.success = false;
+        throw error;
+      }
+    }
     await client.query("DELETE FROM picket_managers");
     for (const studentId of uniqueStudentIds) {
       await client.query(
         `
         INSERT INTO picket_managers (student_id, created_by)
         SELECT $1, $2
-        WHERE EXISTS (SELECT 1 FROM students WHERE id = $1)
+        WHERE EXISTS (SELECT 1 FROM students WHERE id = $1 AND status = 'Aktif')
         ON CONFLICT (student_id) DO NOTHING
         `,
         [studentId, createdBy]
@@ -2104,6 +2141,7 @@ async function setPicketStudentDay({ studentId, dayId, assignedBy = null } = {})
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await ensureStudentCanBeScheduled(normalizedStudentId, client);
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", ["picket-student-day-assignment"]);
     const { dayIds } = await getFixedPicketDayConfig(client);
     if (!dayIds.includes(normalizedDayId)) {
@@ -2152,7 +2190,9 @@ async function randomizePicketStudentDays({ assignedBy = null, random = Math.ran
       SELECT s.id
       FROM students s
       JOIN users u ON u.id = s.user_id
-      WHERE s.status = 'Aktif' AND u.is_active = TRUE
+      WHERE s.status = 'Aktif'
+        AND s.status NOT IN ('Alumni', 'Lulus')
+        AND u.is_active = TRUE
       ORDER BY s.id ASC
       `
     );
@@ -2169,6 +2209,14 @@ async function randomizePicketStudentDays({ assignedBy = null, random = Math.ran
         AND u.id = s.user_id
         AND s.status = 'Aktif'
         AND u.is_active = TRUE
+      `
+    );
+    await client.query(
+      `
+      DELETE FROM picket_student_days
+      WHERE student_id IN (
+        SELECT id FROM students WHERE status IN ('Alumni', 'Lulus') OR status != 'Aktif'
+      )
       `
     );
     for (const assignment of assignments) {
@@ -2288,12 +2336,29 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
       WHERE psd.day_id = $1
         AND psd.effective_from <= $2::date
         AND s.status = 'Aktif'
+        AND s.status NOT IN ('Alumni', 'Lulus')
         AND u.is_active = TRUE
       ORDER BY psd.student_id ASC
       `,
       [dayOfWeek, targetDate]
     );
     weeklyStudentIds = fixedStudents.rows.map((row) => row.student_id);
+
+    await runQuery(
+      client,
+      `
+      DELETE FROM picket_schedules
+      WHERE schedule_date = $1::date
+        AND status = 'Ditugaskan'
+        AND student_id IN (
+          SELECT id FROM students WHERE status IN ('Alumni', 'Lulus') OR status != 'Aktif'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = picket_schedules.id
+        )
+      `,
+      [targetDate]
+    );
 
     const existing = await runQuery(
       client,
@@ -2541,10 +2606,26 @@ async function getPicketOverview(date) {
 
 async function getPicketTodayForStudent(studentIdOrUserId, date = getJakartaDateIso()) {
   await ensurePicketTables();
-  const studentId = await resolveStudentId(studentIdOrUserId);
-  if (!studentId) {
+  const student = await resolveStudentRecord(studentIdOrUserId);
+  if (!student) {
     return { assignment: null, fixedDay: null, fixed_day: null, holiday: null, isHoliday: false, is_holiday: false };
   }
+  if (student.status === "Alumni" || student.status === "Lulus") {
+    return {
+      assignment: null,
+      isExempt: true,
+      is_exempt: true,
+      isAlumni: true,
+      is_alumni: true,
+      message: "Mahasiswa berstatus Alumni bebas tugas piket.",
+      fixed_day: null,
+      fixedDay: null,
+      holiday: null,
+      is_holiday: false,
+      isHoliday: false
+    };
+  }
+  const studentId = student.id;
   const targetDate = normalizeIsoDate(date, getJakartaDateIso());
   const holiday = await getPicketHolidayByDate(targetDate);
   if (!holiday) await materializePicketSchedulesForDate(targetDate);
@@ -2811,7 +2892,47 @@ function buildPicketCheckoutRequirement({
   };
 }
 
+async function cleanupAlumniPicketData(studentId, executor = query) {
+  if (!studentId) return;
+  await runQuery(
+    executor,
+    `
+    DELETE FROM picket_schedules
+    WHERE student_id = $1
+      AND schedule_date >= CURRENT_DATE
+      AND status = 'Ditugaskan'
+      AND NOT EXISTS (
+        SELECT 1 FROM picket_submissions ps WHERE ps.schedule_id = picket_schedules.id
+      )
+    `,
+    [studentId]
+  );
+  await runQuery(
+    executor,
+    `DELETE FROM picket_student_days WHERE student_id = $1`,
+    [studentId]
+  );
+  await runQuery(
+    executor,
+    `DELETE FROM picket_managers WHERE student_id = $1`,
+    [studentId]
+  );
+}
+
 async function getPicketCheckoutRequirement(studentIdOrUserId, date = getJakartaDateIso()) {
+  const student = await resolveStudentRecord(studentIdOrUserId);
+  if (student && (student.status === "Alumni" || student.status === "Lulus")) {
+    return {
+      required: false,
+      submitted: false,
+      isExempt: true,
+      is_exempt: true,
+      reason: "ALUMNI_EXEMPT",
+      assignment: null,
+      holiday: null
+    };
+  }
+
   const today = await getPicketTodayForStudent(studentIdOrUserId, date);
   const assignment = today.assignment;
   if (today.isHoliday || !assignment) {
@@ -2844,6 +2965,14 @@ async function createPicketSubmission(payload = {}) {
   if (!scheduleId || !studentId) {
     const error = new Error("scheduleId dan studentId wajib diisi.");
     error.statusCode = 400;
+    throw error;
+  }
+
+  const student = await resolveStudentRecord(studentId);
+  if (student && (student.status === "Alumni" || student.status === "Lulus")) {
+    const error = new Error("Mahasiswa berstatus Alumni tidak dapat melakukan tugas piket.");
+    error.statusCode = 422;
+    error.success = false;
     throw error;
   }
 
@@ -3597,6 +3726,7 @@ module.exports = {
   chooseLeastLoadedPicketDay,
   chooseRandomPicketTask,
   shufflePicketTasks,
+  cleanupAlumniPicketData,
   createPicketHoliday,
   createPicketLeaveRequest,
   createPicketSchedule,
