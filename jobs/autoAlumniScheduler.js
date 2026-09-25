@@ -58,6 +58,19 @@ async function promoteExpiredToAlumni() {
         [student.id]
       );
       await cleanupAlumniPicketData(student.id, query);
+      await query(
+        `
+        UPDATE student_access_locks
+        SET status = 'UNLOCKED',
+            locked = FALSE,
+            active = FALSE,
+            unlocked_at = COALESCE(unlocked_at, NOW()),
+            updated_at = NOW()
+        WHERE student_id = $1
+          AND active = TRUE
+        `,
+        [student.id]
+      );
 
       const auditId = `aud_alumni_${Date.now()}_${student.id}`;
       await query(

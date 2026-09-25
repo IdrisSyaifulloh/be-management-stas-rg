@@ -519,6 +519,18 @@ router.post(
       return res.status(404).json({ message: "Mahasiswa tidak ditemukan." });
     }
 
+    const studentCheck = await query(
+      `SELECT status FROM students WHERE id = $1 LIMIT 1`,
+      [resolvedStudentId]
+    );
+    const studentStatus = studentCheck.rows[0]?.status;
+    if (studentStatus && studentStatus !== "Aktif") {
+      return res.status(403).json({
+        message: "Mahasiswa berstatus Alumni/Non-Aktif tidak memiliki kewajiban absensi.",
+        code: "STUDENT_NOT_ACTIVE"
+      });
+    }
+
     // Run migrations first so WFH/Izin/Sakit/Libur status values are accepted
     await ensureAttendanceColumns();
 
@@ -705,7 +717,7 @@ router.post(
 
     const studentResult = await query(
       `
-      SELECT s.id, s.user_id, s.nim, s.tipe, u.name,
+      SELECT s.id, s.user_id, s.nim, s.tipe, s.status, u.name,
              COALESCE(s.jam_minggu_ini, 0)::numeric AS jam_minggu_ini,
              COALESCE(s.jam_minggu_target, 0)::numeric AS jam_minggu_target,
              TO_CHAR(s.created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS active_start_date
@@ -722,6 +734,13 @@ router.post(
     }
 
     const student = studentResult.rows[0];
+
+    if (student.status && student.status !== "Aktif") {
+      return res.status(403).json({
+        message: "Mahasiswa berstatus Alumni/Non-Aktif tidak memiliki kewajiban absensi.",
+        code: "STUDENT_NOT_ACTIVE"
+      });
+    }
     const todayIso = getJakartaDateIso();
 
     const todayRecord = await query(
@@ -1238,6 +1257,7 @@ router.get(
       FROM students s
       JOIN users u ON u.id = s.user_id
       WHERE u.is_active = TRUE
+        AND s.status = 'Aktif'
       LIMIT 1000
       `
     );

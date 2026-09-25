@@ -1009,6 +1009,20 @@ router.put(
 
       if (status === "Alumni" || status === "Lulus") {
         await cleanupAlumniPicketData(studentId, client);
+        await client.query(
+          `
+          UPDATE student_access_locks
+          SET status = 'UNLOCKED',
+              locked = FALSE,
+              active = FALSE,
+              unlocked_at = COALESCE(unlocked_at, NOW()),
+              unlocked_by = $2,
+              updated_at = NOW()
+          WHERE student_id = $1
+            AND active = TRUE
+          `,
+          [studentId, req.authUser?.id || null]
+        );
       }
 
       if (isGraduating) {

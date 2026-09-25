@@ -110,7 +110,6 @@ async function ensureStudentAccessLockTable() {
               WHERE ar.student_id = sal.student_id
                 AND ar.attendance_date = sal.lock_date
                 AND ar.status = 'WFH'
-            )
             OR EXISTS (
               SELECT 1 FROM leave_requests lr
               WHERE lr.student_id = sal.student_id
@@ -118,6 +117,20 @@ async function ensureStudentAccessLockTable() {
                 AND LOWER(BTRIM(lr.status)) = 'disetujui'
             )
           )
+      `);
+
+      // Auto-unlock any locks for students who are not active (Alumni, Cuti, Mengundurkan Diri, etc.)
+      await query(`
+        UPDATE student_access_locks sal
+        SET status = 'UNLOCKED',
+            locked = FALSE,
+            active = FALSE,
+            unlocked_at = COALESCE(sal.unlocked_at, NOW()),
+            updated_at = NOW()
+        FROM students s
+        WHERE sal.student_id = s.id
+          AND s.status <> 'Aktif'
+          AND sal.active = TRUE
       `);
     })();
   }
@@ -226,7 +239,10 @@ async function createStudentAccessLocks({ studentIds, date, reason, reactivateUn
         id, student_id, lock_date, reason, status, locked, active, locked_at
       )
       SELECT $1, $2, $3::date, $4, 'LOCKED', TRUE, TRUE, NOW()
-      WHERE NOT EXISTS (
+      FROM students s
+      WHERE s.id = $2
+        AND s.status = 'Aktif'
+        AND NOT EXISTS (
         SELECT 1
         FROM student_access_locks existing
         WHERE existing.student_id = $2
@@ -246,6 +262,9 @@ async function createStudentAccessLocks({ studentIds, date, reason, reactivateUn
                     updated_at = NOW()
       WHERE $5::boolean = TRUE
         AND (
+          SELECT s2.status FROM students s2 WHERE s2.id = $2
+        ) = 'Aktif'
+        AND (
           student_access_locks.active = FALSE
           OR student_access_locks.locked = FALSE
           OR student_access_locks.status <> 'LOCKED'
@@ -258,6 +277,27 @@ async function createStudentAccessLocks({ studentIds, date, reason, reactivateUn
   }
 
   return created;
+}
+
+async function deactivateAllAccessLocksForStudent(studentId, unlockedBy = null) {
+  if (!studentId) return [];
+  await ensureStudentAccessLockTable();
+  const result = await query(
+    `
+    UPDATE student_access_locks
+    SET status = 'UNLOCKED',
+        locked = FALSE,
+        active = FALSE,
+        unlocked_at = COALESCE(unlocked_at, NOW()),
+        unlocked_by = COALESCE($2, unlocked_by),
+        updated_at = NOW()
+    WHERE student_id = $1
+      AND active = TRUE
+    RETURNING id
+    `,
+    [studentId, unlockedBy || null]
+  );
+  return result.rows.map((row) => row.id);
 }
 
 async function deactivateAttendanceAbsentLocksForDate({ date, unlockedBy = null } = {}) {
@@ -539,7 +579,9 @@ async function createOverduePicketSubmissionMissingLocksForStudent(studentId, re
     `
     SELECT DISTINCT TO_CHAR(psch.schedule_date, 'YYYY-MM-DD') AS schedule_date_text
     FROM picket_schedules psch
+    JOIN students s ON s.id = psch.student_id
     WHERE psch.student_id = $1
+      AND s.status = 'Aktif'
       AND psch.schedule_date < $2::date
       AND psch.status <> 'Selesai'
       AND NOT (psch.schedule_date = ANY($4::date[]))
@@ -887,6 +929,7 @@ module.exports = {
   createRisetWeeklyHoursUnderTargetLocks,
   createStudentAccessLocks,
   createWorkHoursUnder8Locks,
+  deactivateAllAccessLocksForStudent,
   deactivateAttendanceAbsentLocksForConfiguredHolidays,
   deactivateAttendanceAbsentLocksForDate,
   ensureStudentAccessLockTable,

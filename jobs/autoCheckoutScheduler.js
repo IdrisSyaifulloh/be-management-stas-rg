@@ -198,6 +198,8 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
     FROM affected
     JOIN students s ON s.id = affected.student_id
     JOIN users u ON u.id = s.user_id
+    WHERE s.status = 'Aktif'
+      AND u.is_active = TRUE
     `,
     [targetDate, checkoutTime, AUTO_REASON]
   );

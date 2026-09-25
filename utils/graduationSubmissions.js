@@ -411,6 +411,21 @@ async function graduateStudentDirectly({
 
     await cleanupAlumniPicketData(studentId, dbClient);
 
+    await dbClient.query(
+      `
+      UPDATE student_access_locks
+      SET status = 'UNLOCKED',
+          locked = FALSE,
+          active = FALSE,
+          unlocked_at = COALESCE(unlocked_at, NOW()),
+          unlocked_by = $2,
+          updated_at = NOW()
+      WHERE student_id = $1
+        AND active = TRUE
+      `,
+      [studentId, operatorUserId || null]
+    );
+
     // 2. Update research memberships
     await dbClient.query(
       `
