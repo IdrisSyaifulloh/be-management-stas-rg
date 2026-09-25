@@ -57,7 +57,8 @@ let ensureTablePromise = null;
 async function ensureStudentAccessLockTable() {
   if (!ensureTablePromise) {
     ensureTablePromise = (async () => {
-      await query(`
+      try {
+        await query(`
         CREATE TABLE IF NOT EXISTS student_access_locks (
           id TEXT PRIMARY KEY,
           student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -110,6 +111,7 @@ async function ensureStudentAccessLockTable() {
               WHERE ar.student_id = sal.student_id
                 AND ar.attendance_date = sal.lock_date
                 AND ar.status = 'WFH'
+            )
             OR EXISTS (
               SELECT 1 FROM leave_requests lr
               WHERE lr.student_id = sal.student_id
@@ -132,6 +134,13 @@ async function ensureStudentAccessLockTable() {
           AND s.status <> 'Aktif'
           AND sal.active = TRUE
       `);
+      } catch (err) {
+        if (err.code === "ECONNREFUSED" || err.code === "ENOTFOUND") {
+          ensureTablePromise = null;
+          return;
+        }
+        throw err;
+      }
     })();
   }
   await ensureTablePromise;

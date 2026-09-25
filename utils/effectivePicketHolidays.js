@@ -128,7 +128,7 @@ async function listEffectivePicketHolidays({
   settings = null,
   executor = query
 } = {}) {
-  const activeSettings = settings || await getSettingsAsync();
+  const activeSettings = settings || (await getSettingsAsync().catch(() => null));
   const picketHolidays = await fetchSpecificPicketHolidays({ startDate, endDate, executor });
   const effective = mergeEffectivePicketHolidays({ settings: activeSettings, picketHolidays });
   const normalizedStart = normalizeHolidayDate(startDate);

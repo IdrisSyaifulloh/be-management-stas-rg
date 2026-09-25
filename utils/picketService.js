@@ -136,7 +136,8 @@ async function savePicketPhoto(photoDataUrl, originalFileName) {
 async function ensurePicketTables() {
   if (!ensureTablesPromise) {
     ensureTablesPromise = (async () => {
-      await query(`
+      try {
+        await query(`
         CREATE TABLE IF NOT EXISTS picket_tasks (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -409,6 +410,13 @@ async function ensurePicketTables() {
       );
 
       await initializePicketStudentDays();
+      } catch (err) {
+        if (err.code === "ECONNREFUSED" || err.code === "ENOTFOUND") {
+          ensureTablesPromise = null;
+          return;
+        }
+        throw err;
+      }
     })();
   }
 

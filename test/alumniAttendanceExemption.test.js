@@ -51,3 +51,23 @@ test("deactivateAllAccessLocksForStudent safely handles empty studentId", async 
   const emptyResult = await deactivateAllAccessLocksForStudent("");
   assert.deepEqual(emptyResult, []);
 });
+
+test("studentAccessLocks SQL queries have balanced parentheses", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const content = fs.readFileSync(path.join(__dirname, "../utils/studentAccessLocks.js"), "utf8");
+
+  // Extract all template literals inside query(`...`)
+  const regex = /query\(\s*`([\s\S]*?)`/g;
+  let match;
+  while ((match = regex.exec(content)) !== null) {
+    const sql = match[1];
+    let openCount = 0;
+    for (let i = 0; i < sql.length; i++) {
+      if (sql[i] === "(") openCount++;
+      if (sql[i] === ")") openCount--;
+      assert.ok(openCount >= 0, `Premature closing parenthesis in SQL: ${sql.slice(Math.max(0, i - 30), i + 30)}`);
+    }
+    assert.equal(openCount, 0, `Unbalanced parentheses in SQL query: ${sql}`);
+  }
+});
