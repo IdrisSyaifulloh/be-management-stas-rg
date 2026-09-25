@@ -51,7 +51,7 @@ async function deleteExpiredWithdrawnAccounts() {
           [
             auditId,
             null,
-            'System',
+            'Operator',
             'Delete',
             'student_account_cleanup',
             JSON.stringify({

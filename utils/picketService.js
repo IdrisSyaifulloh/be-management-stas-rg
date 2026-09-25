@@ -207,9 +207,13 @@ async function ensurePicketTables() {
           updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          UNIQUE(schedule_date, student_id),
-          UNIQUE(schedule_date, task_id)
+          UNIQUE(schedule_date, student_id)
         );
+
+        ALTER TABLE picket_schedules
+        DROP CONSTRAINT IF EXISTS picket_schedules_schedule_date_task_id_key;
+
+        DROP INDEX IF EXISTS picket_schedules_date_task_unique;
 
         CREATE TABLE IF NOT EXISTS picket_submissions (
           id TEXT PRIMARY KEY,
@@ -1557,7 +1561,7 @@ async function ensureNoDuplicatePicketSchedule(scheduleDate, studentId, excludeI
 
 async function ensureNoDuplicatePicketTask(scheduleDate, taskId, excludeId = null, executor = query) {
   if (!taskId) return;
-  const result = await runQuery(
+  const duplicateCheck = await runQuery(
     executor,
     `
     SELECT id
@@ -1569,7 +1573,29 @@ async function ensureNoDuplicatePicketTask(scheduleDate, taskId, excludeId = nul
     `,
     [scheduleDate, taskId, excludeId]
   );
-  if (result.rowCount > 0) throw createDuplicatePicketTaskError();
+  if (duplicateCheck.rowCount === 0) return;
+
+  const unassignedTasks = await runQuery(
+    executor,
+    `
+    SELECT pt.id
+    FROM picket_tasks pt
+    WHERE pt.deleted_at IS NULL
+      AND pt.active = TRUE
+      AND NOT EXISTS (
+        SELECT 1
+        FROM picket_schedules ps
+        WHERE ps.schedule_date = $1::date
+          AND ps.task_id = pt.id
+          AND ($2::text IS NULL OR ps.id <> $2)
+      )
+    LIMIT 1
+    `,
+    [scheduleDate, excludeId]
+  );
+  if (unassignedTasks.rowCount > 0) {
+    throw createDuplicatePicketTaskError();
+  }
 }
 
 function rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId) {
@@ -1586,14 +1612,6 @@ function rethrowDuplicatePicketScheduleError(error, scheduleDate, studentId) {
   if (isScheduleStudentDuplicate) {
     throw createDuplicatePicketScheduleError(scheduleDate, studentId);
   }
-  const isScheduleTaskDuplicate =
-    error?.code === "23505" &&
-    (
-      constraint === "picket_schedules_schedule_date_task_id_key" ||
-      constraint.includes("schedule_date_task_id") ||
-      detail.includes("(schedule_date, task_id)")
-    );
-  if (isScheduleTaskDuplicate) throw createDuplicatePicketTaskError();
   throw error;
 }
 
@@ -2380,7 +2398,7 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
       .filter((row) => row && !row.task_id && row.has_submission !== true);
     const requiredTaskCount = missingStudentIds.length + tasklessExistingSchedules.length;
 
-    const availableTasks = requiredTaskCount > 0
+    const allActiveTasks = requiredTaskCount > 0
       ? (await runQuery(
           client,
           `
@@ -2388,23 +2406,43 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
           FROM picket_tasks pt
           WHERE pt.deleted_at IS NULL
             AND pt.active = TRUE
-            AND NOT EXISTS (
-              SELECT 1
-              FROM picket_schedules existing
-              WHERE existing.schedule_date = $1::date
-                AND existing.task_id = pt.id
-          )
           ORDER BY pt.id ASC
-          `,
-          [targetDate]
+          `
         )).rows
       : [];
-    if (availableTasks.length < requiredTaskCount) throw createPicketTaskCapacityError();
-    const shuffledTasks = shufflePicketTasks(availableTasks);
+
+    if (requiredTaskCount > 0 && allActiveTasks.length === 0) {
+      throw createPicketTaskCapacityError();
+    }
+
+    const assignedTaskIdsOnDate = new Set(
+      existing.rows
+        .map((row) => row.task_id)
+        .filter(Boolean)
+    );
+    const unassignedTasks = allActiveTasks.filter((pt) => !assignedTaskIdsOnDate.has(pt.id));
+    const shuffledUnassigned = shufflePicketTasks(unassignedTasks);
+
+    const assignedTasks = [];
+    // Priority 1: Ensure all distinct active task types are assigned first
+    for (const task of shuffledUnassigned) {
+      if (assignedTasks.length >= requiredTaskCount) break;
+      assignedTasks.push(task);
+    }
+
+    // Priority 2: If all task types are occupied and more students need tasks,
+    // distribute tasks randomly from the active pool, allowing 2 or more students to share tasks
+    while (assignedTasks.length < requiredTaskCount) {
+      const randomPool = shufflePicketTasks(allActiveTasks);
+      for (const task of randomPool) {
+        if (assignedTasks.length >= requiredTaskCount) break;
+        assignedTasks.push(task);
+      }
+    }
 
     for (let index = 0; index < tasklessExistingSchedules.length; index += 1) {
       const schedule = tasklessExistingSchedules[index];
-      const task = shuffledTasks[index];
+      const task = assignedTasks[index];
       await runQuery(
         client,
         `
@@ -2422,7 +2460,7 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
 
     for (let index = 0; index < missingStudentIds.length; index += 1) {
       const studentId = missingStudentIds[index];
-      const task = shuffledTasks[tasklessExistingSchedules.length + index];
+      const task = assignedTasks[tasklessExistingSchedules.length + index];
       const id = buildId("PKT-SCH");
       const result = await runQuery(
         client,
@@ -3754,6 +3792,7 @@ module.exports = {
   listPicketStudentOptions,
   listPicketTasks,
   materializePicketSchedulesForDate,
+  reconcilePicketAssignmentsForDate,
   mapPicketAssignment: mapAssignment,
   randomizePicketStudentDays,
   replacePicketManagers,

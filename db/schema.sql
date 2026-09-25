@@ -675,8 +675,7 @@ CREATE TABLE IF NOT EXISTS picket_schedules (
   updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(schedule_date, student_id),
-  UNIQUE(schedule_date, task_id)
+  UNIQUE(schedule_date, student_id)
 );
 
 CREATE TABLE IF NOT EXISTS picket_submissions (

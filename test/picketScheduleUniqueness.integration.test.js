@@ -83,13 +83,10 @@ if (!integrationEnabled) {
       SELECT conname
       FROM pg_constraint
       WHERE conrelid = 'picket_schedules'::regclass
-        AND conname IN (
-          'picket_schedules_schedule_date_student_id_key',
-          'picket_schedules_schedule_date_task_id_key'
-        )
+        AND conname = 'picket_schedules_schedule_date_student_id_key'
       `
     );
-    assert.equal(constraintResult.rowCount, 2, "database migration/constraints must be installed before integration tests");
+    assert.equal(constraintResult.rowCount, 1, "student uniqueness constraint must be installed before integration tests");
 
     originalTaskStates = (await pool.query(
       "SELECT id, active FROM picket_tasks WHERE deleted_at IS NULL"
@@ -223,8 +220,22 @@ if (!integrationEnabled) {
         assert.equal(reused.status, 201);
       });
 
-      await t.test("insufficient active task capacity rolls back the whole generate", async () => {
+      await t.test("fewer active tasks than students allows shared tasks while utilizing all task types", async () => {
         await pool.query("UPDATE picket_tasks SET active = FALSE WHERE id = $1", [taskIds[2]]);
+        const response = await api("POST", "/picket/schedules/generate", { date: dates[2] });
+        assert.equal(response.status, 201, JSON.stringify(response.body));
+        const assignments = response.body.assignments;
+        assert.equal(assignments.length, 3);
+        const assignedTaskIds = assignments.map((item) => item.taskId);
+        assert.ok(assignedTaskIds.includes(taskIds[0]));
+        assert.ok(assignedTaskIds.includes(taskIds[1]));
+        assert.equal(new Set(assignedTaskIds).size, 2);
+        await pool.query("UPDATE picket_tasks SET active = TRUE WHERE id = $1", [taskIds[2]]);
+        await pool.query("DELETE FROM picket_schedules WHERE schedule_date = $1::date", [dates[2]]);
+      });
+
+      await t.test("zero active task capacity rolls back the whole generate", async () => {
+        await pool.query("UPDATE picket_tasks SET active = FALSE WHERE id = ANY($1::text[])", [taskIds]);
         const response = await api("POST", "/picket/schedules/generate", { date: dates[2] });
         assert.equal(response.status, 422);
         assert.deepEqual(response.body, {
@@ -236,7 +247,7 @@ if (!integrationEnabled) {
           [dates[2]]
         );
         assert.equal(count.rows[0].total, 0);
-        await pool.query("UPDATE picket_tasks SET active = TRUE WHERE id = $1", [taskIds[2]]);
+        await pool.query("UPDATE picket_tasks SET active = TRUE WHERE id = ANY($1::text[])", [taskIds]);
       });
 
       await t.test("concurrent generate produces one unique schedule set", async () => {
