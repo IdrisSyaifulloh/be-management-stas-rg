@@ -1634,7 +1634,12 @@ router.get(
     const attendanceRules = getAttendanceRules(settings);
     const gpsPolicy = buildGpsPolicy(settings);
     const todayHoliday = findNonWorkingDayForDate(settings, todayIso);
-    const picketToday = await getPicketTodayForStudent(resolvedStudentId, todayIso);
+    let picketToday = { assignment: null, fixedDay: null, fixed_day: null, holiday: null, isHoliday: false, is_holiday: false };
+    try {
+      picketToday = (await getPicketTodayForStudent(resolvedStudentId, todayIso)) || picketToday;
+    } catch (picketError) {
+      console.warn(`[Attendance] Failed to get picket today for student ${resolvedStudentId}:`, picketError.message);
+    }
 
     const { attendanceMap, leaveSet, leaveMap, history, summary } = buildAttendanceHistory({
       startDate: effectiveStartDate,
@@ -1714,7 +1719,7 @@ router.get(
       },
       attendanceRules,
       picketToday,
-      picketAssignment: picketToday.assignment,
+      picketAssignment: picketToday?.assignment || null,
       isHoliday: Boolean(todayHoliday),
       todayHoliday,
       holidays: attendanceRules.holidays,
